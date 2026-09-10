@@ -18,6 +18,7 @@ import (
 	bridgev1 "github.com/orchael/bridgectl/gen/bridge/v1"
 	"github.com/orchael/bridgectl/internal/localserver"
 	"github.com/orchael/bridgectl/pkg/bridgeclient"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -118,6 +119,7 @@ type rejectingTakeoverServer struct {
 	earlyInput    chan string
 	attached      chan *bridgev1.AttachSessionRequest
 	allowAttached chan struct{}
+	eof           bool
 }
 
 func (s *CLISuite) TestCLITakeoverMissingSession() {
@@ -147,6 +149,9 @@ func (s *rejectingTakeoverServer) Health(context.Context, *bridgev1.HealthReques
 }
 
 func (s *rejectingTakeoverServer) AttachSession(req *bridgev1.AttachSessionRequest, stream grpc.ServerStreamingServer[bridgev1.AttachSessionEvent]) error {
+	if s.eof {
+		return nil
+	}
 	s.attached <- req
 	select {
 	case <-s.allowAttached:
@@ -257,4 +262,31 @@ func (s *CLISuite) TestCLITakeoverClaimFailure() {
 		s.T().Fatal("CLI did not exit after rejected claim")
 	}
 	s.Assert().Empty(rpc.earlyInput, "failed claim must not enable terminal forwarding")
+	readable, err := unix.Poll([]unix.PollFd{{Fd: int32(tty.Fd()), Events: unix.POLLIN}}, 100)
+	s.Require().NoError(err)
+	s.Assert().Zero(readable, "failed takeover must discard queued input before returning to the parent shell")
+}
+
+func (s *CLISuite) TestCLITakeoverUnacknowledgedEOF() {
+	if testing.Short() {
+		s.T().Skip("skipping in short mode")
+	}
+	stateDir := s.testStateDir()
+	listener, err := net.Listen("unix", filepath.Join(stateDir, "server.sock"))
+	s.Require().NoError(err)
+	server := grpc.NewServer()
+	bridgev1.RegisterBridgeServiceServer(server, &rejectingTakeoverServer{eof: true})
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+	master, tty, err := pty.Open()
+	s.Require().NoError(err)
+	defer func() { _ = master.Close(); _ = tty.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, cliBinary, "session", "attach", uuid.NewString(), "--take-over")
+	cmd.Stdin = tty
+	output, err := cmd.CombinedOutput()
+	s.Require().Error(err, "unacknowledged attachment must fail: %s", output)
+	s.Require().NoError(ctx.Err())
+	s.Assert().Contains(string(output), "before attachment was acknowledged")
 }

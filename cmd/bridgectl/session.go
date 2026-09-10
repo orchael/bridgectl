@@ -240,6 +240,7 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 
 	fd := int(os.Stdin.Fd())
 	isObserver := role == bridgev1.AttachRole_ATTACH_ROLE_OBSERVER && !takeOver
+	var writerReady atomic.Bool
 	var restore func()
 	if term.IsTerminal(fd) {
 		// When stdin is a TTY, enable raw mode for both writers and observers.
@@ -255,6 +256,13 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 		var restoreOnce sync.Once
 		restore = func() {
 			restoreOnce.Do(func() {
+				if !isObserver && !writerReady.Load() {
+					// No input reader ran during startup. Do not return queued
+					// raw-mode keystrokes to the parent shell after a failure.
+					if err := discardTerminalInput(fd); err != nil {
+						fmt.Fprintf(os.Stderr, "discard terminal input: %v\r\n", err)
+					}
+				}
 				_ = term.Restore(fd, oldState)
 			})
 		}
@@ -291,7 +299,6 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 
 	isWriter := role == bridgev1.AttachRole_ATTACH_ROLE_WRITER || takeOver
 	var detached atomic.Bool
-	var writerReady atomic.Bool
 	var attachmentReady bool
 	var claimErr error
 	var sessionExit string
@@ -420,7 +427,10 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 		fmt.Fprintf(os.Stderr, "\r\n%s\r\n", sessionExit)
 		return nil
 	}
-	if !attachmentReady && err != nil && !isCanceledStreamError(err) {
+	if !attachmentReady && !isCanceledStreamError(err) {
+		if err == nil {
+			return fmt.Errorf("attach: stream ended before attachment was acknowledged")
+		}
 		return fmt.Errorf("attach: %w", err)
 	}
 	if err != nil {
