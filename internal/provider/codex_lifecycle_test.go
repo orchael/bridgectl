@@ -64,8 +64,10 @@ func TestCodexLifecycleNativeAccountWins(t *testing.T) {
 	if envValue(cmd.Env, "CODEX_HOME") != home {
 		t.Fatal("native account did not win")
 	}
-	if envValue(cmd.Env, "CODEX_API_KEY") != "" || envValue(cmd.Env, "OPENAI_API_KEY") != "" {
-		t.Fatal("API-key override remains in account environment")
+	for _, key := range []string{"CODEX_AUTH", "CODEX_API_KEY", "OPENAI_API_KEY"} {
+		if hasEnvKey(cmd.Env, key) {
+			t.Fatalf("credential variable %s remains present in account environment", key)
+		}
 	}
 }
 
@@ -130,6 +132,11 @@ func TestCodexLifecycleAPIKeyFallback(t *testing.T) {
 	}
 	if string(data) != `{"OPENAI_API_KEY":"sk-fallback"}` {
 		t.Fatal("API key was not materialized in native credential file")
+	}
+	for _, key := range []string{"CODEX_AUTH", "CODEX_API_KEY", "OPENAI_API_KEY"} {
+		if hasEnvKey(cmd.Env, key) {
+			t.Fatalf("credential variable %s remains present in API environment", key)
+		}
 	}
 }
 

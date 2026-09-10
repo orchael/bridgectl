@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -82,9 +83,10 @@ func (p *CodexProvider) BuildCommand(ctx context.Context, cfg bridge.SessionConf
 	cmd.Env = setEnvValue(cmd.Env, "CODEX_HOME", auth.home)
 	// Codex exec can prefer CODEX_API_KEY over account login. The resolved file
 	// is the single source of auth for this child, regardless of launch mode.
-	for _, key := range []string{"CODEX_AUTH", "CODEX_API_KEY", "OPENAI_API_KEY"} {
-		cmd.Env = setEnvValue(cmd.Env, key, "")
-	}
+	cmd.Env = slices.DeleteFunc(cmd.Env, func(entry string) bool {
+		key, _, _ := strings.Cut(entry, "=")
+		return key == "CODEX_AUTH" || key == "CODEX_API_KEY" || key == "OPENAI_API_KEY"
+	})
 	return cmd, nil
 }
 

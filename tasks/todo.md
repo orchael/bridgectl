@@ -23,6 +23,11 @@ run failed due to read-only Go cache/VCS stamping; rerunning with approved cache
 access and VCS stamping disabled resolved those environment failures.
 Linux amd64 E2E binary: `/tmp/bridgectl-codex-auth-linux-amd64`.
 
+Credential-environment hardening: strengthened account and API fallback tests
+to assert variables are absent, not merely empty. Both failed before changing
+child preparation to remove all CODEX_AUTH, CODEX_API_KEY, and OPENAI_API_KEY
+entries. This avoids native CLI presence checks overriding the selected file.
+
 Review follow-up: added regressions confirming health rejects a home nested
 under a regular file, while an unwritable missing bootstrap directory fails
 authoritatively in command preparation before process launch. Documented that
