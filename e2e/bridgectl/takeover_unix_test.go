@@ -48,6 +48,7 @@ func (s *CLISuite) TestCLITakeover() {
 	master, tty, err := pty.Open()
 	s.Require().NoError(err)
 	defer func() { _ = master.Close(); _ = tty.Close() }()
+	s.Require().NoError(pty.Setsize(master, &pty.Winsize{Cols: 120, Rows: 40}))
 	outputPath := filepath.Join(s.T().TempDir(), "cli-output")
 	output, err := os.Create(outputPath)
 	s.Require().NoError(err)
@@ -79,6 +80,10 @@ waitForWriter:
 			}
 		}
 	}
+	s.Require().Eventually(func() bool {
+		info, getErr := client.GetSession(ctx, &bridgev1.GetSessionRequest{SessionId: sessionID})
+		return getErr == nil && info.Cols == 120 && info.Rows == 40
+	}, time.Second, 10*time.Millisecond, "takeover must synchronize the current terminal size")
 	_, err = master.Write([]byte("takeover-input-marker\n"))
 	s.Require().NoError(err)
 	s.Require().Eventually(func() bool {
@@ -108,10 +113,11 @@ waitForWriter:
 
 type rejectingTakeoverServer struct {
 	bridgev1.UnimplementedBridgeServiceServer
-	claimStarted chan *bridgev1.ClaimWriterRequest
-	rejectClaim  chan struct{}
-	earlyInput   chan string
-	attached     chan *bridgev1.AttachSessionRequest
+	claimStarted  chan *bridgev1.ClaimWriterRequest
+	rejectClaim   chan struct{}
+	earlyInput    chan string
+	attached      chan *bridgev1.AttachSessionRequest
+	allowAttached chan struct{}
 }
 
 func (s *CLISuite) TestCLITakeoverMissingSession() {
@@ -126,12 +132,14 @@ func (s *CLISuite) TestCLITakeoverMissingSession() {
 	defer func() { _ = master.Close(); _ = tty.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, cliBinary, "session", "attach", uuid.NewString(), "--take-over")
-	cmd.Stdin = tty
-	output, err := cmd.CombinedOutput()
-	s.Require().Error(err, "failed attachment must return a command error: %s", output)
-	s.Require().NoError(ctx.Err(), "CLI must exit without waiting for timeout")
-	s.Assert().Contains(string(output), "session not found")
+	for _, flag := range []string{"--take-over", "--observe"} {
+		cmd := exec.CommandContext(ctx, cliBinary, "session", "attach", uuid.NewString(), flag)
+		cmd.Stdin = tty
+		output, err := cmd.CombinedOutput()
+		s.Require().Error(err, "%s: failed attachment must return a command error: %s", flag, output)
+		s.Require().NoError(ctx.Err(), "CLI must exit without waiting for timeout")
+		s.Assert().Contains(string(output), "session not found")
+	}
 }
 
 func (s *rejectingTakeoverServer) Health(context.Context, *bridgev1.HealthRequest) (*bridgev1.HealthResponse, error) {
@@ -140,6 +148,11 @@ func (s *rejectingTakeoverServer) Health(context.Context, *bridgev1.HealthReques
 
 func (s *rejectingTakeoverServer) AttachSession(req *bridgev1.AttachSessionRequest, stream grpc.ServerStreamingServer[bridgev1.AttachSessionEvent]) error {
 	s.attached <- req
+	select {
+	case <-s.allowAttached:
+	case <-stream.Context().Done():
+		return stream.Context().Err()
+	}
 	if err := stream.Send(&bridgev1.AttachSessionEvent{Type: bridgev1.AttachEventType_ATTACH_EVENT_TYPE_ATTACHED}); err != nil {
 		return err
 	}
@@ -177,10 +190,11 @@ func (s *CLISuite) TestCLITakeoverClaimFailure() {
 	listener, err := net.Listen("unix", filepath.Join(stateDir, "server.sock"))
 	s.Require().NoError(err)
 	rpc := &rejectingTakeoverServer{
-		claimStarted: make(chan *bridgev1.ClaimWriterRequest, 1),
-		rejectClaim:  make(chan struct{}),
-		earlyInput:   make(chan string, 16),
-		attached:     make(chan *bridgev1.AttachSessionRequest, 1),
+		claimStarted:  make(chan *bridgev1.ClaimWriterRequest, 1),
+		rejectClaim:   make(chan struct{}),
+		earlyInput:    make(chan string, 16),
+		attached:      make(chan *bridgev1.AttachSessionRequest, 1),
+		allowAttached: make(chan struct{}),
 	}
 	server := grpc.NewServer()
 	bridgev1.RegisterBridgeServiceServer(server, rpc)
@@ -201,17 +215,26 @@ func (s *CLISuite) TestCLITakeoverClaimFailure() {
 	var waitErr error
 	go func() { waitErr = cmd.Wait(); close(done) }()
 	defer func() { cancel(); <-done }()
+	var attach *bridgev1.AttachSessionRequest
+	select {
+	case attach = <-rpc.attached:
+	case <-done:
+		s.T().Fatalf("CLI exited before attaching: %v\n%s", waitErr, output.String())
+	case <-ctx.Done():
+		s.T().Fatal("CLI never opened attachment stream")
+	}
+	select {
+	case <-rpc.claimStarted:
+		s.T().Fatal("CLI claimed writer before the ATTACHED event")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(rpc.allowAttached)
 	select {
 	case claim := <-rpc.claimStarted:
 		s.Assert().True(claim.Force)
-		select {
-		case attach := <-rpc.attached:
-			s.Assert().Equal(bridgev1.AttachRole_ATTACH_ROLE_OBSERVER, attach.Role)
-			s.Assert().Equal(attach.ClientId, claim.ClientId)
-			s.Assert().Equal(attach.SessionId, claim.SessionId)
-		default:
-			s.T().Fatal("claim was sent before attachment")
-		}
+		s.Assert().Equal(bridgev1.AttachRole_ATTACH_ROLE_OBSERVER, attach.Role)
+		s.Assert().Equal(attach.ClientId, claim.ClientId)
+		s.Assert().Equal(attach.SessionId, claim.SessionId)
 	case <-ctx.Done():
 		s.T().Fatal("CLI never claimed writer")
 	case <-done:

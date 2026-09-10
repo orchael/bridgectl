@@ -170,7 +170,9 @@ Writer transition protocol:
 
 Takeover acceptance criteria:
 - A CLI takeover replaces an existing writer without a spurious permission error, preserves the previous client's observer stream, and can send input to the running provider.
+- Once writer access is ready, the CLI synchronizes the session PTY with the current terminal size, including a resize that occurred while attachment or claiming was pending.
 - Ctrl-] releases the new writer slot and exits cleanly. Failed attachment or writer claims return a command error and must not start forwarding terminal input.
+- Failed observer attachments also return a command error.
 
 ---
 

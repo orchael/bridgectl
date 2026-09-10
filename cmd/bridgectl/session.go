@@ -292,6 +292,7 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 	isWriter := role == bridgev1.AttachRole_ATTACH_ROLE_WRITER || takeOver
 	var detached atomic.Bool
 	var writerReady atomic.Bool
+	var attachmentReady bool
 	var claimErr error
 	var sessionExit string
 
@@ -299,19 +300,22 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	setupSigwinch(sigCh)
 	defer signal.Stop(sigCh)
+	resize := func() {
+		c, r := currentTTYSize()
+		_, _ = client.ResizeSession(ctx, &bridgev1.ResizeSessionRequest{
+			SessionId: sessionID,
+			ClientId:  stream.ClientID(),
+			Cols:      c,
+			Rows:      r,
+		})
+	}
 
 	go func() {
 		handleAttachSignals(ctx, sigCh, isWriter, func() {
 			if !writerReady.Load() {
 				return
 			}
-			c, r := currentTTYSize()
-			_, _ = client.ResizeSession(context.Background(), &bridgev1.ResizeSessionRequest{
-				SessionId: sessionID,
-				ClientId:  stream.ClientID(),
-				Cols:      c,
-				Rows:      r,
-			})
+			resize()
 		}, cancel)
 	}()
 
@@ -361,6 +365,7 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 	err = stream.RecvAll(ctx, func(ev *bridgev1.AttachSessionEvent) error {
 		switch ev.Type {
 		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_ATTACHED:
+			attachmentReady = true
 			// AttachSession only prepares the SDK wrapper; RecvAll opens the
 			// stream. The server must confirm attachment before we claim or write.
 			if isWriter && !writerReady.Load() {
@@ -376,6 +381,7 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 					}
 				}
 				writerReady.Store(true)
+				resize()
 				startWriter()
 			}
 			return nil
@@ -414,7 +420,7 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 		fmt.Fprintf(os.Stderr, "\r\n%s\r\n", sessionExit)
 		return nil
 	}
-	if isWriter && !writerReady.Load() && err != nil && !isCanceledStreamError(err) {
+	if !attachmentReady && err != nil && !isCanceledStreamError(err) {
 		return fmt.Errorf("attach: %w", err)
 	}
 	if err != nil {

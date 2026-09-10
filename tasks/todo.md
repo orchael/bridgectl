@@ -250,3 +250,8 @@ Evidence:
 - `make test-cover-maintained` passed at 78.2% (75% minimum).
 - `pnpm --dir docs build` passed.
 - Rollback scope verified: only CLI behavior changes; server authorization, SDK contracts, and persistent data are unchanged. The reported desktop was not modified.
+
+PR #218 review cycle 1:
+- Scored both Copilot threads 2 (behavior fix with validation): observer attachment errors and terminal resize synchronization.
+- Added assertions that failed before the review fixes, then passed for observer NotFound errors and initial terminal dimensions. Delayed the fake server's ATTACHED event to verify a claim cannot precede acknowledgement.
+- CI's lint tooling install failed before lint ran: goimports@latest requires Go 1.26, while CI uses Go 1.25.7. Pinned goimports to v0.44.0, matching go.mod and supporting Go 1.25.
