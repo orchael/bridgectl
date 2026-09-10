@@ -31,6 +31,7 @@ sequenceDiagram
 | Observer | Yes | No | Dashboards, reviewers, and humans watching progress. |
 
 When an operator attaches with `--take-over`, the existing writer is demoted and all observers receive a writer-change event.
+The CLI waits for the server to confirm its observer attachment before claiming the writer slot, then enables terminal input and resizing after the claim succeeds.
 
 ## Start from Go
 
