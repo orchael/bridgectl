@@ -245,7 +245,7 @@ Scope: CLI sequencing and regression coverage; preserve server permission checks
 Evidence:
 - Before the fix, `go test ./e2e/bridgectl -run 'TestCLISuite/TestCLITakeover$' -count=1` failed with `claim writer: permission denied`.
 - Missing-session regression initially failed because the CLI printed NotFound but exited successfully.
-- `go test ./e2e/bridgectl -run 'TestCLISuite/TestCLITakeover' -race -count=1` passed all three cases after the fix.
+- `go test ./e2e/bridgectl -run 'TestCLISuite/TestCLITakeover' -race -count=1` passed the initial three cases after the fix; the final suite includes four matching tests with EOF and server-cancellation subcases.
 - `make fmt`, `make test`, and `make lint` passed; lint reported zero issues.
 - `make test-cover-maintained` passed at 78.2% (75% minimum).
 - `pnpm --dir docs build` passed.
@@ -261,3 +261,8 @@ PR #218 review cycle 2:
 - Both new assertions failed before the fixes: a poll found queued input after rejected takeover, and unacknowledged EOF exited successfully.
 - Flush pending terminal input before restoring a writer terminal when startup never became ready, and return an attachment error for unacknowledged EOF.
 - After the cycle 2 fixes, all four takeover cases passed with race detection; `make test` and `make lint` passed again.
+
+PR #218 review cycle 3:
+- Server-originated Canceled before ATTACHED: score 2, fixed by checking the local context rather than classifying every Canceled status as a user cancellation; added a failing-then-passing CLI regression.
+- Illumos build tag: score 0, no change. `GOOS=illumos GOARCH=amd64 go list -f '{{.GoFiles}}' ./cmd/bridgectl` selects `terminal_input_sysv.go` because illumos satisfies Solaris build tags.
+- Also addressed review notes by serializing dimension sampling and resize RPCs, discarding unread input on every writer exit regardless of reader startup timing, and clarifying the historical test count.

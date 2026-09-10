@@ -120,6 +120,7 @@ type rejectingTakeoverServer struct {
 	attached      chan *bridgev1.AttachSessionRequest
 	allowAttached chan struct{}
 	eof           bool
+	attachErr     error
 }
 
 func (s *CLISuite) TestCLITakeoverMissingSession() {
@@ -150,7 +151,7 @@ func (s *rejectingTakeoverServer) Health(context.Context, *bridgev1.HealthReques
 
 func (s *rejectingTakeoverServer) AttachSession(req *bridgev1.AttachSessionRequest, stream grpc.ServerStreamingServer[bridgev1.AttachSessionEvent]) error {
 	if s.eof {
-		return nil
+		return s.attachErr
 	}
 	s.attached <- req
 	select {
@@ -267,26 +268,37 @@ func (s *CLISuite) TestCLITakeoverClaimFailure() {
 	s.Assert().Zero(readable, "failed takeover must discard queued input before returning to the parent shell")
 }
 
-func (s *CLISuite) TestCLITakeoverUnacknowledgedEOF() {
+func (s *CLISuite) TestCLITakeoverUnacknowledgedStream() {
 	if testing.Short() {
 		s.T().Skip("skipping in short mode")
 	}
-	stateDir := s.testStateDir()
-	listener, err := net.Listen("unix", filepath.Join(stateDir, "server.sock"))
-	s.Require().NoError(err)
-	server := grpc.NewServer()
-	bridgev1.RegisterBridgeServiceServer(server, &rejectingTakeoverServer{eof: true})
-	go func() { _ = server.Serve(listener) }()
-	defer server.Stop()
-	master, tty, err := pty.Open()
-	s.Require().NoError(err)
-	defer func() { _ = master.Close(); _ = tty.Close() }()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, cliBinary, "session", "attach", uuid.NewString(), "--take-over")
-	cmd.Stdin = tty
-	output, err := cmd.CombinedOutput()
-	s.Require().Error(err, "unacknowledged attachment must fail: %s", output)
-	s.Require().NoError(ctx.Err())
-	s.Assert().Contains(string(output), "before attachment was acknowledged")
+	for _, tc := range []struct {
+		name    string
+		err     error
+		message string
+	}{
+		{"EOF", nil, "before attachment was acknowledged"},
+		{"server canceled", status.Error(codes.Canceled, "server canceled attachment"), "Canceled"},
+	} {
+		s.Run(tc.name, func() {
+			stateDir := s.testStateDir()
+			listener, err := net.Listen("unix", filepath.Join(stateDir, "server.sock"))
+			s.Require().NoError(err)
+			server := grpc.NewServer()
+			bridgev1.RegisterBridgeServiceServer(server, &rejectingTakeoverServer{eof: true, attachErr: tc.err})
+			go func() { _ = server.Serve(listener) }()
+			defer server.Stop()
+			master, tty, err := pty.Open()
+			s.Require().NoError(err)
+			defer func() { _ = master.Close(); _ = tty.Close() }()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, cliBinary, "session", "attach", uuid.NewString(), "--take-over")
+			cmd.Stdin = tty
+			output, err := cmd.CombinedOutput()
+			s.Require().Error(err, "unacknowledged attachment must fail: %s", output)
+			s.Require().NoError(ctx.Err())
+			s.Assert().Contains(string(output), tc.message)
+		})
+	}
 }

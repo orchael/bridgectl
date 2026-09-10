@@ -256,9 +256,9 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 		var restoreOnce sync.Once
 		restore = func() {
 			restoreOnce.Do(func() {
-				if !isObserver && !writerReady.Load() {
-					// No input reader ran during startup. Do not return queued
-					// raw-mode keystrokes to the parent shell after a failure.
+				if !isObserver {
+					// Discard unread keystrokes on every writer exit, including
+					// when the stream ends before its input goroutine starts.
 					if err := discardTerminalInput(fd); err != nil {
 						fmt.Fprintf(os.Stderr, "discard terminal input: %v\r\n", err)
 					}
@@ -307,7 +307,10 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	setupSigwinch(sigCh)
 	defer signal.Stop(sigCh)
+	var resizeMu sync.Mutex
 	resize := func() {
+		resizeMu.Lock()
+		defer resizeMu.Unlock()
 		c, r := currentTTYSize()
 		_, _ = client.ResizeSession(ctx, &bridgev1.ResizeSessionRequest{
 			SessionId: sessionID,
@@ -427,7 +430,7 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 		fmt.Fprintf(os.Stderr, "\r\n%s\r\n", sessionExit)
 		return nil
 	}
-	if !attachmentReady && !isCanceledStreamError(err) {
+	if !attachmentReady && ctx.Err() == nil {
 		if err == nil {
 			return fmt.Errorf("attach: stream ended before attachment was acknowledged")
 		}
