@@ -161,11 +161,16 @@ Human operators can observe and interact with any running session without stoppi
 
 Writer transition protocol:
 1. Human runs `bridgectl session attach --take-over <id>`.
+   The CLI opens an observer stream and waits for the server's `ATTACHED` event before calling `ClaimWriter` with force enabled. Input and resize requests begin only after the claim succeeds; a failed claim is returned as a command error.
 2. Server sends a `WRITER_CLAIMED` event to all observers including the SDK.
 3. Human types, resizes, or reads.
 4. Human presses Ctrl-] or `bridgectl session attach --release <id>`.
 5. Server sends a `WRITER_RELEASED` event to all observers.
 6. SDK may re-claim the writer slot via `ClaimWriter` RPC.
+
+Takeover acceptance criteria:
+- A CLI takeover replaces an existing writer without a spurious permission error, preserves the previous client's observer stream, and can send input to the running provider.
+- Ctrl-] releases the new writer slot and exits cleanly. Failed attachment or writer claims return a command error and must not start forwarding terminal input.
 
 ---
 

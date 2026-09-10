@@ -289,20 +289,10 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 		return fmt.Errorf("attach: %w", err)
 	}
 
-	if takeOver {
-		_, claimErr := client.ClaimWriter(ctx, &bridgev1.ClaimWriterRequest{
-			SessionId: sessionID,
-			ClientId:  clientID,
-			Force:     true,
-		})
-		if claimErr != nil {
-			restore()
-			return fmt.Errorf("claim writer: %w", claimErr)
-		}
-	}
-
 	isWriter := role == bridgev1.AttachRole_ATTACH_ROLE_WRITER || takeOver
 	var detached atomic.Bool
+	var writerReady atomic.Bool
+	var claimErr error
 	var sessionExit string
 
 	sigCh := make(chan os.Signal, 2)
@@ -312,6 +302,9 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 
 	go func() {
 		handleAttachSignals(ctx, sigCh, isWriter, func() {
+			if !writerReady.Load() {
+				return
+			}
 			c, r := currentTTYSize()
 			_, _ = client.ResizeSession(context.Background(), &bridgev1.ResizeSessionRequest{
 				SessionId: sessionID,
@@ -322,7 +315,7 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 		}, cancel)
 	}()
 
-	if isWriter {
+	startWriter := func() {
 		go func() {
 			w := &inputWriter{cfg: inputWriterConfig{
 				Reader:    os.Stdin,
@@ -343,7 +336,8 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 			}}
 			w.Run()
 		}()
-	} else if term.IsTerminal(fd) {
+	}
+	if !isWriter && term.IsTerminal(fd) {
 		// In raw mode ISIG is disabled, so the terminal won't generate
 		// SIGINT for Ctrl+C. Read stdin and handle it manually.
 		go func() {
@@ -366,6 +360,25 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 
 	err = stream.RecvAll(ctx, func(ev *bridgev1.AttachSessionEvent) error {
 		switch ev.Type {
+		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_ATTACHED:
+			// AttachSession only prepares the SDK wrapper; RecvAll opens the
+			// stream. The server must confirm attachment before we claim or write.
+			if isWriter && !writerReady.Load() {
+				if takeOver {
+					_, claimErr = client.ClaimWriter(ctx, &bridgev1.ClaimWriterRequest{
+						SessionId: sessionID,
+						ClientId:  clientID,
+						Force:     true,
+					})
+					if claimErr != nil {
+						claimErr = fmt.Errorf("claim writer: %w", claimErr)
+						return claimErr
+					}
+				}
+				writerReady.Store(true)
+				startWriter()
+			}
+			return nil
 		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_OUTPUT:
 			_, writeErr := os.Stdout.Write(ev.Payload)
 			return writeErr
@@ -388,6 +401,9 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 		}
 	})
 	restore()
+	if claimErr != nil {
+		return claimErr
+	}
 
 	if detached.Load() {
 		fmt.Fprintf(os.Stderr, "\r\nDetached from session %s\r\n", sessionID)
@@ -397,6 +413,9 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 	if sessionExit != "" {
 		fmt.Fprintf(os.Stderr, "\r\n%s\r\n", sessionExit)
 		return nil
+	}
+	if isWriter && !writerReady.Load() && err != nil && !isCanceledStreamError(err) {
+		return fmt.Errorf("attach: %w", err)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\r\nsession ended: %v\r\n", err)

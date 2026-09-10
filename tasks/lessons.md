@@ -1,5 +1,11 @@
 # Lessons
 
+## 2026-09-10 CLI Takeover Stream Ordering
+- Incident/bug: `session attach --take-over` claimed the writer slot before opening its observer stream, returning `permission denied`.
+- Root cause pattern: SDK `AttachSession` constructs a lazy wrapper; `RecvAll` performs the actual RPC. Existing handoff tests attached through the SDK and never exercised CLI ordering.
+- Preventative rule: Gate dependent session RPCs on the server's `ATTACHED` event and test operator workflows through the real CLI with a PTY.
+- Validation added: CLI takeover regression reproduces the original error, then verifies writer transfer, input, observer continuity, and detach; rejected-claim coverage checks error propagation and input/resize gating.
+
 ## 2026-03-30 PTY Transport Test Execution
 - Incident/bug: A provider unit test that executed a temp script failed inside the sandbox with `operation not permitted`.
 - Root cause pattern: Tests that shell out in this environment can fail for sandbox reasons unrelated to application logic.

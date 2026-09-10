@@ -228,3 +228,25 @@ Evidence:
 - `docker run --rm bridgectl:issue-180 id -un` -> passed; command args executed as `bridge` after initialization.
 - Detached default-start smoke with `docker run -d --name issue180-default bridgectl:issue-180` stayed running and logged `secure (mTLS+JWT on [::]:9445)`.
 - `env-secrets aws -s /bridgectl/e2e -- make test-e2e-unprotected` -> passed. Protected pass verified Claude and Codex did not write `.git` markers; unprotected pass verified Claude and Codex wrote provider-specific `.git` markers through SDK-started sessions.
+
+# Session takeover attachment order (2026-09-10)
+
+Mode: Autonomous; localized CLI ordering fix authorized by the user. Governing requirement: PRD §6.2 Human Interjection.
+
+Plan:
+- [x] Reproduce the actual CLI takeover failure with a PTY and isolated echo session.
+- [x] Wait for ATTACHED before claiming and enable input/resize only after success.
+- [x] Verify takeover, old-writer observation, input, detach, and failure behavior.
+- [x] Run formatting, full race tests, lint, and the maintained coverage gate.
+PR workflow: open a PR, request Copilot, address feedback, and record final review/CI evidence in the PR.
+
+Scope: CLI sequencing and regression coverage; preserve server permission checks and SDK contracts. Risk: starting input too early or losing claim errors in stream handling. Rollback: revert the CLI change; no deployment or data migration is involved.
+
+Evidence:
+- Before the fix, `go test ./e2e/bridgectl -run 'TestCLISuite/TestCLITakeover$' -count=1` failed with `claim writer: permission denied`.
+- Missing-session regression initially failed because the CLI printed NotFound but exited successfully.
+- `go test ./e2e/bridgectl -run 'TestCLISuite/TestCLITakeover' -race -count=1` passed all three cases after the fix.
+- `make fmt`, `make test`, and `make lint` passed; lint reported zero issues.
+- `make test-cover-maintained` passed at 78.2% (75% minimum).
+- `pnpm --dir docs build` passed.
+- Rollback scope verified: only CLI behavior changes; server authorization, SDK contracts, and persistent data are unchanged. The reported desktop was not modified.
