@@ -114,12 +114,16 @@ corepack pnpm install --frozen-lockfile
 echo "==> Verifying installed CLI versions"
 ./node_modules/.bin/claude --version
 ./node_modules/.bin/codex --version || true
-./node_modules/.bin/gemini --version || true
 ./node_modules/.bin/opencode --version || true
+if command -v agy >/dev/null 2>&1; then
+  agy --version || true
+else
+  echo "  agy (Antigravity CLI) not found on PATH — install: curl -fsSL https://antigravity.google/cli/install.sh | bash"
+fi
 
 echo
 echo "==> Installed local agent binaries:"
 echo "  Claude:   $PROJECT_DIR/node_modules/.bin/claude"
 echo "  Codex:    $PROJECT_DIR/node_modules/.bin/codex"
-echo "  Gemini:   $PROJECT_DIR/node_modules/.bin/gemini"
 echo "  OpenCode: $PROJECT_DIR/node_modules/.bin/opencode"
+echo "  Gemini:   agy (native binary — install via https://antigravity.google/cli/install.sh)"

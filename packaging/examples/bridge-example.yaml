@@ -108,14 +108,15 @@ providers:
 #     startup_timeout: "45s"
 #     startup_probe: "output"
 
-# Uncomment to enable Gemini CLI (requires GOOGLE_API_KEY in agents.env):
+# Uncomment to enable Antigravity CLI (agy) for Gemini.
+# Auth uses OAuth2 credentials at ~/.gemini/oauth_creds.json (no API key needed).
+# Install agy: curl -fsSL https://antigravity.google/cli/install.sh | bash
 #
 #   gemini:
-#     binary: "/usr/bin/node"
-#     args: ["./node_modules/@google/gemini-cli/dist/index.js"]
+#     binary: "agy"
+#     args: []
 #     startup_timeout: "60s"
 #     startup_probe: "output"
-#     required_env: ["GOOGLE_API_KEY"]
 
 allowed_paths:
   - "/home"

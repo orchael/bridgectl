@@ -57,11 +57,10 @@ providers:
     validate_startup: false
     prompt_pattern: "(?m)(>\\s*$|›)"
   gemini:
-    binary: "./node_modules/.bin/gemini"
-    args: ["-m", "gemini-2.5-flash"]
+    binary: "agy"
+    args: []
     startup_timeout: "60s"
     startup_probe: "output"
-    required_env: ["GEMINI_API_KEY"]
     validate_startup: false
     prompt_pattern: ">"
     strip_ansi: true

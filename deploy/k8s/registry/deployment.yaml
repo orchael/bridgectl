@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bridge-key-registry
+  namespace: bridge-system
+  labels:
+    app: bridge-key-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bridge-key-registry
+  template:
+    metadata:
+      labels:
+        app: bridge-key-registry
+    spec:
+      serviceAccountName: bridge-key-registry
+      containers:
+        - name: registry
+          image: ghcr.io/orchael/bridge-key-registry:latest
+          args:
+            - "--config=/etc/registry/registry.yaml"
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: https
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            tcpSocket:
+              port: https
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/registry
+              readOnly: true
+            - name: tls
+              mountPath: /app/certs
+              readOnly: true
+            - name: data
+              mountPath: /data/registry/keys
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: config
+          configMap:
+            name: bridge-key-registry-config
+        - name: tls
+          secret:
+            secretName: bridge-key-registry-tls
+        - name: data
+          emptyDir: {}

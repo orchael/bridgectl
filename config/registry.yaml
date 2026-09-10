@@ -1,0 +1,19 @@
+listen: ":8443"
+
+tls:
+  ca_bundle: "/app/certs/ca-bundle.crt"
+  cert: "/app/certs/registry.crt"
+  key: "/app/certs/registry.key"
+
+storage:
+  type: "file"
+  base_dir: "/data/registry/keys"
+
+servers:
+  - id: "bridge-prod"
+    allowed_issuers:
+      - "bridge"
+  - id: "bridge-dev"
+    allowed_issuers:
+      - "bridge"
+      - "bridge-dev"

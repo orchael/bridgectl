@@ -65,7 +65,7 @@ if [ "$1" != "ci" ]; then
   exit 1
 fi
 mkdir -p node_modules/.bin
-for cli in claude codex opencode gemini; do
+for cli in claude codex opencode; do
   cat >"node_modules/.bin/$cli" <<EOF_CLI
 #!/bin/sh
 echo "$cli smoke-version"

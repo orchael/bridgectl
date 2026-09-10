@@ -217,9 +217,10 @@ sessions:
 }
 
 func TestLoadFeatureFlags(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "bridge.yaml")
-	content := `
+	t.Run("provider_fallbacks true", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "bridge.yaml")
+		content := `
 server:
   listen: "127.0.0.1:9445"
 auth:
@@ -237,17 +238,47 @@ sessions:
   stop_grace_period: "10s"
   subscriber_ttl: "30m"
 `
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if !cfg.FeatureFlags.ProviderFallbacks {
-		t.Fatal("expected provider_fallbacks to be true")
-	}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.FeatureFlags.ProviderFallbacks {
+			t.Fatal("expected provider_fallbacks to be true")
+		}
+	})
+
+	t.Run("provider_fallbacks defaults to false", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "bridge.yaml")
+		content := `
+server:
+  listen: "127.0.0.1:9445"
+auth:
+  jwt_max_ttl: "5m"
+providers:
+  primary:
+    binary: "cat"
+sessions:
+  idle_timeout: "30m"
+  stop_grace_period: "10s"
+  subscriber_ttl: "30m"
+`
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.FeatureFlags.ProviderFallbacks {
+			t.Fatal("expected provider_fallbacks to default to false")
+		}
+	})
 }
 
 func TestLoadRepoSetupDefaultsAndValidation(t *testing.T) {
@@ -1014,6 +1045,105 @@ auth:
 	}
 	if !strings.Contains(err.Error(), "security.certificates.provider") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParsePortRange(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantStart int
+		wantEnd   int
+		wantErr   string
+	}{
+		{
+			name:      "valid range",
+			input:     "4100-4199",
+			wantStart: 4100,
+			wantEnd:   4200,
+		},
+		{
+			name:      "single port",
+			input:     "8080-8080",
+			wantStart: 8080,
+			wantEnd:   8081,
+		},
+		{
+			name:    "missing separator",
+			input:   "4100",
+			wantErr: "'start-end' format",
+		},
+		{
+			name:    "non-numeric start",
+			input:   "abc-4200",
+			wantErr: "invalid port range start",
+		},
+		{
+			name:    "non-numeric end",
+			input:   "4100-xyz",
+			wantErr: "invalid port range end",
+		},
+		{
+			name:    "start greater than end",
+			input:   "5000-4000",
+			wantErr: "start must be <= end",
+		},
+		{
+			name:    "zero start",
+			input:   "0-100",
+			wantErr: "start must be <= end and both > 0",
+		},
+		{
+			name:    "negative start",
+			input:   "-1-100",
+			wantErr: "invalid port range start",
+		},
+		{
+			name:    "exceeds max port start",
+			input:   "70000-70010",
+			wantErr: "must be <= 65535",
+		},
+		{
+			name:    "exceeds max port end",
+			input:   "4100-70000",
+			wantErr: "must be <= 65535",
+		},
+		{
+			name:      "max valid port",
+			input:     "65534-65535",
+			wantStart: 65534,
+			wantEnd:   65536,
+		},
+		{
+			name:      "with whitespace around numbers",
+			input:     " 4100 - 4199 ",
+			wantStart: 4100,
+			wantEnd:   4200,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			start, end, err := ParsePortRange(tc.input)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("ParsePortRange(%q) expected error containing %q, got nil", tc.input, tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("ParsePortRange(%q) error = %v, want %q", tc.input, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParsePortRange(%q) unexpected error: %v", tc.input, err)
+			}
+			if start != tc.wantStart {
+				t.Errorf("ParsePortRange(%q) start = %d, want %d", tc.input, start, tc.wantStart)
+			}
+			if end != tc.wantEnd {
+				t.Errorf("ParsePortRange(%q) end = %d, want %d", tc.input, end, tc.wantEnd)
+			}
+		})
 	}
 }
 

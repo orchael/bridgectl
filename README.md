@@ -62,7 +62,6 @@ $EDITOR .env
 cat > /tmp/bridgectl.secrets.env <<'EOF'
 CLAUDE_CODE_OAUTH_TOKEN=
 OPENAI_API_KEY=
-GEMINI_API_KEY=
 EOF
 $EDITOR /tmp/bridgectl.secrets.env
 env-secrets aws secret upsert \
@@ -327,12 +326,12 @@ Full documentation source: [docs/docs/intro.md](docs/docs/intro.md)
 
 ## Providers
 
-| Provider | Binary | Required env |
-|----------|--------|--------------|
+| Provider | Binary | Required auth |
+|----------|--------|---------------|
 | `claude` | `./node_modules/.bin/claude` | `CLAUDE_CODE_OAUTH_TOKEN` |
 | `opencode` | `./node_modules/.bin/opencode` | `OPENAI_API_KEY` |
 | `codex` | `./node_modules/.bin/codex` | Existing account, `CODEX_AUTH`, or API key ([precedence](docs/docs/reference/configuration.md#codex-authentication)) |
-| `gemini` | `./node_modules/.bin/gemini` | `GEMINI_API_KEY` |
+| `gemini` | `agy` | OAuth2 credentials (`~/.gemini/oauth_creds.json`) |
 
 Providers are configured in `config/bridge-dev.yaml`. See [docs/docs/reference/configuration.md](docs/docs/reference/configuration.md) for configuration reference.
 

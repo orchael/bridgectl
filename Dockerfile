@@ -56,8 +56,13 @@ RUN ARCH=$(dpkg --print-architecture) && \
     rm /tmp/step-cli.deb
 
 RUN useradd -m -s /bin/bash bridge && \
-    mkdir -p /home/bridge/.gemini && \
-    chown -R bridge:bridge /home/bridge/.gemini
+    mkdir -p /home/bridge/.gemini /home/bridge/.local/bin && \
+    chown -R bridge:bridge /home/bridge/.gemini /home/bridge/.local/bin
+
+# Install Antigravity CLI (agy) — replaces the retired @google/gemini-cli npm package.
+# Auth uses OAuth2 credentials mounted at ~/.gemini/oauth_creds.json.
+RUN curl -fsSL https://antigravity.google/cli/install.sh | HOME=/home/bridge bash && \
+    chown bridge:bridge /home/bridge/.local/bin/agy
 
 COPY --from=build /out/bridgectl /usr/local/bin/bridgectl
 COPY --from=build /out/bridge-ca /usr/local/bin/bridge-ca
@@ -68,11 +73,7 @@ RUN pnpm install --frozen-lockfile --prod && pnpm store prune && \
     ln -sf /app/node_modules/.bin/codex /usr/local/bin/codex && \
     ln -sf /app/node_modules/.bin/claude /usr/local/bin/claude && \
     ln -sf /app/node_modules/.bin/opencode /usr/local/bin/opencode && \
-    ln -sf /app/node_modules/.bin/gemini /usr/local/bin/gemini && \
-    (sed -i "s|'  Type your message or @path/to/file'|' '|g" \
-        /app/node_modules/@google/gemini-cli/dist/src/ui/components/Composer.js \
-        /app/node_modules/@google/gemini-cli/dist/src/ui/components/InputPrompt.js \
-    || true)
+    ln -sf /home/bridge/.local/bin/agy /usr/local/bin/agy
 COPY config/bridge.yaml /app/config/bridge.yaml
 COPY config/bridge-docker.yaml /app/config/bridge-docker.yaml
 COPY config/bridge-docker-stepca.yaml /app/config/bridge-docker-stepca.yaml

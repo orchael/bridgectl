@@ -11,7 +11,6 @@ services:
       BRIDGE_CLIENT_CN: e2e-client
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     volumes:
       - certs:/app/certs
       - repos:/tmp/bridgectl
@@ -33,7 +32,6 @@ services:
       E2E_UNPROTECTED_EXPECT: ${E2E_UNPROTECTED_EXPECT:-}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     depends_on:
       bridge:
         condition: service_healthy

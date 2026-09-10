@@ -227,12 +227,12 @@ The web UI has a **Remote host** field in the header. Enter a hostname (e.g. `ma
 
 ## Provider Notes
 
-| Provider | Required secret |
+| Provider | Required auth |
 |---|---|
 | `claude` | `CLAUDE_CODE_OAUTH_TOKEN` |
 | `opencode` | depends on opencode config |
 | `codex` | `OPENAI_API_KEY` |
-| `gemini` | `GEMINI_API_KEY` |
+| `gemini` | OAuth2 credentials (`~/.gemini/oauth_creds.json`) — install `agy` via `curl -fsSL https://antigravity.google/cli/install.sh \| bash` |
 
 Set secrets in your `.env` file or via `env-secrets`:
 

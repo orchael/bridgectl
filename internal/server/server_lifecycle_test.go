@@ -298,6 +298,43 @@ func TestBridgeServerStartSessionUsesConfiguredFallbacks(t *testing.T) {
 	}
 }
 
+// TestBridgeServerStartSessionNoFallbackWhenDisabled verifies that a failing
+// primary provider is NOT rescued by a fallback when providerFallbacks is nil
+// (i.e. the feature_flags.provider_fallbacks flag is false).
+func TestBridgeServerStartSessionNoFallbackWhenDisabled(t *testing.T) {
+	registry := bridge.NewRegistry()
+	if err := registry.Register(&serverTestProvider{id: "primary", healthErr: context.DeadlineExceeded}); err != nil {
+		t.Fatalf("Register primary: %v", err)
+	}
+	if err := registry.Register(&serverTestProvider{id: "secondary", version: "1"}); err != nil {
+		t.Fatalf("Register secondary: %v", err)
+	}
+
+	supervisor := bridge.NewSupervisor(registry, bridge.DefaultPolicy(), 1024, time.Minute)
+	defer supervisor.Close()
+
+	// providerFallbacks is nil — simulating feature flag disabled.
+	s := New(supervisor, registry, nil, RateLimitConfig{
+		GlobalRPS:                  10,
+		GlobalBurst:                10,
+		StartSessionPerClientRPS:   10,
+		StartSessionPerClientBurst: 10,
+		SendInputPerSessionRPS:     10,
+		SendInputPerSessionBurst:   10,
+	}, "test-instance", nil, nil, "")
+
+	ctx := auth.ContextWithClaims(context.Background(), &auth.BridgeClaims{ProjectID: "project-a"})
+	_, err := s.StartSession(ctx, &bridgev1.StartSessionRequest{
+		ProjectId: "project-a",
+		SessionId: uuid.NewString(),
+		RepoPath:  t.TempDir(),
+		Provider:  "primary",
+	})
+	if err == nil {
+		t.Fatal("expected StartSession to fail when primary is down and fallbacks are disabled")
+	}
+}
+
 func TestAttachSessionSendsExitEvent(t *testing.T) {
 	registry := bridge.NewRegistry()
 	// The default (non-cat) serverTestProvider runs trueBin which exits

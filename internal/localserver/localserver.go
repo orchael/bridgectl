@@ -82,6 +82,10 @@ type Server struct {
 	mu         sync.Mutex
 	stopped    bool
 
+	// providerFallbacks is the resolved fallback map passed to the bridge
+	// server. Nil when the feature flag is disabled.
+	providerFallbacks map[string][]string
+
 	// Certificate renewal (secure mode only).
 	renewCancel              context.CancelFunc               // cancels the renewal goroutine
 	serverSANs               []string                         // SANs for cert re-issuance
@@ -226,7 +230,15 @@ type Config struct {
 
 	// ProviderFallbacks maps each provider ID to an ordered list of
 	// fallback provider IDs to try when the primary is unavailable.
+	// Fallbacks are only used when ProviderFallbacksEnabled is true or
+	// when the config file sets feature_flags.provider_fallbacks: true.
 	ProviderFallbacks map[string][]string
+
+	// ProviderFallbacksEnabled gates whether provider fallback logic is
+	// active. When false (the default), fallback lists are ignored even if
+	// configured. Set by feature_flags.provider_fallbacks in the config
+	// file or programmatically for tests.
+	ProviderFallbacksEnabled bool
 
 	// RedactPatterns are compiled into a Redactor that scrubs sensitive
 	// values from log output.
@@ -311,6 +323,7 @@ func Start(cfg Config) (*Server, error) {
 	// its zero value.
 	var configProviderDefs map[string]config.ProviderConfig
 	var providerRoot string
+	providerFallbacksEnabled := cfg.ProviderFallbacksEnabled
 	repoSetupEnabled := true
 	repoSetupConfigPath := ".bridgectl.yaml"
 	repoSetupDefaultTimeout := 2 * time.Minute
@@ -331,6 +344,7 @@ func Start(cfg Config) (*Server, error) {
 				configProviderDefs = fileCfg.Providers
 			}
 			providerRoot = fileCfg.Runtime.ProviderRoot
+			providerFallbacksEnabled = providerFallbacksEnabled || fileCfg.FeatureFlags.ProviderFallbacks
 			repoSetupEnabled = fileCfg.RepoSetup.IsEnabled()
 			repoSetupConfigPath = fileCfg.RepoSetup.ConfigPath
 			repoSetupDefaultTimeout = config.ParseDuration(fileCfg.RepoSetup.DefaultTimeout, repoSetupDefaultTimeout)
@@ -526,28 +540,59 @@ func Start(cfg Config) (*Server, error) {
 			ProviderRoot:   providerRoot,
 		}
 		var p bridge.Provider
-		if id == "codex" {
+		switch {
+		case pc.Transport == "opencode_server":
+			osCfg := provider.OpenCodeServerConfig{
+				ProviderID:     id,
+				Binary:         pc.Binary,
+				DefaultArgs:    pc.Args,
+				StartupTimeout: timeout,
+				StopGrace:      10 * time.Second,
+				RequiredEnv:    pc.RequiredEnv,
+				Hostname:       pc.Hostname,
+				ProviderRoot:   providerRoot,
+			}
+			if pc.PortRange != "" {
+				start, end, parseErr := config.ParsePortRange(pc.PortRange)
+				if parseErr != nil {
+					logger.Warn("skip config provider: invalid port_range", "provider", id, "error", parseErr)
+					continue
+				}
+				osCfg.PortRangeStart = start
+				osCfg.PortRangeEnd = end
+			}
+			p = provider.NewOpenCodeServerProvider(osCfg)
+		case id == "codex":
 			p = provider.NewCodexProvider(sc)
-		} else {
+		default:
 			p = provider.NewStdioProvider(sc)
 		}
 		if err := registry.Register(p); err != nil {
 			logger.Warn("skip config provider", "provider", id, "error", err)
 			continue
 		}
-		logger.Info("registered config provider", "provider", id, "binary", pc.Binary)
+		logger.Info("registered config provider", "provider", id, "binary", pc.Binary, "transport", pc.Transport)
 	}
 
-	// Build fallbacks map from config providers (merged with any set on cfg).
-	if cfg.ProviderFallbacks == nil && len(configProviderDefs) > 0 {
-		cfg.ProviderFallbacks = make(map[string][]string)
-	}
-	for id, pc := range configProviderDefs {
-		if len(pc.Fallbacks) > 0 {
-			if _, already := cfg.ProviderFallbacks[id]; !already {
-				cfg.ProviderFallbacks[id] = pc.Fallbacks
+	// Build fallbacks map from config providers (merged with any set on cfg)
+	// only when the provider_fallbacks feature flag is enabled.
+	if providerFallbacksEnabled {
+		logger.Info("provider fallbacks enabled")
+		if cfg.ProviderFallbacks == nil && len(configProviderDefs) > 0 {
+			cfg.ProviderFallbacks = make(map[string][]string)
+		}
+		for id, pc := range configProviderDefs {
+			if len(pc.Fallbacks) > 0 {
+				if _, already := cfg.ProviderFallbacks[id]; !already {
+					cfg.ProviderFallbacks[id] = pc.Fallbacks
+					logger.Info("registered provider fallbacks", "provider", id, "fallbacks", pc.Fallbacks)
+				}
 			}
 		}
+	} else {
+		// Feature flag disabled: clear any fallbacks so the server does not
+		// attempt provider failover.
+		cfg.ProviderFallbacks = nil
 	}
 
 	// Auto-detect additional providers not already registered via config.
@@ -817,13 +862,14 @@ func Start(cfg Config) (*Server, error) {
 	logger.Info("server starting", "mode", mode, "addr", listenAddr, "pid", os.Getpid())
 
 	s := &Server{
-		grpcServer: grpcServer,
-		supervisor: sup,
-		store:      store,
-		registry:   registry,
-		listener:   ln,
-		logger:     logger,
-		stateDir:   stateDir,
+		grpcServer:        grpcServer,
+		supervisor:        sup,
+		store:             store,
+		registry:          registry,
+		listener:          ln,
+		logger:            logger,
+		stateDir:          stateDir,
+		providerFallbacks: providerFallbacks,
 	}
 
 	// Construct a CertificateProvider from the security config when the
@@ -1491,7 +1537,7 @@ func knownProviders() []providerDef {
 		},
 		{
 			ID:             "gemini",
-			Binary:         "gemini",
+			Binary:         "agy",
 			Args:           nil,
 			StartupTimeout: 60 * time.Second,
 			StartupProbe:   "prompt",

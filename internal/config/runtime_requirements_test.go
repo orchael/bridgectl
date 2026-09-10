@@ -32,13 +32,13 @@ func TestRequiresNodeRuntime(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "absolute node path with js arg",
+			name: "native go binary (agy)",
 			cfg: &Config{
 				Providers: map[string]ProviderConfig{
-					"gemini": {Binary: "/usr/bin/node", Args: []string{"/opt/bridgectl/node_modules/@google/gemini-cli/dist/index.js"}},
+					"gemini": {Binary: "agy"},
 				},
 			},
-			want: true,
+			want: false,
 		},
 		{
 			name: "non-node native binary",

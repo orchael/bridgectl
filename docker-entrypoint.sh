@@ -22,7 +22,12 @@ exec_as_bridge() {
 mkdir -p "$CERT_DIR" "$RUNTIME_CERT_DIR"
 chown bridge:bridge "$CERT_DIR"
 mkdir -p /home/bridge/.gemini /home/bridge/.config
-chown -R bridge:bridge /home/bridge
+# Use non-recursive chown on /home/bridge itself, then chown subdirectories
+# individually.  Mounted files (e.g. oauth_creds.json) may be read-only
+# bind-mounts, so a blanket `chown -R` would fail on them.
+chown bridge:bridge /home/bridge
+chown bridge:bridge /home/bridge/.gemini 2>/dev/null || true
+chown bridge:bridge /home/bridge/.config 2>/dev/null || true
 
 # Mirror what systemd RuntimeDirectory=bridge does: create and own
 # the runtime dir so the bridge process can write the system addr file.
@@ -188,18 +193,17 @@ settings.skipDangerousModePermissionPrompt = true;
 fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 EOF'
 
-echo "==> Seeding Gemini onboarding state..."
+echo "==> Seeding Antigravity CLI (agy) onboarding state..."
 su -m -s /bin/bash bridge -c 'cd /app && export HOME=/home/bridge && node <<'\''EOF'\''
 const fs = require("fs");
 const path = require("path");
 
 const geminiDir = path.join(process.env.HOME, ".gemini");
-const settingsPath = path.join(geminiDir, "settings.json");
+const agySettingsDir = path.join(geminiDir, "antigravity-cli");
+const settingsPath = path.join(agySettingsDir, "settings.json");
 const trustedFoldersPath = path.join(geminiDir, "trustedFolders.json");
-const projectsPath = path.join(geminiDir, "projects.json");
-const statePath = path.join(geminiDir, "state.json");
 
-fs.mkdirSync(geminiDir, { recursive: true });
+fs.mkdirSync(agySettingsDir, { recursive: true });
 
 let settings = {};
 try {
@@ -208,11 +212,7 @@ try {
   settings = {};
 }
 
-settings.security = settings.security || {};
-settings.security.auth = settings.security.auth || {};
-settings.security.auth.selectedType = "gemini-api-key";
-
-// Disable auto-update notifications so Gemini does not try to update during e2e tests
+// Disable auto-update notifications so agy does not try to update during e2e tests
 settings.general = settings.general || {};
 settings.general.enableAutoUpdateNotification = false;
 settings.general.autoUpdate = false;
@@ -229,29 +229,6 @@ try {
 trustedFolders["/tmp/bridgectl"] = "TRUST_FOLDER";
 
 fs.writeFileSync(trustedFoldersPath, JSON.stringify(trustedFolders, null, 2) + "\n");
-
-let projects = {};
-try {
-  projects = JSON.parse(fs.readFileSync(projectsPath, "utf8"));
-} catch (_) {
-  projects = {};
-}
-
-projects.projects = projects.projects || {};
-projects.projects["/app"] = projects.projects["/app"] || "app";
-
-fs.writeFileSync(projectsPath, JSON.stringify(projects, null, 2) + "\n");
-
-let state = {};
-try {
-  state = JSON.parse(fs.readFileSync(statePath, "utf8"));
-} catch (_) {
-  state = {};
-}
-
-state.tipsShown = state.tipsShown || 1;
-
-fs.writeFileSync(statePath, JSON.stringify(state, null, 2) + "\n");
 EOF'
 
 echo "==> Seeding Codex onboarding state..."

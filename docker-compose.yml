@@ -10,13 +10,13 @@ services:
       BRIDGE_CLIENT_CN: dev-client
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
-      GEMINI_API_KEY: ${GEMINI_API_KEY}
     ports:
       - "9445:9445"
     volumes:
       - ./certs:/app/certs
       - ./config/bridge-docker.yaml:/app/config/bridge-docker.yaml:ro
       - ${HOME}/repos:/repos
+      - ${HOME}/.gemini/oauth_creds.json:/home/bridge/.gemini/oauth_creds.json:ro
     healthcheck:
       test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/9445'"]
       interval: 3s

@@ -67,12 +67,11 @@ providers:
     startup_probe: "output"
     prompt_pattern: "(?m)(>\\s*$|›)"
   gemini:
-    binary: "node"
-    args: ["./node_modules/@google/gemini-cli/bundle/gemini.js"]
+    binary: "agy"
+    args: []
     startup_timeout: "60s"
     validate_startup: false
     startup_probe: "output"
-    required_env: ["GEMINI_API_KEY"]
     prompt_pattern: "^\\s*>\\s*$"
 
 allowed_paths:

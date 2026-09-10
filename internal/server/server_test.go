@@ -219,6 +219,29 @@ func TestBridgeHelpersAndProviderResponses(t *testing.T) {
 	if chunk.GetSeq() != 7 || !chunk.GetReplay() {
 		t.Fatalf("chunkToProto=%+v", chunk)
 	}
+
+	// ChunkTypeThinking → ATTACH_EVENT_TYPE_THINKING with thinking_text
+	thinkChunk := chunkToProto("session-a", bridge.OutputChunk{
+		Seq:       8,
+		Timestamp: time.Unix(40, 0),
+		Payload:   []byte("deep thought"),
+		Type:      bridge.ChunkTypeThinking,
+	}, false)
+	if thinkChunk.GetType() != bridgev1.AttachEventType_ATTACH_EVENT_TYPE_THINKING {
+		t.Fatalf("expected THINKING event type, got %v", thinkChunk.GetType())
+	}
+	if thinkChunk.GetThinkingText() != "deep thought" {
+		t.Fatalf("expected thinking_text='deep thought', got %q", thinkChunk.GetThinkingText())
+	}
+	if len(thinkChunk.GetPayload()) != 0 {
+		t.Fatalf("expected empty payload for THINKING event, got %v", thinkChunk.GetPayload())
+	}
+	if thinkChunk.GetSeq() != 8 {
+		t.Fatalf("expected seq=8, got %d", thinkChunk.GetSeq())
+	}
+	if thinkChunk.GetReplay() {
+		t.Fatalf("expected replay=false for THINKING event")
+	}
 }
 
 func TestMapBridgeErrorAndState(t *testing.T) {

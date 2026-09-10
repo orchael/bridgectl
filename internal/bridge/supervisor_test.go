@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
@@ -813,6 +815,26 @@ func (p *streamJSONTestProvider) BuildCommand(ctx context.Context, cfg SessionCo
 	return cmd, nil
 }
 
+// streamJSONGatedProvider wraps streamJSONTestProvider but keeps the
+// process alive until a signal file appears. This prevents the provider
+// from exiting before the test has called Attach.
+type streamJSONGatedProvider struct {
+	streamJSONTestProvider
+	signalPath string // the process waits for this file to appear before exiting
+}
+
+func (p *streamJSONGatedProvider) BuildCommand(ctx context.Context, cfg SessionConfig) (*exec.Cmd, error) {
+	script := ""
+	for _, line := range p.jsonLines {
+		script += "printf '%s\\n' '" + line + "';"
+	}
+	// After printing lines, poll for the signal file every 10ms up to 10s.
+	script += fmt.Sprintf("i=0; while [ ! -f '%s' ] && [ $i -lt 1000 ]; do sleep 0.01; i=$((i+1)); done;", p.signalPath)
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script)
+	cmd.Dir = cfg.RepoPath
+	return cmd, nil
+}
+
 func TestReadLoopStreamJSONParsing(t *testing.T) {
 	sup := NewSupervisor(NewRegistry(), DefaultPolicy(), 64*1024, time.Minute)
 	defer sup.Close()
@@ -1024,6 +1046,133 @@ drainLoop:
 	}
 	if !sawThinking {
 		t.Errorf("expected thinking chunk with 'thinking', got %d chunks", len(collected))
+	}
+}
+
+// TestStreamJSONThinkingEventsReplay verifies that THINKING events emitted by a
+// stream-JSON provider are properly buffered and replayed to a client that
+// attaches after the events have been emitted. (Issue #1, issue #153)
+func TestStreamJSONThinkingEventsReplay(t *testing.T) {
+	jsonLines := []string{
+		`{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"reasoning step 1"}}`,
+		`{"type":"content_block_delta","delta":{"type":"text_delta","text":"final answer"}}`,
+		`{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"reasoning step 2"}}`,
+	}
+
+	// Use a signal file so the provider waits after printing its lines,
+	// giving the test time to Attach before the session exits. Without
+	// this synchronisation the provider can finish before Attach registers
+	// the observer, which causes Detach to return ErrClientMismatch.
+	signalFile := filepath.Join(t.TempDir(), "done")
+	p := &streamJSONGatedProvider{
+		streamJSONTestProvider: streamJSONTestProvider{
+			testProvider: testProvider{id: "stream-replay"},
+			jsonLines:    jsonLines,
+		},
+		signalPath: signalFile,
+	}
+	registry := NewRegistry()
+	if err := registry.Register(p); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	sup := NewSupervisor(registry, DefaultPolicy(), 64*1024, time.Minute)
+	defer sup.Close()
+
+	repo := t.TempDir()
+	_, err := sup.Start(context.Background(), SessionConfig{
+		ProjectID: "proj-replay",
+		SessionID: "replay-1",
+		RepoPath:  repo,
+		Options:   map[string]string{"provider": "stream-replay"},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Attach as first client before the provider exits.
+	state, err := sup.Attach("replay-1", "client-first", 0, AttachRoleWriter)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	// Signal the provider to exit now that the observer is registered.
+	if err := os.WriteFile(signalFile, []byte("done"), 0o644); err != nil {
+		t.Fatalf("write signal file: %v", err)
+	}
+
+	timeout := time.After(5 * time.Second)
+drainLoop:
+	for {
+		select {
+		case _, ok := <-state.Live:
+			if !ok {
+				break drainLoop
+			}
+		case <-timeout:
+			t.Fatal("timed out waiting for stream-JSON session to complete")
+		}
+	}
+	if _, err := sup.Detach("replay-1", "client-first"); err != nil {
+		t.Fatalf("Detach: %v", err)
+	}
+
+	// Now attach as a second observer client — should get replay from ring buffer.
+	state2, err := sup.Attach("replay-1", "client-replay", 0, AttachRoleObserver)
+	if err != nil {
+		t.Fatalf("Attach replay: %v", err)
+	}
+
+	// All events should be in state2.Replay (process already exited).
+	replay := state2.Replay
+	var thinkingChunks []OutputChunk
+	var textChunks []OutputChunk
+	for _, c := range replay {
+		switch c.Type {
+		case ChunkTypeThinking:
+			thinkingChunks = append(thinkingChunks, c)
+		case ChunkTypeOutput:
+			textChunks = append(textChunks, c)
+		}
+	}
+
+	if len(thinkingChunks) < 2 {
+		t.Errorf("expected at least 2 THINKING replay chunks, got %d", len(thinkingChunks))
+	}
+	var foundStep1, foundStep2 bool
+	for _, c := range thinkingChunks {
+		if bytes.Contains(c.Payload, []byte("reasoning step 1")) {
+			foundStep1 = true
+		}
+		if bytes.Contains(c.Payload, []byte("reasoning step 2")) {
+			foundStep2 = true
+		}
+	}
+	if !foundStep1 {
+		t.Error("expected 'reasoning step 1' in replayed THINKING chunks")
+	}
+	if !foundStep2 {
+		t.Error("expected 'reasoning step 2' in replayed THINKING chunks")
+	}
+
+	if len(textChunks) == 0 {
+		t.Error("expected at least 1 text OUTPUT replay chunk")
+	}
+	var foundAnswer bool
+	for _, c := range textChunks {
+		if bytes.Contains(c.Payload, []byte("final answer")) {
+			foundAnswer = true
+		}
+	}
+	if !foundAnswer {
+		t.Error("expected 'final answer' in replayed OUTPUT chunks")
+	}
+
+	// Verify chunk types are preserved in the ring buffer.
+	for _, c := range replay {
+		if c.Type == ChunkTypeThinking && c.Seq == 0 {
+			t.Error("THINKING chunk in replay has zero sequence number")
+		}
 	}
 }
 

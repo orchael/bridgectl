@@ -142,7 +142,7 @@ fi
 say "Verifying installed provider CLIs:"
 
 fail=0
-for cli in claude codex opencode gemini; do
+for cli in claude codex opencode; do
   bin="${INSTALL_DIR}/node_modules/.bin/${cli}"
   if [ -x "$bin" ]; then
     ver=$("$bin" --version 2>&1 || true)
@@ -152,6 +152,15 @@ for cli in claude codex opencode gemini; do
     fail=1
   fi
 done
+
+# agy (Antigravity CLI) is a native Go binary, not an npm package.
+# Check if it is installed on the system PATH.
+if command -v agy >/dev/null 2>&1; then
+  ver=$(agy --version 2>&1 || true)
+  printf '  %-12s %s\n' "agy" "$ver"
+else
+  printf '  %-12s NOT FOUND on PATH (install: curl -fsSL https://antigravity.google/cli/install.sh | bash)\n' "agy" >&2
+fi
 
 if [ "$fail" -eq 1 ]; then
   die "one or more provider CLIs failed verification; check that pnpm install completed successfully"

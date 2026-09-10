@@ -55,7 +55,6 @@ services:
       STEP_CA_PROVISIONER_PASSWORD: "${STEP_CA_PASSWORD:-step-ca-dev-password}"
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     ports:
       - "${BRIDGE_BIND:-0.0.0.0}:9445:9445"
     volumes:

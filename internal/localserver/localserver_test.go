@@ -211,8 +211,21 @@ func TestStartCustomEventBufferSize(t *testing.T) {
 }
 
 // TestStartWithProviderFallbacks verifies that provider fallback mapping is
-// accepted by Start without error.
+// accepted by Start without error when the feature flag is enabled.
 func TestStartWithProviderFallbacks(t *testing.T) {
+	srv := startLocalServer(t, Config{
+		StateDir:                 t.TempDir(),
+		ProviderFallbacksEnabled: true,
+		ProviderFallbacks: map[string][]string{
+			"claude": {"echo"},
+		},
+	})
+	assert.NotNil(t, srv)
+}
+
+// TestStartWithProviderFallbacksDisabled verifies that fallbacks are cleared
+// when the feature flag is not enabled, even if fallback mappings are provided.
+func TestStartWithProviderFallbacksDisabled(t *testing.T) {
 	srv := startLocalServer(t, Config{
 		StateDir: t.TempDir(),
 		ProviderFallbacks: map[string][]string{
@@ -220,6 +233,10 @@ func TestStartWithProviderFallbacks(t *testing.T) {
 		},
 	})
 	assert.NotNil(t, srv)
+	// The server must have cleared the fallback map because the feature flag
+	// was not enabled. This catches regressions where fallbacks are still
+	// applied despite the flag being off.
+	assert.Nil(t, srv.providerFallbacks, "fallbacks should be nil when feature flag is disabled")
 }
 
 // TestServerAddrLocalMode verifies that Addr() returns a non-empty string in

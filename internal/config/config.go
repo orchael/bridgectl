@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -205,6 +206,16 @@ type ProviderConfig struct {
 	// Fallbacks is an ordered list of provider IDs to try when this provider
 	// is unavailable at session start time. At most 2 entries are allowed.
 	Fallbacks []string `yaml:"fallbacks"`
+	// Transport selects the provider transport backend. Supported values are
+	// "" (default PTY/stdio), and "opencode_server" (headless OpenCode HTTP/SSE).
+	Transport string `yaml:"transport"`
+	// Hostname is the address to bind the OpenCode server to. Only used when
+	// Transport is "opencode_server". Defaults to "127.0.0.1".
+	Hostname string `yaml:"hostname"`
+	// PortRange specifies the port range for the OpenCode server in
+	// "start-end" format (e.g. "4100-4199"). Only used when Transport is
+	// "opencode_server". Defaults to "4100-4199".
+	PortRange string `yaml:"port_range"`
 }
 
 func (p ProviderConfig) ShouldValidateStartup() bool {
@@ -532,6 +543,19 @@ func validate(cfg *Config) error {
 		if provider.Mode != "" {
 			return fmt.Errorf("config: providers.%s.mode is no longer supported; remove the field and use stream_json: true only for JSONL providers", name)
 		}
+		if provider.Transport != "" {
+			switch provider.Transport {
+			case "opencode_server":
+				// valid
+			default:
+				return fmt.Errorf("config: providers.%s.transport must be one of: opencode_server; got %q", name, provider.Transport)
+			}
+		}
+		if provider.PortRange != "" {
+			if _, _, err := ParsePortRange(provider.PortRange); err != nil {
+				return fmt.Errorf("config: providers.%s.port_range: %w", name, err)
+			}
+		}
 		if provider.PTY != nil {
 			return fmt.Errorf("config: providers.%s.pty is no longer supported; PTY is the default and stream_json: true opts out of PTY allocation", name)
 		}
@@ -622,4 +646,30 @@ func safeIssuerName(issuer string) bool {
 		}
 	}
 	return true
+}
+
+// ParsePortRange parses a "start-end" port range string and returns the start
+// (inclusive) and end (exclusive) port numbers. For example, "4100-4199"
+// returns (4100, 4200, nil).
+func ParsePortRange(s string) (start, end int, err error) {
+	parts := strings.SplitN(s, "-", 2)
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("port_range must be in 'start-end' format, got %q", s)
+	}
+	start, err = strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid port range start: %w", err)
+	}
+	endInclusive, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid port range end: %w", err)
+	}
+	end = endInclusive + 1 // make end exclusive
+	if start <= 0 || endInclusive <= 0 || start > endInclusive {
+		return 0, 0, fmt.Errorf("port_range start must be <= end and both > 0, got %q", s)
+	}
+	if start > 65535 || endInclusive > 65535 {
+		return 0, 0, fmt.Errorf("port_range values must be <= 65535, got %q", s)
+	}
+	return start, end, nil
 }

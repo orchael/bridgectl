@@ -14,7 +14,7 @@ Use this setup on every machine that will run a bridge server or use the example
   - `CLAUDE_CODE_OAUTH_TOKEN` for Claude
   - `OPENAI_API_KEY` or Codex auth files for Codex
   - `OPENAI_API_KEY` for OpenCode
-  - `GEMINI_API_KEY` for Gemini
+  - OAuth2 credentials for Gemini (`agy`) at `~/.gemini/oauth_creds.json`
 
 ## Install on Linux (apt)
 
@@ -64,10 +64,17 @@ Export the provider credentials that match the provider you plan to run:
 ```bash
 export OPENAI_API_KEY="..."
 export CLAUDE_CODE_OAUTH_TOKEN="..."
-export GEMINI_API_KEY="..."
 ```
 
 Only the variables required by the selected provider need to be set.
+
+For Gemini, install the Antigravity CLI (`agy`) instead of setting an API key:
+
+```bash
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+```
+
+Authenticate with `agy auth login`. Credentials are stored at `~/.gemini/oauth_creds.json`.
 
 ## Repository Paths
 
