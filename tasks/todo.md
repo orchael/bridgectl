@@ -266,3 +266,8 @@ PR #218 review cycle 3:
 - Server-originated Canceled before ATTACHED: score 2, fixed by checking the local context rather than classifying every Canceled status as a user cancellation; added a failing-then-passing CLI regression.
 - Illumos build tag: score 0, no change. `GOOS=illumos GOARCH=amd64 go list -f '{{.GoFiles}}' ./cmd/bridgectl` selects `terminal_input_sysv.go` because illumos satisfies Solaris build tags.
 - Also addressed review notes by serializing dimension sampling and resize RPCs, discarding unread input on every writer exit regardless of reader startup timing, and clarifying the historical test count.
+
+Final CI coverage integration:
+- Codecov patch coverage initially reported 0% because the e2e suite built a CLI without coverage instrumentation, even though it exercised the changed code.
+- The coverage job now instruments the real CLI, collects subprocess counters in a temporary directory, and appends their atomic profile to the Go test profile. This measures the existing end-to-end assertions without lowering coverage gates.
+- `make test-cover` passed with subprocess instrumentation: `attachSession` is 77.4% covered and the Linux input-discard helper is 100% covered. Lint and shell syntax checks passed.

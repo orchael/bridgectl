@@ -51,7 +51,17 @@ func TestMain(m *testing.M) {
 		bin += ".exe"
 	}
 
-	cmd := exec.Command("go", "build", "-o", bin, "../../cmd/bridgectl")
+	buildArgs := []string{"build", "-o", bin}
+	if coverDir := os.Getenv("BRIDGECTL_CLI_COVERAGE_DIR"); coverDir != "" {
+		// Subprocess coverage must be collected separately from the test
+		// binary's profile; the coverage script merges these CLI counters.
+		buildArgs = append(buildArgs, "-cover", "-covermode=atomic", "-coverpkg=github.com/orchael/bridgectl/cmd/bridgectl")
+		if err := os.Setenv("GOCOVERDIR", coverDir); err != nil {
+			panic(err)
+		}
+	}
+	buildArgs = append(buildArgs, "../../cmd/bridgectl")
+	cmd := exec.Command("go", buildArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
