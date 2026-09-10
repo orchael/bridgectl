@@ -236,3 +236,24 @@ func TestCodexLifecycleUnwritableBootstrapParentFailsAtPreparation(t *testing.T)
 		t.Fatal("command preparation accepted an unwritable bootstrap parent")
 	}
 }
+
+func TestCodexLifecyclePlatformHomeUsesEffectiveEnvironment(t *testing.T) {
+	t.Setenv("HOME", "/daemon-account")
+	t.Setenv("USERPROFILE", `C:\daemon-account`)
+	for _, tc := range []struct {
+		name, platform, want string
+		env                  []string
+	}{
+		{"windows native home", "windows", `C:\session-account`, []string{`USERPROFILE=C:\session-account`}},
+		{"explicit HOME wins", "windows", "/session-account", []string{"HOME=/session-account", `USERPROFILE=C:\other-account`}},
+		{"missing windows home stays isolated", "windows", "", nil},
+		{"unix does not borrow windows home", "linux", "", []string{`USERPROFILE=C:\other-account`}},
+		{"unix effective home", "linux", "/session-account", []string{"HOME=/session-account"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexUserHome(tc.env, tc.platform); got != tc.want {
+				t.Fatalf("home = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

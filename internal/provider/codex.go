@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -43,7 +44,7 @@ func (p *CodexProvider) ValidateStartup(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return p.StdioProvider.validateStartupWithEnv(ctx, cmd.Env)
+	return p.validateStartupWithEnv(ctx, cmd.Env)
 }
 
 func (p *CodexProvider) Health(ctx context.Context) error {
@@ -117,12 +118,20 @@ func codexAuthKind(data []byte) string {
 	return ""
 }
 
+func codexUserHome(env []string, platform string) string {
+	home := strings.TrimSpace(envValue(env, "HOME"))
+	if home == "" && platform == "windows" {
+		home = strings.TrimSpace(envValue(env, "USERPROFILE"))
+	}
+	return home
+}
+
 func resolveCodexAuth(env []string) (codexAuthSource, error) {
 	var candidates []string
 	home := strings.TrimSpace(envValue(env, "CODEX_HOME"))
 	if home != "" {
 		candidates = []string{home}
-	} else if userHome := strings.TrimSpace(envValue(env, "HOME")); userHome != "" {
+	} else if userHome := codexUserHome(env, runtime.GOOS); userHome != "" {
 		home = filepath.Join(userHome, ".config", "bridgectl", "codex-home")
 		candidates = []string{filepath.Join(userHome, ".codex"), home}
 	}
@@ -201,7 +210,7 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		_ = os.Remove(tmpName)
 		return err
 	}
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	return os.Rename(tmpName, path)
 }
 

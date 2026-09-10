@@ -29,7 +29,8 @@ jobs:
 
       - name: Install Go tooling
         run: |
-          go install golang.org/x/tools/cmd/goimports@latest
+          # Match the Go 1.25-compatible x/tools version in go.mod.
+          go install golang.org/x/tools/cmd/goimports@v0.44.0
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0
 
       - name: Run lint

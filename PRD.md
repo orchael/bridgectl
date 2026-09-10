@@ -353,6 +353,8 @@ no command-line arguments are supplied.
 - CA-1: Prefer an existing valid account `auth.json` in explicit `CODEX_HOME`,
   or `~/.codex` then `~/.config/bridgectl/codex-home` when no home is specified.
   Explicit homes isolate sessions and never fall back to another home.
+  Home discovery uses the effective session's `HOME`, or `USERPROFILE` on
+  Windows, without borrowing a daemon account absent from that environment.
 - CA-2: Bootstrap missing account credentials from valid `CODEX_AUTH` JSON into
   explicit `CODEX_HOME` or the managed home. Each desktop owns its mutable copy;
   subsequent sessions and daemon restarts preserve credentials refreshed by Codex.

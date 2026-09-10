@@ -28,6 +28,15 @@ to assert variables are absent, not merely empty. Both failed before changing
 child preparation to remove all CODEX_AUTH, CODEX_API_KEY, and OPENAI_API_KEY
 entries. This avoids native CLI presence checks overriding the selected file.
 
+PR review follow-up: effective Windows `USERPROFILE` is now supported when
+`HOME` is absent, without importing the daemon's account into a prepared
+environment. Platform-home regression failed before the helper was added.
+CI lint installation failed because goimports@latest required Go 1.26 while
+the workflow uses Go 1.25.7; pin goimports to the repository's x/tools v0.44.0
+(its module declares Go 1.25.0). Copilot Windows rename/Geteuid objections were
+checked against Go source: Windows Rename uses MOVEFILE_REPLACE_EXISTING and
+syscall.Geteuid exists there and returns -1.
+
 Review follow-up: added regressions confirming health rejects a home nested
 under a regular file, while an unwritable missing bootstrap directory fails
 authoritatively in command preparation before process launch. Documented that

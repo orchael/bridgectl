@@ -82,6 +82,7 @@ If `claude` is unavailable, the server can select `codex` for the session.
 
 Codex selects credentials from the environment of the daemon or prepared
 session. An already-running daemon does not inherit later client shell exports.
+Home discovery uses that session's `HOME`, or its `USERPROFILE` on Windows.
 
 1. Existing ChatGPT account credentials in `CODEX_HOME/auth.json`. When
    `CODEX_HOME` is absent, check `~/.codex/auth.json`, then
