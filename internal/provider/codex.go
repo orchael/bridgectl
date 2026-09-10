@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,16 +18,14 @@ import (
 // CODEX_AUTH / CODEX_HOME auth.json (ChatGPT account auth) as valid
 // authentication.
 //
-// When CODEX_AUTH is set, its value is written to a stable per-user directory
-// as auth.json and the subprocess receives CODEX_HOME pointing there so
-// the Codex CLI discovers the device-code credentials and can persist its
-// own helper binaries outside the system temp directory.
+// CODEX_AUTH bootstraps a desktop-local auth.json once. Codex owns subsequent
+// refreshes; only an explicit operator rotation should remove that file.
 type CodexProvider struct {
 	*StdioProvider
-
-	mu      sync.Mutex
-	authDir string // directory holding auth.json, if created
 }
+
+// Serialize selection and bootstrap across provider instances in this daemon.
+var codexAuthMu sync.Mutex
 
 // NewCodexProvider creates a Codex provider that supports both API-key
 // and device-code authentication. RequiredEnv is cleared from the
@@ -38,45 +37,23 @@ func NewCodexProvider(cfg StdioConfig) *CodexProvider {
 	}
 }
 
-// codexHasAuth returns true if any supported Codex auth source is available.
-func codexHasAuth() bool {
-	for _, key := range []string{"OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_AUTH"} {
-		if strings.TrimSpace(os.Getenv(key)) != "" {
-			return true
-		}
-	}
-	return codexAuthFilePath() != ""
-}
-
-func codexAuthFilePath() string {
-	candidates := []string{}
-	if codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); codexHome != "" {
-		candidates = append(candidates, filepath.Join(codexHome, "auth.json"))
-	}
-	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-		candidates = append(candidates, filepath.Join(home, ".codex", "auth.json"))
-	}
-	for _, path := range candidates {
-		info, err := os.Stat(path)
-		if err == nil && !info.IsDir() {
-			return path
-		}
-	}
-	return ""
-}
-
 func (p *CodexProvider) ValidateStartup(ctx context.Context) error {
-	if !codexHasAuth() {
-		return fmt.Errorf("provider %q requires OPENAI_API_KEY, CODEX_API_KEY, CODEX_AUTH, CODEX_HOME/auth.json, or ~/.codex/auth.json", p.cfg.ProviderID)
+	cmd, err := p.BuildCommand(ctx, bridge.SessionConfig{})
+	if err != nil {
+		return err
 	}
-	return p.StdioProvider.ValidateStartup(ctx)
+	return p.StdioProvider.validateStartupWithEnv(ctx, cmd.Env)
 }
 
 func (p *CodexProvider) Health(ctx context.Context) error {
-	if !codexHasAuth() {
-		return fmt.Errorf("provider %q requires OPENAI_API_KEY, CODEX_API_KEY, CODEX_AUTH, CODEX_HOME/auth.json, or ~/.codex/auth.json", p.cfg.ProviderID)
+	return p.HealthWithEnv(ctx, os.Environ())
+}
+
+func (p *CodexProvider) HealthWithEnv(ctx context.Context, env []string) error {
+	if _, err := resolveCodexAuth(env); err != nil {
+		return err
 	}
-	return p.StdioProvider.Health(ctx)
+	return p.StdioProvider.HealthWithEnv(ctx, env)
 }
 
 func (p *CodexProvider) BuildCommand(ctx context.Context, cfg bridge.SessionConfig) (*exec.Cmd, error) {
@@ -85,64 +62,100 @@ func (p *CodexProvider) BuildCommand(ctx context.Context, cfg bridge.SessionConf
 		return nil, err
 	}
 
-	codexAuth := envValue(cmd.Env, "CODEX_AUTH")
-	if strings.TrimSpace(codexAuth) == "" {
-		return cmd, nil
-	}
-
-	// Write the auth credentials to a stable directory so the Codex CLI
-	// can discover them via CODEX_HOME.
-	authDir, err := p.ensureAuthDir(codexAuth, envValue(cmd.Env, "CODEX_HOME"))
+	codexAuthMu.Lock()
+	defer codexAuthMu.Unlock()
+	auth, err := resolveCodexAuth(cmd.Env)
 	if err != nil {
 		return nil, err
 	}
-	cmd.Env = setEnvValue(cmd.Env, "CODEX_HOME", authDir)
+	if len(auth.seed) > 0 {
+		if err := os.MkdirAll(auth.home, 0o700); err != nil {
+			return nil, fmt.Errorf("create codex auth directory: %w", err)
+		}
+		if err := os.Chmod(auth.home, 0o700); err != nil {
+			return nil, fmt.Errorf("secure codex auth directory: %w", err)
+		}
+		if err := atomicWriteFile(filepath.Join(auth.home, "auth.json"), auth.seed, 0o600); err != nil {
+			return nil, fmt.Errorf("write codex auth file: %w", err)
+		}
+	}
+	cmd.Env = setEnvValue(cmd.Env, "CODEX_HOME", auth.home)
+	// Codex exec can prefer CODEX_API_KEY over account login. The resolved file
+	// is the single source of auth for this child, regardless of launch mode.
+	for _, key := range []string{"CODEX_AUTH", "CODEX_API_KEY", "OPENAI_API_KEY"} {
+		cmd.Env = setEnvValue(cmd.Env, key, "")
+	}
 	return cmd, nil
 }
 
-// ensureAuthDir creates (once) a directory containing auth.json
-// with the given contents. Subsequent calls return the same directory.
-func (p *CodexProvider) ensureAuthDir(contents, codexHome string) (string, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.authDir != "" {
-		// Update the file in case the env var changed between sessions.
-		// Use atomic write (temp file + rename) so concurrent Codex
-		// subprocesses never read a partially-written file.
-		if err := atomicWriteFile(filepath.Join(p.authDir, "auth.json"), []byte(contents), 0o600); err != nil {
-			return "", fmt.Errorf("update codex auth file: %w", err)
-		}
-		return p.authDir, nil
-	}
-
-	dir, err := codexAuthDir(codexHome)
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("create codex auth dir: %w", err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return "", fmt.Errorf("secure codex auth dir: %w", err)
-	}
-	authFile := filepath.Join(dir, "auth.json")
-	if err := os.WriteFile(authFile, []byte(contents), 0o600); err != nil {
-		return "", fmt.Errorf("write codex auth file: %w", err)
-	}
-	p.authDir = dir
-	return dir, nil
+type codexAuthSource struct {
+	home string
+	seed []byte // empty when preserving an existing native credential file
 }
 
-func codexAuthDir(codexHome string) (string, error) {
-	if codexHome := strings.TrimSpace(codexHome); codexHome != "" {
-		return codexHome, nil
+// codexAuthKind checks the supported native JSON shapes, never server validity.
+func codexAuthKind(data []byte) string {
+	var auth struct {
+		Mode   string `json:"auth_mode"`
+		APIKey string `json:"OPENAI_API_KEY"`
+		Tokens *struct {
+			Access  string `json:"access_token"`
+			Refresh string `json:"refresh_token"`
+		} `json:"tokens"`
 	}
-	home, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(home) == "" {
-		return "", fmt.Errorf("resolve codex auth dir: HOME is not available; set CODEX_HOME to a persistent directory")
+	if json.Unmarshal(data, &auth) != nil {
+		return ""
 	}
-	return filepath.Join(home, ".config/bridgectl", "codex-home"), nil
+	if (auth.Mode == "" || auth.Mode == "chatgpt") && auth.Tokens != nil && strings.TrimSpace(auth.Tokens.Access) != "" && strings.TrimSpace(auth.Tokens.Refresh) != "" {
+		return "account"
+	}
+	if (auth.Mode == "" || auth.Mode == "apikey") && strings.TrimSpace(auth.APIKey) != "" {
+		return "api"
+	}
+	return ""
+}
+
+func resolveCodexAuth(env []string) (codexAuthSource, error) {
+	var candidates []string
+	home := strings.TrimSpace(envValue(env, "CODEX_HOME"))
+	if home != "" {
+		candidates = []string{home}
+	} else if userHome := strings.TrimSpace(envValue(env, "HOME")); userHome != "" {
+		home = filepath.Join(userHome, ".config", "bridgectl", "codex-home")
+		candidates = []string{filepath.Join(userHome, ".codex"), home}
+	}
+	if !filepath.IsAbs(home) {
+		return codexAuthSource{}, fmt.Errorf("codex authentication requires an absolute HOME or CODEX_HOME")
+	}
+	var existingAPI string
+	for _, candidate := range candidates {
+		data, err := os.ReadFile(filepath.Join(candidate, "auth.json"))
+		if err != nil && !os.IsNotExist(err) {
+			return codexAuthSource{}, fmt.Errorf("read codex auth file: %w", err)
+		}
+		switch codexAuthKind(data) {
+		case "account":
+			return codexAuthSource{home: candidate}, nil
+		case "api":
+			if existingAPI == "" {
+				existingAPI = candidate
+			}
+		}
+	}
+	seed := []byte(envValue(env, "CODEX_AUTH"))
+	if codexAuthKind(seed) != "" {
+		return codexAuthSource{home: home, seed: seed}, nil
+	}
+	for _, key := range []string{"CODEX_API_KEY", "OPENAI_API_KEY"} {
+		if value := strings.TrimSpace(envValue(env, key)); value != "" {
+			data, _ := json.Marshal(map[string]string{"OPENAI_API_KEY": value})
+			return codexAuthSource{home: home, seed: data}, nil
+		}
+	}
+	if existingAPI != "" {
+		return codexAuthSource{home: existingAPI}, nil
+	}
+	return codexAuthSource{}, fmt.Errorf("codex requires valid account auth.json, CODEX_AUTH JSON, CODEX_API_KEY, or OPENAI_API_KEY; refresh the desktop credentials")
 }
 
 func setEnvValue(env []string, key, value string) []string {
@@ -186,14 +199,9 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		_ = os.Remove(tmpName)
 		return err
 	}
+	defer os.Remove(tmpName)
 	return os.Rename(tmpName, path)
 }
 
-// Cleanup forgets the generated auth directory path. The directory itself is
-// intentionally persistent because Codex stores helper binaries and session
-// state under CODEX_HOME.
-func (p *CodexProvider) Cleanup() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.authDir = ""
-}
+// Cleanup leaves desktop-owned auth, helper binaries, and session state intact.
+func (p *CodexProvider) Cleanup() {}

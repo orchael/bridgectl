@@ -62,7 +62,7 @@ func TestCodexValidateStartup_CodexAPIKey(t *testing.T) {
 
 func TestCodexValidateStartup_CodexAuth(t *testing.T) {
 	clearCodexEnv(t)
-	t.Setenv("CODEX_AUTH", `{"auth_mode":"tokens"}`)
+	t.Setenv("CODEX_AUTH", lifecycleSeed)
 	p := newTestCodexProvider()
 
 	if err := p.ValidateStartup(context.Background()); err != nil {
@@ -73,7 +73,7 @@ func TestCodexValidateStartup_CodexAuth(t *testing.T) {
 func TestCodexValidateStartup_CodexHomeAuthFile(t *testing.T) {
 	clearCodexEnv(t)
 	codexHome := t.TempDir()
-	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte(`{"auth_mode":"chatgpt"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte(lifecycleSeed), 0o600); err != nil {
 		t.Fatalf("write auth.json: %v", err)
 	}
 	t.Setenv("CODEX_HOME", codexHome)
@@ -90,7 +90,7 @@ func TestCodexValidateStartup_DefaultHomeAuthFile(t *testing.T) {
 	if err := os.MkdirAll(codexHome, 0o700); err != nil {
 		t.Fatalf("mkdir .codex: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte(`{"auth_mode":"chatgpt"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte(lifecycleSeed), 0o600); err != nil {
 		t.Fatalf("write auth.json: %v", err)
 	}
 	p := newTestCodexProvider()
@@ -122,7 +122,7 @@ func TestCodexHealth_WithAPIKey(t *testing.T) {
 
 func TestCodexHealth_WithCodexAuth(t *testing.T) {
 	clearCodexEnv(t)
-	t.Setenv("CODEX_AUTH", `{"auth_mode":"tokens"}`)
+	t.Setenv("CODEX_AUTH", lifecycleSeed)
 	p := newTestCodexProvider()
 
 	if err := p.Health(context.Background()); err != nil {
@@ -132,7 +132,7 @@ func TestCodexHealth_WithCodexAuth(t *testing.T) {
 
 func TestCodexBuildCommand_WithCodexAuth(t *testing.T) {
 	clearCodexEnv(t)
-	authJSON := `{"auth_mode":"tokens","tokens":{"access_token":"test"}}`
+	authJSON := lifecycleSeed
 	t.Setenv("CODEX_AUTH", authJSON)
 
 	p := newTestCodexProvider()
@@ -184,7 +184,7 @@ func TestCodexBuildCommand_WithCodexAuth(t *testing.T) {
 
 func TestCodexBuildCommand_WithCodexAuthRespectsExplicitCodexHome(t *testing.T) {
 	clearCodexEnv(t)
-	authJSON := `{"auth_mode":"tokens","tokens":{"access_token":"test"}}`
+	authJSON := lifecycleSeed
 	explicitCodexHome := filepath.Join(t.TempDir(), "codex-home")
 	t.Setenv("CODEX_AUTH", authJSON)
 	t.Setenv("CODEX_HOME", explicitCodexHome)
@@ -216,7 +216,7 @@ func TestCodexBuildCommand_WithCodexAuthRespectsExplicitCodexHome(t *testing.T) 
 
 func TestCodexBuildCommand_WithCodexAuthUsesPreparedEnv(t *testing.T) {
 	clearCodexEnv(t)
-	authJSON := `{"auth_mode":"tokens","tokens":{"access_token":"from-prepared-env"}}`
+	authJSON := lifecycleSeed
 	explicitCodexHome := filepath.Join(t.TempDir(), "prepared-codex-home")
 
 	p := newTestCodexProvider()
@@ -265,17 +265,14 @@ func TestCodexBuildCommand_WithAPIKey(t *testing.T) {
 		t.Fatalf("BuildCommand: %v", err)
 	}
 
-	// CODEX_HOME should NOT be set when using API key auth.
-	for _, e := range cmd.Env {
-		if strings.HasPrefix(e, "CODEX_HOME=") {
-			t.Fatal("CODEX_HOME should not be set when using API key auth")
-		}
+	if envValue(cmd.Env, "CODEX_HOME") == "" {
+		t.Fatal("API-key credentials require a native auth file")
 	}
 }
 
 func TestCodexCleanup(t *testing.T) {
 	clearCodexEnv(t)
-	t.Setenv("CODEX_AUTH", `{"auth_mode":"tokens"}`)
+	t.Setenv("CODEX_AUTH", lifecycleSeed)
 
 	p := newTestCodexProvider()
 
@@ -284,14 +281,12 @@ func TestCodexCleanup(t *testing.T) {
 		SessionID: "s1",
 		RepoPath:  t.TempDir(),
 	}
-	_, err := p.BuildCommand(context.Background(), cfg)
+	cmd, err := p.BuildCommand(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("BuildCommand: %v", err)
 	}
 
-	p.mu.Lock()
-	dir := p.authDir
-	p.mu.Unlock()
+	dir := envValue(cmd.Env, "CODEX_HOME")
 	if dir == "" {
 		t.Fatal("authDir not set after BuildCommand")
 	}
