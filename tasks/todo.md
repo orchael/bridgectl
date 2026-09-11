@@ -167,7 +167,11 @@ Cert lifecycle items moved to GitHub Issues: #225 (cert renewal), #224 (SAN mism
 
 Previously listed items that were already fixed or addressed in later PRs:
 TestMain cleanup, Echo test assertion, Docker E2E cleanup trap, Windows status
-message, pki_test.go portability, GoReleaser Windows target (build-tag stubs).
+message, pki_test.go portability.
+
+## Remaining
+
+- [ ] **GoReleaser Windows target**: `.goreleaser.yaml` includes `windows` for the CLI but `internal/bridge/supervisor.go` uses Unix-only APIs (`syscall.Kill`, `Setpgid`, `creack/pty`) and the CLI has unguarded PTY paths. The provider package now compiles on Windows (build-tag stubs in `stdio_pty_windows.go`), but the full `cmd/bridgectl` binary still fails cross-compilation. Either add build tags across `internal/bridge` and CLI PTY paths, or remove the Windows release target.
 # Startup Step CA Client Registry
 
 Mode: Approval-Required, approved by user request on 2026-08-09.
