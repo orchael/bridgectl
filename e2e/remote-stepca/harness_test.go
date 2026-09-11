@@ -42,7 +42,8 @@ if [ "$1" = wait ]; then
   case "$SCENARIO" in
     wait_failure) exit 7 ;;
     invalid_wait_output) echo invalid ;;
-    client_failure|already_exited) echo 1 ;;
+    client_failure) echo 1 ;;
+    already_exited) echo 23 ;;
     *) echo 0 ;;
   esac
   exit 0
@@ -87,6 +88,17 @@ esac
 			}
 			if tc.name == "build_failure" && strings.Contains(string(calls), " up ") {
 				t.Errorf("started containers after build failure:\n%s", calls)
+			}
+			if tc.name == "already_exited" {
+				if !strings.Contains(string(calls), " ps -a -q remote-client\n") {
+					t.Errorf("lookup did not include stopped containers:\n%s", calls)
+				}
+				if !strings.Contains(string(calls), "wait fake-client\n") {
+					t.Errorf("did not wait for the stopped client:\n%s", calls)
+				}
+				if !strings.Contains(string(output), "test-remote-stepca: FAILED (exit 23)") {
+					t.Errorf("did not preserve the stopped client's exit code:\n%s", output)
+				}
 			}
 		})
 	}

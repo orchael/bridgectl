@@ -42,6 +42,11 @@ PR preparation: a fresh `make test` run passed the full race-test suite, includi
 the previously timing-out repository-setup test. `make test-cover-maintained`
 passed with 78.8% coverage against the 75% gate.
 
+Copilot cycle 1 (PR #222, commit `b06425d`): no review threads were published,
+but the review body identified a valid coverage gap (score 2). Strengthened the
+stopped-client case to require `ps -a -q`, waiting on the discovered client, and
+propagation of its distinct exit code 23. All nine race-tested cases pass.
+
 Final Docker run log: `/tmp/bridgectl-remote-stepca-verification.log`.
 Rollback remains limited to these harness and documentation edits; disposable
 Compose containers and volumes were removed by the successful Make target.
