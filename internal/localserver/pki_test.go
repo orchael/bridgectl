@@ -917,7 +917,7 @@ func TestEnsurePKI_ModeChangeTriggerRegeneration(t *testing.T) {
 }
 
 func TestLoadPKIMaterial(t *testing.T) {
-	stateDir := filepath.Join(os.TempDir(), "test-state")
+	stateDir := filepath.Join(t.TempDir(), "test-state")
 	mat := LoadPKIMaterial(stateDir)
 
 	certs := filepath.Join(stateDir, "certs")
