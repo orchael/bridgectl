@@ -17,6 +17,22 @@ import (
 	"time"
 )
 
+// testSubprocessEnv returns os.Environ() with Go coverage/test infrastructure
+// variables removed. When go test -coverprofile runs, the parent binary sets
+// GOCOVERDIR (and possibly other internal vars) in its environment. A re-
+// executed test binary that inherits these can fail flag parsing on some
+// platforms (observed as exit code 2 on Linux CI runners with Go 1.26).
+func testSubprocessEnv(extra ...string) []string {
+	var filtered []string
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "GOCOVERDIR=") {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	return append(filtered, extra...)
+}
+
 type testProvider struct {
 	id        string
 	healthErr error
@@ -47,7 +63,7 @@ func (p *termTrapProvider) StopGrace() time.Duration { return 500 * time.Millise
 func (p *termTrapProvider) BuildCommand(ctx context.Context, cfg SessionConfig) (*exec.Cmd, error) {
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestGracefulShutdownHelperProcess")
 	cmd.Dir = cfg.RepoPath
-	cmd.Env = append(os.Environ(), "BRIDGE_GRACEFUL_HELPER=1")
+	cmd.Env = testSubprocessEnv("BRIDGE_GRACEFUL_HELPER=1")
 	return cmd, nil
 }
 
@@ -60,7 +76,7 @@ func (p *ignoreTermProvider) StopGrace() time.Duration { return 5 * time.Second 
 func (p *ignoreTermProvider) BuildCommand(ctx context.Context, cfg SessionConfig) (*exec.Cmd, error) {
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestGracefulShutdownHelperProcess")
 	cmd.Dir = cfg.RepoPath
-	cmd.Env = append(os.Environ(), "BRIDGE_IGNORE_TERM_HELPER=1")
+	cmd.Env = testSubprocessEnv("BRIDGE_IGNORE_TERM_HELPER=1")
 	return cmd, nil
 }
 
