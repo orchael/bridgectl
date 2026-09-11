@@ -7,7 +7,7 @@ RUN pnpm install --frozen-lockfile
 COPY examples/web/ui/ ./
 RUN pnpm build
 
-FROM golang:1.25 AS go-build
+FROM golang:1.26 AS go-build
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -26,7 +26,7 @@ COPY --from=ui-build /src/examples/web/ui/dist /app/ui/dist
 EXPOSE 3000
 ENTRYPOINT ["/app/web", "--port", "3000", "--vite-port", "0"]
 
-FROM golang:1.25 AS server-dev
+FROM golang:1.26 AS server-dev
 
 WORKDIR /app
 COPY go.mod go.sum ./

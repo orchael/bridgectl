@@ -6,7 +6,7 @@ Use this setup on every machine that will run a bridge server or use the example
 
 ## Prerequisites
 
-- Go 1.25 or newer
+- Go 1.26 or newer
 - Node.js 24.x and Corepack
 - pnpm 11.22.0 through Corepack
 - Docker Compose v2 if you use the compose examples

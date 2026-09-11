@@ -83,6 +83,9 @@ func TestCodexAuthExpiredError(t *testing.T) {
 	if !strings.Contains(msg, "auth.json") {
 		t.Fatalf("message should mention auth.json refresh, got: %s", msg)
 	}
+	if !strings.Contains(msg, "reload credentials") || strings.Contains(msg, "remove CODEX_AUTH") {
+		t.Fatalf("message should explain rotation of cached credentials, got: %s", msg)
+	}
 }
 
 func TestCodexAuthExpiredErrorNonCodex(t *testing.T) {

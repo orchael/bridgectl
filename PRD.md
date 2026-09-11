@@ -161,11 +161,19 @@ Human operators can observe and interact with any running session without stoppi
 
 Writer transition protocol:
 1. Human runs `bridgectl session attach --take-over <id>`.
+   The CLI opens an observer stream and waits for the server's `ATTACHED` event before calling `ClaimWriter` with force enabled. Input and resize requests begin only after the claim succeeds; a failed claim is returned as a command error.
 2. Server sends a `WRITER_CLAIMED` event to all observers including the SDK.
 3. Human types, resizes, or reads.
 4. Human presses Ctrl-] or `bridgectl session attach --release <id>`.
 5. Server sends a `WRITER_RELEASED` event to all observers.
 6. SDK may re-claim the writer slot via `ClaimWriter` RPC.
+
+Takeover acceptance criteria:
+- A CLI takeover replaces an existing writer without a spurious permission error, preserves the previous client's observer stream, and can send input to the running provider.
+- Once writer access is ready, the CLI synchronizes the session PTY with the current terminal size, including a resize that occurred while attachment or claiming was pending.
+- Ctrl-] releases the new writer slot and exits cleanly. Failed attachment or writer claims return a command error and must not start forwarding terminal input.
+- Failed observer attachments also return a command error.
+- A stream that ends before acknowledging attachment returns a command error, including server-originated cancellation; local user cancellation remains a clean exit. Writer exit discards queued terminal input before restoring the terminal, so keystrokes cannot be interpreted by the parent shell.
 
 ---
 
@@ -347,6 +355,34 @@ no command-line arguments are supplied.
 - Codex account-token expiry should surface as an actionable operator error
   that points to refreshing the desktop's `auth.json` instead of exposing only
   the provider's raw token expiry payload.
+
+### Codex Desktop Authentication Lifecycle
+
+- CA-1: Prefer an existing valid account `auth.json` in explicit `CODEX_HOME`,
+  or `~/.codex` then `~/.config/bridgectl/codex-home` when no home is specified.
+  Explicit homes isolate sessions and never fall back to another home.
+  Home discovery uses the effective session's `HOME`, or `USERPROFILE` on
+  Windows, without borrowing a daemon account absent from that environment.
+- CA-2: Bootstrap missing account credentials from valid `CODEX_AUTH` JSON into
+  explicit `CODEX_HOME` or the managed home. Each desktop owns its mutable copy;
+  subsequent sessions and daemon restarts preserve credentials refreshed by Codex.
+- CA-3: With no account or valid seed, use `CODEX_API_KEY`, then
+  `OPENAI_API_KEY`, then an existing API-key auth file. Materialize environment
+  API keys in native `auth.json`. Account sessions suppress API-key environment
+  overrides. Malformed/empty credential files and seeds do not pass health alone.
+- CA-4: Health checks use the actual session environment, including its home,
+  and match command preparation. Credential contents never appear in errors.
+  Health checks select and validate readable credential sources without writing;
+  command preparation validates bootstrap directory creation and atomic writes
+  and must report failures before launching the provider.
+  Startup probes use the same selected credentials. Fallback selects local
+  credential sources; a server-rejected account is reported to the operator,
+  never retried with billable API credentials or replayed automatically.
+- CA-5: Operators rotate credentials explicitly: stop the daemon and its
+  sessions, replace its environment, remove the selected home's `auth.json`,
+  then restart. No fingerprint files are required. Clear native and managed
+  auth files when replacing all default-home sources. Other Codex state stays.
+  This interrupts existing sessions; new sessions use the replacement seed.
 
 ### Provider-Scoped Unprotected Mode
 

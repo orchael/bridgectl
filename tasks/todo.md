@@ -1,3 +1,54 @@
+# Codex Authentication Lifecycle (2026-09-10)
+
+User approved security-sensitive implementation following review. Governing
+requirements: PRD CA-1 through CA-5. Scope: provider auth source selection,
+desktop-local mutable credentials, and session-aware health. Parent project
+owns secret reload and live desktop E2E integration.
+
+- [x] Define PRD lifecycle and rotation contract before implementation.
+- [x] Demonstrate failing account preservation, precedence, home isolation,
+  prepared health, and native API-key fallback regression tests.
+- [x] Implement common source resolution and atomic bootstrap.
+- [x] Run provider/full Go tests, race checks, and coverage; build E2E binary.
+
+Evidence: `TestCodexLifecycle*` failed before implementation for all five
+original defects; startup-probe and rotation diagnostic regressions also failed
+before their fixes. `go test ./internal/provider -count=1` passed.
+`GOFLAGS=-buildvcs=false go test -race -count=1
+-coverprofile=/tmp/bridgectl-codex-auth-coverage-fixed.out ./...` passed, including
+the local CLI E2E suite. Provider coverage is 81.2%; whole-repo instrumented
+coverage is 43.8% including generated code, examples, and binaries (existing
+coverage gap, not claimed as meeting the global 75% rule). An earlier sandbox
+run failed due to read-only Go cache/VCS stamping; rerunning with approved cache
+access and VCS stamping disabled resolved those environment failures.
+Linux amd64 E2E binary: `/tmp/bridgectl-codex-auth-linux-amd64`.
+
+Credential-environment hardening: strengthened account and API fallback tests
+to assert variables are absent, not merely empty. Both failed before changing
+child preparation to remove all CODEX_AUTH, CODEX_API_KEY, and OPENAI_API_KEY
+entries. This avoids native CLI presence checks overriding the selected file.
+
+PR review follow-up: effective Windows `USERPROFILE` is now supported when
+`HOME` is absent, without importing the daemon's account into a prepared
+environment. Platform-home regression failed before the helper was added.
+CI lint installation failed because goimports@latest required Go 1.26 while
+the workflow uses Go 1.25.7; pin goimports to the repository's x/tools v0.44.0
+(its module declares Go 1.25.0). Copilot Windows rename/Geteuid objections were
+checked against Go source: Windows Rename uses MOVEFILE_REPLACE_EXISTING and
+syscall.Geteuid exists there and returns -1.
+
+Review follow-up: added regressions confirming health rejects a home nested
+under a regular file, while an unwritable missing bootstrap directory fails
+authoritatively in command preparation before process launch. Documented that
+read-only health verifies source availability, not future write success;
+permission prediction would incorrectly reject owned directories that
+preparation intentionally repairs with chmod. Both focused tests passed.
+
+Risk: account token refresh/revocation remains owned by Codex and remote login
+service; structural validation cannot prove server acceptance. Rollback: restore
+previous binary; retain existing auth files and secret values. Never restore the
+old seed over a refreshed file during rollback.
+
 # Issue 57 Implementation Plan
 
 ## Governing PRD
@@ -228,3 +279,46 @@ Evidence:
 - `docker run --rm bridgectl:issue-180 id -un` -> passed; command args executed as `bridge` after initialization.
 - Detached default-start smoke with `docker run -d --name issue180-default bridgectl:issue-180` stayed running and logged `secure (mTLS+JWT on [::]:9445)`.
 - `env-secrets aws -s /bridgectl/e2e -- make test-e2e-unprotected` -> passed. Protected pass verified Claude and Codex did not write `.git` markers; unprotected pass verified Claude and Codex wrote provider-specific `.git` markers through SDK-started sessions.
+
+# Session takeover attachment order (2026-09-10)
+
+Mode: Autonomous; localized CLI ordering fix authorized by the user. Governing requirement: PRD §6.2 Human Interjection.
+
+Plan:
+- [x] Reproduce the actual CLI takeover failure with a PTY and isolated echo session.
+- [x] Wait for ATTACHED before claiming and enable input/resize only after success.
+- [x] Verify takeover, old-writer observation, input, detach, and failure behavior.
+- [x] Run formatting, full race tests, lint, and the maintained coverage gate.
+PR workflow: open a PR, request Copilot, address feedback, and record final review/CI evidence in the PR.
+
+Scope: CLI sequencing and regression coverage; preserve server permission checks and SDK contracts. Risk: starting input too early or losing claim errors in stream handling. Rollback: revert the CLI change; no deployment or data migration is involved.
+
+Evidence:
+- Before the fix, `go test ./e2e/bridgectl -run 'TestCLISuite/TestCLITakeover$' -count=1` failed with `claim writer: permission denied`.
+- Missing-session regression initially failed because the CLI printed NotFound but exited successfully.
+- `go test ./e2e/bridgectl -run 'TestCLISuite/TestCLITakeover' -race -count=1` passed the initial three cases after the fix; the final suite includes four matching tests with EOF and server-cancellation subcases.
+- `make fmt`, `make test`, and `make lint` passed; lint reported zero issues.
+- `make test-cover-maintained` passed at 78.2% (75% minimum).
+- `pnpm --dir docs build` passed.
+- Rollback scope verified: only CLI behavior changes; server authorization, SDK contracts, and persistent data are unchanged. The reported desktop was not modified.
+
+PR #218 review cycle 1:
+- Scored both Copilot threads 2 (behavior fix with validation): observer attachment errors and terminal resize synchronization.
+- Added assertions that failed before the review fixes, then passed for observer NotFound errors and initial terminal dimensions. Delayed the fake server's ATTACHED event to verify a claim cannot precede acknowledgement.
+- CI's lint tooling install failed before lint ran: goimports@latest requires Go 1.26, while CI uses Go 1.25.7. Pinned goimports to v0.44.0, matching go.mod and supporting Go 1.25.
+
+PR #218 review cycle 2:
+- Scored both Copilot threads 2 (localized behavior fixes with regression coverage): queued terminal input on startup failure and EOF before attachment acknowledgement.
+- Both new assertions failed before the fixes: a poll found queued input after rejected takeover, and unacknowledged EOF exited successfully.
+- Flush pending terminal input before restoring a writer terminal when startup never became ready, and return an attachment error for unacknowledged EOF.
+- After the cycle 2 fixes, all four takeover cases passed with race detection; `make test` and `make lint` passed again.
+
+PR #218 review cycle 3:
+- Server-originated Canceled before ATTACHED: score 2, fixed by checking the local context rather than classifying every Canceled status as a user cancellation; added a failing-then-passing CLI regression.
+- Illumos build tag: score 0, no change. `GOOS=illumos GOARCH=amd64 go list -f '{{.GoFiles}}' ./cmd/bridgectl` selects `terminal_input_sysv.go` because illumos satisfies Solaris build tags.
+- Also addressed review notes by serializing dimension sampling and resize RPCs, discarding unread input on every writer exit regardless of reader startup timing, and clarifying the historical test count.
+
+Final CI coverage integration:
+- Codecov patch coverage initially reported 0% because the e2e suite built a CLI without coverage instrumentation, even though it exercised the changed code.
+- The coverage job now instruments the real CLI, collects subprocess counters in a temporary directory, and appends their atomic profile to the Go test profile. This measures the existing end-to-end assertions without lowering coverage gates.
+- `make test-cover` passed with subprocess instrumentation: `attachSession` is 77.4% covered and the Linux input-discard helper is 100% covered. Lint and shell syntax checks passed.

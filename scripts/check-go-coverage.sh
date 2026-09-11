@@ -20,8 +20,11 @@ packages=(
   ./pkg/...
 )
 
-go test "${packages[@]}" -coverprofile="$profile" >"$log_file"
+go test "${packages[@]}" -coverprofile="$profile" >"$log_file" 2>&1 || test_exit=$?
 cat "$log_file"
+if [[ "${test_exit:-0}" -ne 0 ]]; then
+  exit "$test_exit"
+fi
 
 coverage="$(go tool cover -func="$profile" | awk '/^total:/{gsub("%","",$3); print $3}')"
 if [[ -z "$coverage" ]]; then

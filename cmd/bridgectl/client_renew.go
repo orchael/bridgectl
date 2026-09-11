@@ -262,7 +262,11 @@ func isTLSVerificationError(err error) bool {
 		return true
 	}
 	var invalidCert x509.CertificateInvalidError
-	return errors.As(err, &invalidCert)
+	if errors.As(err, &invalidCert) {
+		return true
+	}
+	var certVerifyErr *tls.CertificateVerificationError
+	return errors.As(err, &certVerifyErr)
 }
 
 func renewalToken(stepCAURL, certPath, keyPath string) (string, error) {

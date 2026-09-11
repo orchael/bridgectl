@@ -28,6 +28,12 @@ mkdir -p /home/bridge/.gemini /home/bridge/.config
 chown bridge:bridge /home/bridge
 chown bridge:bridge /home/bridge/.gemini 2>/dev/null || true
 chown bridge:bridge /home/bridge/.config 2>/dev/null || true
+# When a Docker volume is mounted at ~/.config/bridgectl, the mount point
+# is owned by root. Chown it so the bridge user can create subdirectories
+# (e.g. certs/) during EnsurePKI.
+if [ -d /home/bridge/.config/bridgectl ]; then
+  chown bridge:bridge /home/bridge/.config/bridgectl 2>/dev/null || true
+fi
 
 # Mirror what systemd RuntimeDirectory=bridge does: create and own
 # the runtime dir so the bridge process can write the system addr file.

@@ -31,7 +31,7 @@ See the Docusaurus documentation under [docs/](docs/) for architecture details.
 
 ### Prerequisites
 
-- [Go 1.25+](https://go.dev/dl/)
+- [Go 1.26+](https://go.dev/dl/)
 - **Node.js 24.x** (for provider CLIs -- use the version in `.nvmrc`). Install via any of these methods:
   - [nvm](https://github.com/nvm-sh/nvm) (recommended): `nvm install` after cloning
   - **macOS Homebrew**: `brew install node@24`
@@ -330,7 +330,7 @@ Full documentation source: [docs/docs/intro.md](docs/docs/intro.md)
 |----------|--------|---------------|
 | `claude` | `./node_modules/.bin/claude` | `CLAUDE_CODE_OAUTH_TOKEN` |
 | `opencode` | `./node_modules/.bin/opencode` | `OPENAI_API_KEY` |
-| `codex` | `./node_modules/.bin/codex` | `OPENAI_API_KEY` |
+| `codex` | `./node_modules/.bin/codex` | Existing account, `CODEX_AUTH`, or API key ([precedence](docs/docs/reference/configuration.md#codex-authentication)) |
 | `gemini` | `agy` | OAuth2 credentials (`~/.gemini/oauth_creds.json`) |
 
 Providers are configured in `config/bridge-dev.yaml`. See [docs/docs/reference/configuration.md](docs/docs/reference/configuration.md) for configuration reference.

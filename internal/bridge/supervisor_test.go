@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -45,9 +44,9 @@ type termTrapProvider struct {
 func (p *termTrapProvider) StopGrace() time.Duration { return 500 * time.Millisecond }
 
 func (p *termTrapProvider) BuildCommand(ctx context.Context, cfg SessionConfig) (*exec.Cmd, error) {
-	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestGracefulShutdownHelperProcess")
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c",
+		`trap 'printf "BRIDGE_TERM_OK\n"; exit 0' TERM; while true; do sleep 3600; done`)
 	cmd.Dir = cfg.RepoPath
-	cmd.Env = append(os.Environ(), "BRIDGE_GRACEFUL_HELPER=1")
 	return cmd, nil
 }
 
@@ -58,26 +57,10 @@ type ignoreTermProvider struct {
 func (p *ignoreTermProvider) StopGrace() time.Duration { return 5 * time.Second }
 
 func (p *ignoreTermProvider) BuildCommand(ctx context.Context, cfg SessionConfig) (*exec.Cmd, error) {
-	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestGracefulShutdownHelperProcess")
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c",
+		`trap '' TERM; printf 'BRIDGE_IGNORE_TERM_READY\n'; while true; do sleep 3600; done`)
 	cmd.Dir = cfg.RepoPath
-	cmd.Env = append(os.Environ(), "BRIDGE_IGNORE_TERM_HELPER=1")
 	return cmd, nil
-}
-
-func TestGracefulShutdownHelperProcess(t *testing.T) {
-	switch {
-	case os.Getenv("BRIDGE_GRACEFUL_HELPER") == "1":
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGTERM)
-		<-sigCh
-		_, _ = os.Stdout.WriteString("BRIDGE_TERM_OK\n")
-		os.Exit(0)
-	case os.Getenv("BRIDGE_IGNORE_TERM_HELPER") == "1":
-		signal.Ignore(syscall.SIGTERM)
-		select {}
-	default:
-		return
-	}
 }
 
 type setupRunnerFunc func(context.Context, string, []string) ([]string, error)
@@ -509,14 +492,18 @@ func TestSupervisorShutdownForceStopWaitsForTerminalPersistence(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	// Wait for the session process to be running before attempting shutdown,
-	// otherwise the process may exit before the deadline fires.
-	for range 50 {
+	// Wait for the shell helper to write its readiness marker to the PTY.
+	ready := false
+	for range 200 {
 		info, _ := sup.Get("shutdown-force-1")
-		if info.State == SessionStateRunning {
+		if info.State == SessionStateRunning && info.LastSeq > 0 {
+			ready = true
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatal("helper process did not become ready within 2 s")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)

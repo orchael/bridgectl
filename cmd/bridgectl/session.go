@@ -240,6 +240,7 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 
 	fd := int(os.Stdin.Fd())
 	isObserver := role == bridgev1.AttachRole_ATTACH_ROLE_OBSERVER && !takeOver
+	var writerReady atomic.Bool
 	var restore func()
 	if term.IsTerminal(fd) {
 		// When stdin is a TTY, enable raw mode for both writers and observers.
@@ -255,6 +256,13 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 		var restoreOnce sync.Once
 		restore = func() {
 			restoreOnce.Do(func() {
+				if !isObserver {
+					// Discard unread keystrokes on every writer exit, including
+					// when the stream ends before its input goroutine starts.
+					if err := discardTerminalInput(fd); err != nil {
+						fmt.Fprintf(os.Stderr, "discard terminal input: %v\r\n", err)
+					}
+				}
 				_ = term.Restore(fd, oldState)
 			})
 		}
@@ -289,40 +297,39 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 		return fmt.Errorf("attach: %w", err)
 	}
 
-	if takeOver {
-		_, claimErr := client.ClaimWriter(ctx, &bridgev1.ClaimWriterRequest{
-			SessionId: sessionID,
-			ClientId:  clientID,
-			Force:     true,
-		})
-		if claimErr != nil {
-			restore()
-			return fmt.Errorf("claim writer: %w", claimErr)
-		}
-	}
-
 	isWriter := role == bridgev1.AttachRole_ATTACH_ROLE_WRITER || takeOver
 	var detached atomic.Bool
+	var attachmentReady bool
+	var claimErr error
 	var sessionExit string
 
 	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	setupSigwinch(sigCh)
 	defer signal.Stop(sigCh)
+	var resizeMu sync.Mutex
+	resize := func() {
+		resizeMu.Lock()
+		defer resizeMu.Unlock()
+		c, r := currentTTYSize()
+		_, _ = client.ResizeSession(ctx, &bridgev1.ResizeSessionRequest{
+			SessionId: sessionID,
+			ClientId:  stream.ClientID(),
+			Cols:      c,
+			Rows:      r,
+		})
+	}
 
 	go func() {
 		handleAttachSignals(ctx, sigCh, isWriter, func() {
-			c, r := currentTTYSize()
-			_, _ = client.ResizeSession(context.Background(), &bridgev1.ResizeSessionRequest{
-				SessionId: sessionID,
-				ClientId:  stream.ClientID(),
-				Cols:      c,
-				Rows:      r,
-			})
+			if !writerReady.Load() {
+				return
+			}
+			resize()
 		}, cancel)
 	}()
 
-	if isWriter {
+	startWriter := func() {
 		go func() {
 			w := &inputWriter{cfg: inputWriterConfig{
 				Reader:    os.Stdin,
@@ -343,7 +350,8 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 			}}
 			w.Run()
 		}()
-	} else if term.IsTerminal(fd) {
+	}
+	if !isWriter && term.IsTerminal(fd) {
 		// In raw mode ISIG is disabled, so the terminal won't generate
 		// SIGINT for Ctrl+C. Read stdin and handle it manually.
 		go func() {
@@ -366,6 +374,27 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 
 	err = stream.RecvAll(ctx, func(ev *bridgev1.AttachSessionEvent) error {
 		switch ev.Type {
+		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_ATTACHED:
+			attachmentReady = true
+			// AttachSession only prepares the SDK wrapper; RecvAll opens the
+			// stream. The server must confirm attachment before we claim or write.
+			if isWriter && !writerReady.Load() {
+				if takeOver {
+					_, claimErr = client.ClaimWriter(ctx, &bridgev1.ClaimWriterRequest{
+						SessionId: sessionID,
+						ClientId:  clientID,
+						Force:     true,
+					})
+					if claimErr != nil {
+						claimErr = fmt.Errorf("claim writer: %w", claimErr)
+						return claimErr
+					}
+				}
+				writerReady.Store(true)
+				resize()
+				startWriter()
+			}
+			return nil
 		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_OUTPUT:
 			_, writeErr := os.Stdout.Write(ev.Payload)
 			return writeErr
@@ -388,6 +417,9 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 		}
 	})
 	restore()
+	if claimErr != nil {
+		return claimErr
+	}
 
 	if detached.Load() {
 		fmt.Fprintf(os.Stderr, "\r\nDetached from session %s\r\n", sessionID)
@@ -397,6 +429,12 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 	if sessionExit != "" {
 		fmt.Fprintf(os.Stderr, "\r\n%s\r\n", sessionExit)
 		return nil
+	}
+	if !attachmentReady && ctx.Err() == nil {
+		if err == nil {
+			return fmt.Errorf("attach: stream ended before attachment was acknowledged")
+		}
+		return fmt.Errorf("attach: %w", err)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\r\nsession ended: %v\r\n", err)
