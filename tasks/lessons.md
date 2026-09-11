@@ -1,5 +1,12 @@
 # Lessons
 
+## 2026-09-11 Remote Step CA E2E False Success
+- Incident/bug: Client enrollment requested `admin` although the test CA created `bridge-jwk`; the Make target still printed `PASSED` after the client exited 1.
+- Root cause pattern: `docker wait` prints the container status to stdout and can return success itself for a failed container. Detached setup errors were also overwritten, and default Compose `ps` can omit an already-exited client.
+- Follow-on failures: The client dialed `bridge-server` although the server certificate covered `server`; SDK tests expected a local CA bundle that client init does not create when given an external root path.
+- Preventative rule: Align enrollment with CA initialization, dial a certificate SAN, supply the SDK trust bundle, capture the container status explicitly, include stopped containers during lookup, and preserve setup errors through cleanup.
+- Validation added: `TestMakeTargetResult` exercises success, client failure, early exit, build/startup/lookup/wait errors, missing containers, and invalid wait output using a fake Docker executable against the real Make target.
+
 ## 2026-09-10 CLI Takeover Stream Ordering
 - Incident/bug: `session attach --take-over` claimed the writer slot before opening its observer stream, returning `permission denied`.
 - Root cause pattern: SDK `AttachSession` constructs a lazy wrapper; `RecvAll` performs the actual RPC. Existing handoff tests attached through the SDK and never exercised CLI ordering.

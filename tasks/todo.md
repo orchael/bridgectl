@@ -1,3 +1,56 @@
+# Remote Step CA E2E failure reporting (2026-09-11)
+
+Mode: Autonomous localized test-harness bug fix. Governing requirement: PRD
+container acceptance criteria for remote Step CA E2E.
+
+- [x] Reproduce false success with a fake Docker command and regression tests.
+- [x] Align the client with the initialized JWK provisioner and propagate setup,
+  wait, and container failures while preserving cleanup.
+- [x] Run harness regressions, Compose validation, and the real Docker E2E.
+
+Scope: Make target and test client; no production authentication changes.
+Risk: a fast-exiting client disappears from the default Compose `ps` output;
+include stopped containers. Keep detached startup because CA init is a one-shot
+service. Rollback: revert the harness edits; no persistent data migration.
+
+Live verification exposed a second enrollment mismatch after certificate issuance
+succeeded: server startup defaults to a certificate for `server`, but the
+client dials `bridge-server`. Extend the harness fix to use the Compose service
+DNS name covered by that certificate; no TLS verification changes.
+
+After enrollment succeeded, SDK tests failed because their expected local
+`ca-bundle.crt` was missing. Client init uses the supplied Step CA root path;
+copy that public root into the SDK test fixture's expected bundle location.
+
+Evidence:
+- `TestMakeTargetResult` reproduced false success before the fix; all nine cases
+  pass with `go test -race -count=1 ./e2e/remote-stepca`.
+- `make test-remote-stepca` exits 0 after certificate issuance, JWT enrollment,
+  health, provider listing, and echo-session checks; cleanup completes. The
+  Claude/Codex session checks skip without credentials, and the host-only Make
+  regression skips inside the runtime image, which has no `make` binary.
+- The first live rerun correctly printed `FAILED (exit 1)` for the certificate
+  SAN mismatch, proving container failure propagation against real Docker.
+- `make lint` passes with zero issues. Compose config, shell syntax, formatting,
+  and `git diff --check` pass.
+- `make test` fails in the existing
+  `TestCLISuite/TestRepoSetupConfigEnvironmentPropagation` at its five-second
+  repository-setup timeout. An isolated race-test rerun reproduces this failure;
+  other packages passed. This separate timeout is outside the harness fix.
+
+PR preparation: a fresh `make test` run passed the full race-test suite, including
+the previously timing-out repository-setup test. `make test-cover-maintained`
+passed with 78.8% coverage against the 75% gate.
+
+Copilot cycle 1 (PR #222, commit `b06425d`): no review threads were published,
+but the review body identified a valid coverage gap (score 2). Strengthened the
+stopped-client case to require `ps -a -q`, waiting on the discovered client, and
+propagation of its distinct exit code 23. All nine race-tested cases pass.
+
+Final Docker run log: `/tmp/bridgectl-remote-stepca-verification.log`.
+Rollback remains limited to these harness and documentation edits; disposable
+Compose containers and volumes were removed by the successful Make target.
+
 # Codex Authentication Lifecycle (2026-09-10)
 
 User approved security-sensitive implementation following review. Governing
