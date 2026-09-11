@@ -409,6 +409,12 @@ that user sessions will use.
 - `codex`, `claude`, `opencode`, and `gemini` are available on `PATH` in the
   published-style image.
 - Docker command arguments are honored after entrypoint initialization.
+- The remote Step CA E2E client enrolls using the JWK provisioner created by
+  the test CA and connects using a DNS name in the server certificate. The SDK
+  test fixture uses that CA's root as its trust bundle.
+  `make test-remote-stepca` reports success only when setup and
+  the client succeed; build, startup, wait, and client failures return nonzero
+  after Compose cleanup, including when the client has already exited.
 - Provider unprotected mode is opt-in, provider-scoped, defaults to protected
   behavior, and fails closed on invalid boolean values.
 - Manual Docker e2e coverage starts a published-style bridge container and uses

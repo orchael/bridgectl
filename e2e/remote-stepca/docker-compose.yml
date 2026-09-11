@@ -73,7 +73,8 @@ services:
       context: ../..
       dockerfile: e2e/remote-stepca/Dockerfile.remote-client
     environment:
-      BRIDGE_SERVER: bridge-server:9445
+      # Step CA server startup defaults to a certificate for "server".
+      BRIDGE_SERVER: server:9445
       STEP_CA_URL: "https://step-ca.local:9443"
       STEP_CA_PROVISIONER_PASSWORD: "remote-e2e-password"
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}

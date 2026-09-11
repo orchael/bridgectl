@@ -79,16 +79,24 @@ test-remote-mtls:
 	docker compose -f e2e/remote-mtls/docker-compose.yml down -v; \
 	exit $$rc
 
+.PHONY: test-remote-stepca
 test-remote-stepca:
 	@set +e; \
 	CF=e2e/remote-stepca/docker-compose.yml; \
-	docker compose -f $$CF build; \
-	docker compose -f $$CF up -d; \
-	docker compose -f $$CF logs -f remote-client & \
-	LOG_PID=$$!; \
-	docker wait $$(docker compose -f $$CF ps -q remote-client) 2>/dev/null; \
-	rc=$$?; \
-	kill $$LOG_PID 2>/dev/null; wait $$LOG_PID 2>/dev/null; \
+	rc=0; \
+	docker compose -f $$CF build && docker compose -f $$CF up -d || rc=$$?; \
+	if [ $$rc -eq 0 ]; then \
+		docker compose -f $$CF logs -f remote-client & \
+		LOG_PID=$$!; \
+		if CLIENT_ID=$$(docker compose -f $$CF ps -a -q remote-client) && [ -n "$$CLIENT_ID" ]; then \
+			rc=$$(docker wait "$$CLIENT_ID") || rc=$$?; \
+			case "$$rc" in ''|*[!0-9]*) rc=1 ;; esac; \
+		else \
+			echo "ERROR: could not find remote-client container" >&2; \
+			rc=1; \
+		fi; \
+		kill $$LOG_PID 2>/dev/null; wait $$LOG_PID 2>/dev/null; \
+	fi; \
 	echo ""; \
 	echo "========================================"; \
 	if [ $$rc -eq 0 ]; then \

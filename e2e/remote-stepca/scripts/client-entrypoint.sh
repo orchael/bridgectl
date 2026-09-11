@@ -43,6 +43,8 @@ done
 echo "" | tee -a "$RESULTS_FILE"
 echo "==> Step: bridgectl client init (Step CA + enroll)" | tee -a "$RESULTS_FILE"
 mkdir -p "$CLIENT_STATE/certs"
+# The SDK tests discover a local CA bundle; client init uses STEP_CA_ROOT directly.
+cp "$STEP_CA_ROOT" "$CLIENT_STATE/certs/ca-bundle.crt"
 
 PW_FILE=$(mktemp)
 echo -n "$STEP_CA_PROVISIONER_PASSWORD" > "$PW_FILE"
@@ -50,7 +52,7 @@ echo -n "$STEP_CA_PROVISIONER_PASSWORD" > "$PW_FILE"
 BRIDGECTL_STATE_DIR="$CLIENT_STATE" bridgectl client init \
   --step-ca-url "$STEP_CA_URL" \
   --step-ca-root "$STEP_CA_ROOT" \
-  --provisioner admin \
+  --provisioner bridge-jwk \
   --step-ca-provisioner-password-file "$PW_FILE" \
   --name remote-stepca-client \
   --target "$BRIDGE_SERVER" 2>&1 | tee -a "$RESULTS_FILE"
