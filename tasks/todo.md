@@ -1,3 +1,54 @@
+# Codex Authentication Lifecycle (2026-09-10)
+
+User approved security-sensitive implementation following review. Governing
+requirements: PRD CA-1 through CA-5. Scope: provider auth source selection,
+desktop-local mutable credentials, and session-aware health. Parent project
+owns secret reload and live desktop E2E integration.
+
+- [x] Define PRD lifecycle and rotation contract before implementation.
+- [x] Demonstrate failing account preservation, precedence, home isolation,
+  prepared health, and native API-key fallback regression tests.
+- [x] Implement common source resolution and atomic bootstrap.
+- [x] Run provider/full Go tests, race checks, and coverage; build E2E binary.
+
+Evidence: `TestCodexLifecycle*` failed before implementation for all five
+original defects; startup-probe and rotation diagnostic regressions also failed
+before their fixes. `go test ./internal/provider -count=1` passed.
+`GOFLAGS=-buildvcs=false go test -race -count=1
+-coverprofile=/tmp/bridgectl-codex-auth-coverage-fixed.out ./...` passed, including
+the local CLI E2E suite. Provider coverage is 81.2%; whole-repo instrumented
+coverage is 43.8% including generated code, examples, and binaries (existing
+coverage gap, not claimed as meeting the global 75% rule). An earlier sandbox
+run failed due to read-only Go cache/VCS stamping; rerunning with approved cache
+access and VCS stamping disabled resolved those environment failures.
+Linux amd64 E2E binary: `/tmp/bridgectl-codex-auth-linux-amd64`.
+
+Credential-environment hardening: strengthened account and API fallback tests
+to assert variables are absent, not merely empty. Both failed before changing
+child preparation to remove all CODEX_AUTH, CODEX_API_KEY, and OPENAI_API_KEY
+entries. This avoids native CLI presence checks overriding the selected file.
+
+PR review follow-up: effective Windows `USERPROFILE` is now supported when
+`HOME` is absent, without importing the daemon's account into a prepared
+environment. Platform-home regression failed before the helper was added.
+CI lint installation failed because goimports@latest required Go 1.26 while
+the workflow uses Go 1.25.7; pin goimports to the repository's x/tools v0.44.0
+(its module declares Go 1.25.0). Copilot Windows rename/Geteuid objections were
+checked against Go source: Windows Rename uses MOVEFILE_REPLACE_EXISTING and
+syscall.Geteuid exists there and returns -1.
+
+Review follow-up: added regressions confirming health rejects a home nested
+under a regular file, while an unwritable missing bootstrap directory fails
+authoritatively in command preparation before process launch. Documented that
+read-only health verifies source availability, not future write success;
+permission prediction would incorrectly reject owned directories that
+preparation intentionally repairs with chmod. Both focused tests passed.
+
+Risk: account token refresh/revocation remains owned by Codex and remote login
+service; structural validation cannot prove server acceptance. Rollback: restore
+previous binary; retain existing auth files and secret values. Never restore the
+old seed over a refreshed file during rollback.
+
 # Issue 57 Implementation Plan
 
 ## Governing PRD

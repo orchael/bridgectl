@@ -426,7 +426,7 @@ func codexAuthExpiredError(providerName, text string) error {
 	if providerName != "codex" || !looksLikeCodexAuthExpired(text) {
 		return nil
 	}
-	return errors.New("codex account auth is expired; refresh the Codex auth.json for this desktop, or remove CODEX_AUTH if you intend to use API-key auth")
+	return errors.New("codex account auth is expired; refresh this desktop's account login (auth.json), or update its secret and reload credentials, then start a new session")
 }
 
 func looksLikeCodexAuthExpired(text string) bool {

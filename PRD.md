@@ -356,6 +356,34 @@ no command-line arguments are supplied.
   that points to refreshing the desktop's `auth.json` instead of exposing only
   the provider's raw token expiry payload.
 
+### Codex Desktop Authentication Lifecycle
+
+- CA-1: Prefer an existing valid account `auth.json` in explicit `CODEX_HOME`,
+  or `~/.codex` then `~/.config/bridgectl/codex-home` when no home is specified.
+  Explicit homes isolate sessions and never fall back to another home.
+  Home discovery uses the effective session's `HOME`, or `USERPROFILE` on
+  Windows, without borrowing a daemon account absent from that environment.
+- CA-2: Bootstrap missing account credentials from valid `CODEX_AUTH` JSON into
+  explicit `CODEX_HOME` or the managed home. Each desktop owns its mutable copy;
+  subsequent sessions and daemon restarts preserve credentials refreshed by Codex.
+- CA-3: With no account or valid seed, use `CODEX_API_KEY`, then
+  `OPENAI_API_KEY`, then an existing API-key auth file. Materialize environment
+  API keys in native `auth.json`. Account sessions suppress API-key environment
+  overrides. Malformed/empty credential files and seeds do not pass health alone.
+- CA-4: Health checks use the actual session environment, including its home,
+  and match command preparation. Credential contents never appear in errors.
+  Health checks select and validate readable credential sources without writing;
+  command preparation validates bootstrap directory creation and atomic writes
+  and must report failures before launching the provider.
+  Startup probes use the same selected credentials. Fallback selects local
+  credential sources; a server-rejected account is reported to the operator,
+  never retried with billable API credentials or replayed automatically.
+- CA-5: Operators rotate credentials explicitly: stop the daemon and its
+  sessions, replace its environment, remove the selected home's `auth.json`,
+  then restart. No fingerprint files are required. Clear native and managed
+  auth files when replacing all default-home sources. Other Codex state stays.
+  This interrupts existing sessions; new sessions use the replacement seed.
+
 ### Provider-Scoped Unprotected Mode
 
 Provider sessions remain protected by default. Operators may opt a provider into

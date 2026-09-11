@@ -112,8 +112,12 @@ func (p *StdioProvider) BuildCommand(ctx context.Context, cfg bridge.SessionConf
 }
 
 func (p *StdioProvider) ValidateStartup(ctx context.Context) error {
+	return p.validateStartupWithEnv(ctx, filterEnv(os.Environ()))
+}
+
+func (p *StdioProvider) validateStartupWithEnv(ctx context.Context, env []string) error {
 	for _, envName := range p.cfg.RequiredEnv {
-		if strings.TrimSpace(os.Getenv(envName)) == "" {
+		if strings.TrimSpace(envValue(env, envName)) == "" {
 			return fmt.Errorf("provider %q requires env var %q", p.cfg.ProviderID, envName)
 		}
 	}
@@ -126,15 +130,15 @@ func (p *StdioProvider) ValidateStartup(ctx context.Context) error {
 	case "none":
 		return nil
 	case "output":
-		return p.validateStartupOutput(ctx)
+		return p.validateStartupOutput(ctx, env)
 	case "prompt":
-		return p.validateStartupPrompt(ctx)
+		return p.validateStartupPrompt(ctx, env)
 	default:
 		return fmt.Errorf("provider %q has unsupported startup probe %q", p.cfg.ProviderID, p.cfg.StartupProbe)
 	}
 }
 
-func (p *StdioProvider) validateStartupPrompt(ctx context.Context) error {
+func (p *StdioProvider) validateStartupPrompt(ctx context.Context, env []string) error {
 	if p.promptRe == nil {
 		return nil
 	}
@@ -152,7 +156,7 @@ func (p *StdioProvider) validateStartupPrompt(ctx context.Context) error {
 	wd, _ := os.Getwd()
 	cmd := exec.CommandContext(probeCtx, binPath, args...)
 	cmd.Dir = wd
-	cmd.Env = filterEnv(os.Environ())
+	cmd.Env = env
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: 120, Rows: 40})
 	if err != nil {
@@ -188,7 +192,7 @@ func (p *StdioProvider) validateStartupPrompt(ctx context.Context) error {
 	}
 }
 
-func (p *StdioProvider) validateStartupOutput(ctx context.Context) error {
+func (p *StdioProvider) validateStartupOutput(ctx context.Context, env []string) error {
 	probeCtx, cancel := context.WithTimeout(ctx, p.cfg.StartupTimeout)
 	defer cancel()
 
@@ -203,7 +207,7 @@ func (p *StdioProvider) validateStartupOutput(ctx context.Context) error {
 	wd, _ := os.Getwd()
 	cmd := exec.CommandContext(probeCtx, binPath, args...)
 	cmd.Dir = wd
-	cmd.Env = filterEnv(os.Environ())
+	cmd.Env = env
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: 120, Rows: 40})
 	if err != nil {
