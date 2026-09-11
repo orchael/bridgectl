@@ -513,12 +513,17 @@ func TestSupervisorShutdownForceStopWaitsForTerminalPersistence(t *testing.T) {
 	// Wait for the helper process to install its signal handler. The helper
 	// writes "BRIDGE_IGNORE_TERM_READY" to stdout once signal.Ignore is in
 	// place; we detect that by checking the session buffer has received output.
+	ready := false
 	for range 200 {
 		info, _ := sup.Get("shutdown-force-1")
 		if info.State == SessionStateRunning && info.LastSeq > 0 {
+			ready = true
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatal("helper process did not become ready within 2 s")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
