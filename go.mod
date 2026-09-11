@@ -1,6 +1,6 @@
 module github.com/orchael/bridgectl
 
-go 1.25.7
+go 1.26.0
 
 require (
 	github.com/creack/pty v1.1.24
