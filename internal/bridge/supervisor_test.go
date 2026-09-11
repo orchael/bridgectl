@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -16,22 +15,6 @@ import (
 	"testing"
 	"time"
 )
-
-// testSubprocessEnv returns os.Environ() with Go coverage/test infrastructure
-// variables removed. When go test -coverprofile runs, the parent binary sets
-// GOCOVERDIR (and possibly other internal vars) in its environment. A re-
-// executed test binary that inherits these can fail flag parsing on some
-// platforms (observed as exit code 2 on Linux CI runners with Go 1.26).
-func testSubprocessEnv(extra ...string) []string {
-	var filtered []string
-	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "GOCOVERDIR=") {
-			continue
-		}
-		filtered = append(filtered, e)
-	}
-	return append(filtered, extra...)
-}
 
 type testProvider struct {
 	id        string
@@ -61,9 +44,9 @@ type termTrapProvider struct {
 func (p *termTrapProvider) StopGrace() time.Duration { return 500 * time.Millisecond }
 
 func (p *termTrapProvider) BuildCommand(ctx context.Context, cfg SessionConfig) (*exec.Cmd, error) {
-	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestGracefulShutdownHelperProcess")
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c",
+		`trap 'printf "BRIDGE_TERM_OK\n"; exit 0' TERM; while true; do sleep 3600; done`)
 	cmd.Dir = cfg.RepoPath
-	cmd.Env = testSubprocessEnv("BRIDGE_GRACEFUL_HELPER=1")
 	return cmd, nil
 }
 
@@ -74,27 +57,10 @@ type ignoreTermProvider struct {
 func (p *ignoreTermProvider) StopGrace() time.Duration { return 5 * time.Second }
 
 func (p *ignoreTermProvider) BuildCommand(ctx context.Context, cfg SessionConfig) (*exec.Cmd, error) {
-	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestGracefulShutdownHelperProcess")
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c",
+		`trap '' TERM; printf 'BRIDGE_IGNORE_TERM_READY\n'; while true; do sleep 3600; done`)
 	cmd.Dir = cfg.RepoPath
-	cmd.Env = testSubprocessEnv("BRIDGE_IGNORE_TERM_HELPER=1")
 	return cmd, nil
-}
-
-func TestGracefulShutdownHelperProcess(t *testing.T) {
-	switch {
-	case os.Getenv("BRIDGE_GRACEFUL_HELPER") == "1":
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGTERM)
-		<-sigCh
-		_, _ = os.Stdout.WriteString("BRIDGE_TERM_OK\n")
-		os.Exit(0)
-	case os.Getenv("BRIDGE_IGNORE_TERM_HELPER") == "1":
-		signal.Ignore(syscall.SIGTERM)
-		_, _ = os.Stdout.WriteString("BRIDGE_IGNORE_TERM_READY\n")
-		select {}
-	default:
-		return
-	}
 }
 
 type setupRunnerFunc func(context.Context, string, []string) ([]string, error)
@@ -526,9 +492,7 @@ func TestSupervisorShutdownForceStopWaitsForTerminalPersistence(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	// Wait for the helper process to install its signal handler. The helper
-	// writes "BRIDGE_IGNORE_TERM_READY" to stdout once signal.Ignore is in
-	// place; we detect that by checking the session buffer has received output.
+	// Wait for the shell helper to write its readiness marker to the PTY.
 	ready := false
 	for range 200 {
 		info, _ := sup.Get("shutdown-force-1")
