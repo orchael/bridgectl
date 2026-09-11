@@ -74,6 +74,7 @@ func TestGracefulShutdownHelperProcess(t *testing.T) {
 		os.Exit(0)
 	case os.Getenv("BRIDGE_IGNORE_TERM_HELPER") == "1":
 		signal.Ignore(syscall.SIGTERM)
+		_, _ = os.Stdout.WriteString("BRIDGE_IGNORE_TERM_READY\n")
 		select {}
 	default:
 		return
@@ -509,11 +510,12 @@ func TestSupervisorShutdownForceStopWaitsForTerminalPersistence(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	// Wait for the session process to be running before attempting shutdown,
-	// otherwise the process may exit before the deadline fires.
-	for range 50 {
+	// Wait for the helper process to install its signal handler. The helper
+	// writes "BRIDGE_IGNORE_TERM_READY" to stdout once signal.Ignore is in
+	// place; we detect that by checking the session buffer has received output.
+	for range 200 {
 		info, _ := sup.Get("shutdown-force-1")
-		if info.State == SessionStateRunning {
+		if info.State == SessionStateRunning && info.LastSeq > 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
