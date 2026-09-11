@@ -6,7 +6,7 @@ ARG BUILD_FROM=source
 ARG INCLUDE_E2E_SCRIPTS=false
 
 # Source build stage
-FROM golang:1.25 AS source
+FROM golang:1.26 AS source
 
 WORKDIR /src
 COPY go.mod go.sum ./

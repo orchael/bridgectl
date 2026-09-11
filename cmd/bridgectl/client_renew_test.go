@@ -156,7 +156,11 @@ func TestRenewAudienceUsesRenewEndpoint(t *testing.T) {
 func TestIsTLSVerificationError(t *testing.T) {
 	err := fmt.Errorf("renew with token: %w", x509.UnknownAuthorityError{})
 	if !isTLSVerificationError(err) {
-		t.Fatal("isTLSVerificationError() = false, want true")
+		t.Fatal("isTLSVerificationError() = false for UnknownAuthorityError, want true")
+	}
+	certVerifyErr := &tls.CertificateVerificationError{Err: fmt.Errorf("x509: certificate is not trusted")}
+	if !isTLSVerificationError(fmt.Errorf("renew with token: %w", certVerifyErr)) {
+		t.Fatal("isTLSVerificationError() = false for CertificateVerificationError, want true")
 	}
 	if isTLSVerificationError(fmt.Errorf("renew with token: unauthorized")) {
 		t.Fatal("isTLSVerificationError() = true for non-TLS error, want false")

@@ -23,7 +23,7 @@ All tests should run on **Linux (Docker)**, **Linux (desktop)**, and
 
 | Requirement | Where |
 |---|---|
-| Go toolchain (1.25+) | local machine and Docker image |
+| Go toolchain (1.26+) | local machine and Docker image |
 | `make`, `docker`, `docker compose` | local machine |
 | `bridgectl` binary | built via `make build` or `go build ./cmd/bridgectl` |
 | Step CA server + OIDC provider | Tier-2 tests only (Sections 6, 7) |
@@ -43,7 +43,7 @@ can run inside the existing e2e Docker harness:
 make test-cli-e2e-docker
 
 # Unit tests with race detection
-docker run --rm -v "$PWD":/src -w /src golang:1.25-bookworm \
+docker run --rm -v "$PWD":/src -w /src golang:1.26-bookworm \
   go test -v -race -count=1 -timeout 120s ./...
 ```
 
@@ -427,7 +427,7 @@ The existing infrastructure supports this. All new tests run via:
 make test-cli-e2e-docker
 ```
 
-This uses `e2e/bridgectl/Dockerfile` (Go 1.25-bookworm) and
+This uses `e2e/bridgectl/Dockerfile` (Go 1.26-bookworm) and
 `e2e/bridgectl/docker-compose.yml`. No changes needed to the Docker setup
 for tests that do not require Step CA.
 

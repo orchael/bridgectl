@@ -31,7 +31,7 @@ See the Docusaurus documentation under [docs/](docs/) for architecture details.
 
 ### Prerequisites
 
-- [Go 1.25+](https://go.dev/dl/)
+- [Go 1.26+](https://go.dev/dl/)
 - **Node.js 24.x** (for provider CLIs -- use the version in `.nvmrc`). Install via any of these methods:
   - [nvm](https://github.com/nvm-sh/nvm) (recommended): `nvm install` after cloning
   - **macOS Homebrew**: `brew install node@24`

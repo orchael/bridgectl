@@ -1,5 +1,5 @@
 # Build stage — compile the step-ca e2e test binary.
-FROM golang:1.25.7 AS build
+FROM golang:1.26.0 AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./
