@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -171,7 +172,11 @@ infrastructure (Google, GitHub, Okta, etc.) managed through Step CA.`,
 			case discoveredMode == localserver.ModeTLS:
 				modeDesc = fmt.Sprintf("secure (TLS+JWT on %s)", srv.Addr())
 			default:
-				modeDesc = "local (unix socket, no auth)"
+				if runtime.GOOS == "windows" {
+					modeDesc = "local (TCP localhost, no auth)"
+				} else {
+					modeDesc = "local (unix socket, no auth)"
+				}
 			}
 			fmt.Fprintf(os.Stderr, "bridgectl server listening — %s (pid %d)\n", modeDesc, os.Getpid())
 

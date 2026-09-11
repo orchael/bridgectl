@@ -163,22 +163,15 @@ old seed over a refreshed file during rollback.
 
 # CLI Security Follow-ups (from PR #92 Copilot review)
 
-## Deferred — cert lifecycle
+Cert lifecycle items moved to GitHub Issues: #225 (cert renewal), #224 (SAN mismatch detection).
 
-- [ ] **Cert renewal**: Leaf certs (server, local-client) have 90-day validity but `EnsurePKI` uses `ca.crt` as sentinel and never regenerates them. Add expiry check (e.g. warn at 14 days, auto-regenerate at expiry) so secure mode doesn't silently break after 90 days.
-- [ ] **SAN mismatch detection**: If the user restarts with different `--san` values, the existing server cert is reused even though its SANs don't cover the new names. Compare requested SANs against the cert's actual SANs and regenerate if they differ.
+Previously listed items that were already fixed or addressed in later PRs:
+TestMain cleanup, Echo test assertion, Docker E2E cleanup trap, Windows status
+message, pki_test.go portability.
 
-## Lower priority
+## Remaining
 
-- [ ] **Windows status message**: `server.go:71` says "unix socket" in local mode but Windows uses TCP localhost. Make the status text platform-aware.
-- [ ] **pki_test.go portability**: `TestLoadPKIMaterial` hard-codes Unix-style `/tmp/...` paths. Use `filepath.Join` so it passes on Windows.
-- [ ] **TestMain cleanup**: `defer os.RemoveAll(dir)` in `TestMain` never runs because `os.Exit(m.Run())` terminates first. Capture exit code, clean up, then exit.
-- [ ] **Echo test assertion**: `TestSessionAttachAndInput` conditionally asserts `if got != ""` — silently passes when echo fails. Should require the expected output.
-
-## Deferred — pre-existing / out of scope
-
-- [ ] **GoReleaser Windows target**: `.goreleaser.yaml` includes `windows` for the CLI but `internal/provider/stdio.go` uses Unix-only APIs (`syscall.Kill`, `creack/pty`). Either add Windows build tags to the provider package or remove the Windows release target. (Pre-existing on parent branch.)
-- [ ] **Docker E2E cleanup trap**: `scripts/test-cli-e2e-docker.sh` doesn't install a trap for Ctrl-C — compose stack can be left behind on interrupt.
+- [ ] **GoReleaser Windows target**: `.goreleaser.yaml` includes `windows` for the CLI but `internal/bridge/supervisor.go` uses Unix-only APIs (`syscall.Kill`, `Setpgid`, `creack/pty`) and the CLI has unguarded PTY paths. The provider package now compiles on Windows (build-tag stubs in `stdio_pty_windows.go`), but the full `cmd/bridgectl` binary still fails cross-compilation. Either add build tags across `internal/bridge` and CLI PTY paths, or remove the Windows release target.
 # Startup Step CA Client Registry
 
 Mode: Approval-Required, approved by user request on 2026-08-09.
