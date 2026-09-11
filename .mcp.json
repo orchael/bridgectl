@@ -1,12 +1,12 @@
 {
   "mcpServers": {
-    "ai-agent-browser": {
+    "pilot": {
       "type": "stdio",
       "command": "npx",
       "args": [
-        "@markcallen/ai-agent-browser"
-      ],
-      "env": {"AAB_HEADLESS": "false"}
+        "-y",
+        "@everydaydevopsio/pilot"
+      ]
     }
   }
 }
