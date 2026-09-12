@@ -11,7 +11,7 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Guides',
-      items: ['guides/session-workflow', 'guides/web-ui', 'guides/step-ca-tailscale'],
+      items: ['guides/session-workflow', 'guides/web-ui', 'guides/step-ca-tailscale', 'guides/crew-integration'],
     },
     {
       type: 'category',
