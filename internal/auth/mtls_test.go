@@ -131,13 +131,17 @@ func TestCertReloader_HotReload(t *testing.T) {
 		t.Fatal("GetCertificate returned nil after hot-reload")
 	}
 
-	// Verify the reloaded cert has the new CN.
+	// Verify the reloaded cert actually differs from the original by comparing
+	// the raw DER bytes. tls.LoadX509KeyPair leaves Leaf nil, so we compare
+	// the DER directly rather than relying on Leaf pointer equality.
 	if len(reloaded.Certificate) == 0 {
 		t.Fatal("reloaded cert has no DER data")
 	}
-	origSerial := origCert.Leaf
-	if origSerial != nil && reloaded.Leaf != nil && origCert.Leaf == reloaded.Leaf {
-		t.Error("reloaded cert should differ from original")
+	if len(origCert.Certificate) == 0 {
+		t.Fatal("original cert has no DER data")
+	}
+	if string(reloaded.Certificate[0]) == string(origCert.Certificate[0]) {
+		t.Error("reloaded cert DER is identical to original — hot-reload did not replace the cert")
 	}
 }
 
@@ -175,7 +179,7 @@ func TestCertReloader_ReloadFailurePreservesOldCert(t *testing.T) {
 		t.Fatal("Reload with bad cert should fail, got nil")
 	}
 
-	// GetCertificate should still return the old cert without error.
+	// GetCertificate should still return the original cert unchanged.
 	stillValid, err := r.GetCertificate(nil)
 	if err != nil {
 		t.Fatalf("GetCertificate after failed reload: %v", err)
@@ -183,7 +187,13 @@ func TestCertReloader_ReloadFailurePreservesOldCert(t *testing.T) {
 	if stillValid == nil {
 		t.Fatal("GetCertificate returned nil after failed reload")
 	}
-	_ = origCert // still valid
+	// The returned cert must be the same DER as the original — not replaced.
+	if len(origCert.Certificate) == 0 || len(stillValid.Certificate) == 0 {
+		t.Fatal("cert has no DER data")
+	}
+	if string(stillValid.Certificate[0]) != string(origCert.Certificate[0]) {
+		t.Error("GetCertificate returned a different cert after failed reload — old cert was not preserved")
+	}
 }
 
 func TestServerTLSOnlyConfig(t *testing.T) {
