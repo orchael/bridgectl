@@ -272,11 +272,10 @@ func TestInputWriterOnReadErrorNil(t *testing.T) {
 		FlushInterval: 5 * time.Millisecond,
 	}}
 
-	// Should not panic.
+	// Should not panic. Run() is synchronous and flushes before returning, so
+	// data is guaranteed to be in mock once Run() returns.
 	w.Run()
 
-	// Give flush time to complete.
-	time.Sleep(20 * time.Millisecond)
 	if got := string(mock.allData()); got != "hi" {
 		t.Fatalf("data mismatch: got %q, want %q", got, "hi")
 	}
