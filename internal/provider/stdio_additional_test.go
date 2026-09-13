@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,5 +201,112 @@ func TestValidateStartupOutputAndPrompt(t *testing.T) {
 	})
 	if err := badProvider.ValidateStartup(context.Background()); err == nil {
 		t.Fatal("ValidateStartup accepted unsupported probe")
+	}
+}
+
+func TestStdioProvider_Accessors(t *testing.T) {
+	p := NewStdioProvider(StdioConfig{
+		ProviderID: "my-provider",
+		Binary:     "/usr/bin/env",
+		StreamJSON: true,
+		StripANSI:  true,
+	})
+
+	if got := p.ID(); got != "my-provider" {
+		t.Errorf("ID() = %q, want %q", got, "my-provider")
+	}
+	if got := p.Binary(); got != "/usr/bin/env" {
+		t.Errorf("Binary() = %q, want %q", got, "/usr/bin/env")
+	}
+	if !p.IsStreamJSON() {
+		t.Error("IsStreamJSON() = false, want true")
+	}
+	if !p.IsStripANSI() {
+		t.Error("IsStripANSI() = false, want true")
+	}
+}
+
+func TestStdioProvider_IsStreamJSON_False(t *testing.T) {
+	p := NewStdioProvider(StdioConfig{
+		ProviderID: "plain",
+		Binary:     "/bin/echo",
+		StreamJSON: false,
+	})
+	if p.IsStreamJSON() {
+		t.Error("IsStreamJSON() = true, want false for StreamJSON:false config")
+	}
+}
+
+func TestStdioProvider_IsStripANSI_False(t *testing.T) {
+	p := NewStdioProvider(StdioConfig{
+		ProviderID: "plain",
+		Binary:     "/bin/echo",
+		StripANSI:  false,
+	})
+	if p.IsStripANSI() {
+		t.Error("IsStripANSI() = true, want false for StripANSI:false config")
+	}
+}
+
+func TestStdioProvider_SetUnavailable(t *testing.T) {
+	p := NewStdioProvider(StdioConfig{
+		ProviderID: "probe",
+		Binary:     "/bin/echo",
+	})
+
+	// Health should pass before SetUnavailable.
+	if err := p.Health(context.Background()); err != nil {
+		t.Fatalf("Health before SetUnavailable: %v", err)
+	}
+
+	// Mark the provider as unavailable.
+	p.SetUnavailable(fmt.Errorf("startup probe failed"))
+
+	// Health should now return an error.
+	if err := p.Health(context.Background()); err == nil {
+		t.Error("Health after SetUnavailable returned nil, want error")
+	}
+}
+
+func TestAbsRoot_RelativePath(t *testing.T) {
+	// absRoot on a relative path should return an absolute path.
+	got, err := absRoot("relative/path")
+	if err != nil {
+		t.Fatalf("absRoot: %v", err)
+	}
+	if !filepath.IsAbs(got) {
+		t.Errorf("absRoot returned non-absolute path: %q", got)
+	}
+}
+
+func TestAbsRoot_AbsolutePath(t *testing.T) {
+	got, err := absRoot("/absolute/path")
+	if err != nil {
+		t.Fatalf("absRoot: %v", err)
+	}
+	if got != "/absolute/path" {
+		t.Errorf("absRoot = %q, want %q", got, "/absolute/path")
+	}
+}
+
+func TestIsStandaloneRelativePathArg(t *testing.T) {
+	cases := []struct {
+		arg  string
+		want bool
+	}{
+		{".", true},
+		{"..", true},
+		{"./foo", true},
+		{"../bar", true},
+		{"--flag", false},
+		{"--config=./foo", false},
+		{"plain-arg", false},
+		{"/absolute", false},
+	}
+	for _, tc := range cases {
+		got := isStandaloneRelativePathArg(tc.arg)
+		if got != tc.want {
+			t.Errorf("isStandaloneRelativePathArg(%q) = %v, want %v", tc.arg, got, tc.want)
+		}
 	}
 }
