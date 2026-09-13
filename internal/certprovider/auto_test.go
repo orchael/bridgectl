@@ -219,3 +219,65 @@ func TestAutoProvider_DefaultCAName(t *testing.T) {
 		t.Errorf("default CA name = %q, want %q", roots[0].Subject.CommonName, "bridgectl-auto-ca")
 	}
 }
+
+func TestAutoProvider_CAKeyPath(t *testing.T) {
+	dir := t.TempDir()
+	p, _ := NewAutoProvider(dir, "test-ca")
+	got := p.CAKeyPath()
+	if got != filepath.Join(dir, "ca.key") {
+		t.Errorf("CAKeyPath = %q, want %q", got, filepath.Join(dir, "ca.key"))
+	}
+}
+
+func TestAutoProvider_CACertPath(t *testing.T) {
+	dir := t.TempDir()
+	p, _ := NewAutoProvider(dir, "test-ca")
+	got := p.CACertPath()
+	if got != filepath.Join(dir, "ca.crt") {
+		t.Errorf("CACertPath = %q, want %q", got, filepath.Join(dir, "ca.crt"))
+	}
+}
+
+func TestAutoProvider_Enroll_CustomOutDir(t *testing.T) {
+	dir := t.TempDir()
+	outDir := filepath.Join(dir, "custom")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	p, _ := NewAutoProvider(dir, "test-ca")
+
+	id, err := p.Enroll(context.Background(), EnrollmentRequest{
+		CommonName: "client",
+		Role:       RoleClient,
+		OutDir:     outDir,
+	})
+	if err != nil {
+		t.Fatalf("Enroll with custom OutDir: %v", err)
+	}
+	if id.CertPath == "" {
+		t.Error("CertPath should not be empty")
+	}
+}
+
+func TestAutoProvider_Roots_NoCA(t *testing.T) {
+	dir := t.TempDir()
+	p, _ := NewAutoProvider(dir, "test-ca")
+
+	// No CA exists yet; Roots should return an error.
+	_, err := p.Roots(context.Background())
+	if err == nil {
+		t.Error("expected error from Roots when CA does not exist")
+	}
+}
+
+func TestAutoProvider_Renew_MissingCert(t *testing.T) {
+	dir := t.TempDir()
+	p, _ := NewAutoProvider(dir, "test-ca")
+
+	// Renew with a non-existent cert path.
+	id := &Identity{CertPath: filepath.Join(dir, "nonexistent.crt")}
+	err := p.Renew(context.Background(), id)
+	if err == nil {
+		t.Error("expected error from Renew when cert does not exist")
+	}
+}

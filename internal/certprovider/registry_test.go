@@ -44,6 +44,13 @@ func TestNew_Auto(t *testing.T) {
 	}
 }
 
+func TestNew_StepCAMissingConfig(t *testing.T) {
+	_, err := New("stepca", ProviderConfig{})
+	if err == nil {
+		t.Error("expected error for missing stepca config")
+	}
+}
+
 func TestNew_Unknown(t *testing.T) {
 	_, err := New("unknown-provider", ProviderConfig{})
 	if err == nil {
