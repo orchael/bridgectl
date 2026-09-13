@@ -2,6 +2,7 @@ package bridgeclient
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -102,5 +103,70 @@ func TestMapError_NonGRPC(t *testing.T) {
 	err := mapError(orig)
 	if err != orig {
 		t.Fatalf("non-gRPC error should pass through unchanged, got %v", err)
+	}
+}
+
+// TestMapError_SentinelMessages verifies that each mapped sentinel carries the
+// expected human-readable message so callers that only read err.Error() still
+// get a useful string without having to know the sentinel variable name.
+func TestMapError_SentinelMessages(t *testing.T) {
+	cases := []struct {
+		code    codes.Code
+		grpcMsg string
+		wantMsg string
+	}{
+		{codes.NotFound, "session not found", "session not found"},
+		{codes.AlreadyExists, "exists", "session already exists"},
+		{codes.Unauthenticated, "bad token", "unauthorized"},
+		{codes.PermissionDenied, "denied", "permission denied"},
+		{codes.ResourceExhausted, "rate limit exceeded", "rate limited"},
+		{codes.ResourceExhausted, "session limit reached", "session limit reached"},
+	}
+	for _, tc := range cases {
+		err := mapError(grpcErr(tc.code, tc.grpcMsg))
+		if err == nil {
+			t.Errorf("code=%v msg=%q: mapError returned nil", tc.code, tc.grpcMsg)
+			continue
+		}
+		if err.Error() != tc.wantMsg {
+			t.Errorf("code=%v msg=%q: Error()=%q, want %q", tc.code, tc.grpcMsg, err.Error(), tc.wantMsg)
+		}
+	}
+}
+
+// TestMapError_PassThroughPreservesMessage confirms that errors passed through
+// unchanged (Unavailable, Internal, etc.) still carry the original gRPC message
+// so callers can present a useful diagnostic.
+func TestMapError_PassThroughPreservesMessage(t *testing.T) {
+	msg := "connection error: dial tcp 127.0.0.1:9445: connect: connection refused"
+	err := mapError(grpcErr(codes.Unavailable, msg))
+	if err == nil {
+		t.Fatal("expected non-nil error")
+	}
+	if !strings.Contains(err.Error(), msg) {
+		t.Errorf("pass-through error message %q does not contain original message %q", err.Error(), msg)
+	}
+}
+
+// TestSentinelErrors verifies that the public sentinel error variables have the
+// expected message strings.
+func TestSentinelErrors(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{ErrSessionNotFound, "session not found"},
+		{ErrSessionAlreadyExists, "session already exists"},
+		{ErrProviderUnavailable, "provider unavailable"},
+		{ErrUnauthorized, "unauthorized"},
+		{ErrPermissionDenied, "permission denied"},
+		{ErrInputTooLarge, "input too large"},
+		{ErrSessionLimitReached, "session limit reached"},
+		{ErrRateLimited, "rate limited"},
+	}
+	for _, tc := range cases {
+		if got := tc.err.Error(); got != tc.want {
+			t.Errorf("%v.Error() = %q, want %q", tc.err, got, tc.want)
+		}
 	}
 }
