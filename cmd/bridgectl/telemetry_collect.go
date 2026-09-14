@@ -108,7 +108,7 @@ func parseTelemetryEventKinds(values []string) ([]telemetry.EventKind, error) {
 	for _, value := range values {
 		kind := telemetry.EventKind(value)
 		switch kind {
-		case telemetry.EventSessionStarted, telemetry.EventProviderOutput, telemetry.EventUserInput, telemetry.EventQuestion, telemetry.EventAnswer, telemetry.EventSessionEnded:
+		case telemetry.EventSessionStarted, telemetry.EventSessionContext, telemetry.EventProviderOutput, telemetry.EventUserInput, telemetry.EventQuestion, telemetry.EventAnswer, telemetry.EventSessionEnded:
 		default:
 			return nil, fmt.Errorf("unsupported telemetry event kind %q", value)
 		}

@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"unicode"
+	"unicode/utf8"
 
 	bridgev1 "github.com/orchael/bridgectl/gen/bridge/v1"
 	"google.golang.org/grpc"
@@ -102,15 +104,38 @@ func (s *GRPCCollectorServer) validateJSONL(data []byte) error {
 }
 
 func validateCollectorEvent(event Event) error {
+	if event.SchemaVersion != 1 && event.SchemaVersion != 2 {
+		return errors.New("unsupported schema version")
+	}
+	if event.Timestamp.IsZero() {
+		return errors.New("missing timestamp")
+	}
+	if event.SessionID == "" {
+		return errors.New("missing session ID")
+	}
+	if event.Sequence == 0 {
+		return errors.New("missing sequence")
+	}
+	if event.SchemaVersion == 2 && event.SourceID == "" {
+		return errors.New("schema v2 requires a source ID")
+	}
 	if event.SourceID != "" && !ValidSourceID(event.SourceID) {
 		return errors.New("invalid source ID")
+	}
+	if event.ActorID != "" && !ValidSourceID(event.ActorID) {
+		return errors.New("invalid actor ID")
 	}
 	if event.Text != "" && DefaultRedactor(event.Text) != event.Text {
 		return errors.New("event text contains unredacted sensitive content")
 	}
 	switch event.Kind {
+	case EventSessionContext:
+		if event.SchemaVersion != 2 || event.Context == nil || !validSessionContext(event.ActorID, *event.Context) {
+			return errors.New("invalid session context metadata")
+		}
+		return nil
 	case EventProviderOutput:
-		if event.SchemaVersion != 1 || event.Sequence == 0 || event.Direction != DirectionAgent || event.ByteCount < 1 {
+		if event.Direction != DirectionAgent || event.ByteCount < 1 {
 			return errors.New("invalid provider output metadata")
 		}
 		if event.Stream != StreamOutput && event.Stream != StreamThinking {
@@ -118,13 +143,54 @@ func validateCollectorEvent(event Event) error {
 		}
 		return validateOmittedContent(event)
 	case EventUserInput:
-		if event.SchemaVersion != 1 || event.Sequence == 0 || event.Direction != DirectionHuman || event.Stream != StreamInput || event.ByteCount < 1 {
+		if event.Direction != DirectionHuman || event.Stream != StreamInput || event.ByteCount < 1 {
 			return errors.New("invalid user input metadata")
 		}
 		return validateOmittedContent(event)
 	default:
 		return nil
 	}
+}
+
+func validSessionContext(actorID string, context SessionContext) bool {
+	if context.ActorID != actorID || (context.ActorID != "" && !ValidSourceID(context.ActorID)) ||
+		(context.SourceLabel != "" && !ValidSourceID(context.SourceLabel)) ||
+		!validMetadata(context.OS, 32) || !validMetadata(context.Arch, 32) ||
+		!validOptionalDigest(context.MachineID) || !validOptionalDigest(context.WorkingDirectoryID) || !validOptionalDigest(context.RepositoryID) ||
+		!validMetadata(context.RemoteHost, 253) || !validMetadata(context.Branch, 255) {
+		return false
+	}
+	if context.CommitSHA == "" {
+		return true
+	}
+	if len(context.CommitSHA) != 40 && len(context.CommitSHA) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(context.CommitSHA)
+	return err == nil
+}
+
+func validOptionalDigest(value string) bool {
+	if value == "" {
+		return true
+	}
+	if len(value) != sha256HexLength {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func validMetadata(value string, maxBytes int) bool {
+	if len(value) > maxBytes || !utf8.ValidString(value) {
+		return false
+	}
+	for _, char := range value {
+		if unicode.IsControl(char) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateOmittedContent(event Event) error {
@@ -134,7 +200,7 @@ func validateOmittedContent(event Event) error {
 		}
 		return nil
 	}
-	if event.OmittedReason != OmittedInvalidUTF8 || event.Text != "" || len(event.ContentHash) != sha256HexLength {
+	if (event.OmittedReason != OmittedInvalidUTF8 && event.OmittedReason != OmittedBufferLimit) || event.Text != "" || len(event.ContentHash) != sha256HexLength {
 		return errors.New("invalid omitted interaction content")
 	}
 	if _, err := hex.DecodeString(event.ContentHash); err != nil {

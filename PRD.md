@@ -1004,3 +1004,30 @@ answers.
   when omitted, bridgectl generates a UUID once and persists it with mode
   `0600` under the bridge telemetry state directory. Existing schema-version-1
   events without `source_id` remain readable as legacy-source events.
+- **TEL-116 — Versioned session context:** Newly captured telemetry uses schema
+  version 2 and emits one `session_context` record per session. The record may
+  include an explicit opaque actor ID and source label, OS/architecture, a
+  stable private machine ID, privacy-safe working-directory ID, and best-effort
+  Git repository metadata.
+  Raw absolute paths, repository URLs, credentials, hostnames, Git author
+  identities, and environment values are never persisted as context. Version-1
+  records remain readable and valid only under their legacy contract.
+- **TEL-117 — Private longitudinal identifiers:** Repository and working
+  directory identifiers are HMAC-SHA256 values generated with a private
+  32-byte identity key. The key is loaded from an operator-selected file or
+  generated once beneath the telemetry state directory with mode `0600`.
+  Canonical Git remotes have credentials, query strings, and fragments removed
+  before hashing. Explicit actor IDs and source labels use the bounded source-ID
+  character contract and remain optional pending authenticated attribution.
+- **TEL-118 — Incremental interaction analysis:** A provider-neutral analyzer
+  consumes events incrementally, deduplicates and orders them by composite
+  session identity and sequence, coalesces adjacent compatible stream events
+  into turns, and reports duplicates, gaps, out-of-order data, legacy records,
+  omitted content, and redactions. Thinking streams remain distinct from normal
+  output and are excluded from example LLM evidence by default.
+- **TEL-119 — Analysis integration examples:** The repository contains a
+  non-production example that derives deterministic collaboration metrics and
+  evidence-backed findings, exposes read-only HTTP endpoints, and constructs a
+  bounded redacted packet for an optional external model without making a model
+  API call. Production authentication, analysis orchestration, UI, and warehouse
+  storage remain outside bridgectl.

@@ -520,8 +520,10 @@ func waitForTelemetryEvents(path, sessionID string, timeout time.Duration) ([]te
 		_, hasProviderOutput := seen[telemetry.EventProviderOutput]
 		_, hasUserInput := seen[telemetry.EventUserInput]
 		_, hasStarted := seen[telemetry.EventSessionStarted]
+		_, hasContext := seen[telemetry.EventSessionContext]
 		_, hasEnded := seen[telemetry.EventSessionEnded]
-		if hasStarted && hasProviderOutput && hasUserInput && hasQuestion && hasAnswer && hasEnded && ordered &&
+		endedFinal := len(sessionEvents) > 0 && sessionEvents[len(sessionEvents)-1].Kind == telemetry.EventSessionEnded
+		if hasStarted && hasContext && hasProviderOutput && hasUserInput && hasQuestion && hasAnswer && hasEnded && endedFinal && ordered &&
 			question.Class == telemetry.ClassPermission &&
 			answer.Decision == telemetry.DecisionAccepted &&
 			answer.Fingerprint == question.Fingerprint &&
@@ -529,7 +531,7 @@ func waitForTelemetryEvents(path, sessionID string, timeout time.Duration) ([]te
 			strings.Contains(userText.String(), "yes") {
 			return sessionEvents, nil
 		}
-		lastErr = fmt.Errorf("full capture unexpected: started=%t provider_output=%t user_input=%t question=%t answer=%t ended=%t ordered=%t", hasStarted, hasProviderOutput, hasUserInput, hasQuestion, hasAnswer, hasEnded, ordered)
+		lastErr = fmt.Errorf("full capture unexpected: started=%t context=%t provider_output=%t user_input=%t question=%t answer=%t ended=%t ended_final=%t ordered=%t", hasStarted, hasContext, hasProviderOutput, hasUserInput, hasQuestion, hasAnswer, hasEnded, endedFinal, ordered)
 		time.Sleep(100 * time.Millisecond)
 	}
 	return nil, fmt.Errorf("timed out reading telemetry for session %s from %s: %w", sessionID, path, lastErr)

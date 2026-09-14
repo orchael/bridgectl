@@ -1,8 +1,10 @@
 package telemetry
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -32,6 +34,33 @@ func TestBuildReportRollingWindow(t *testing.T) {
 	feedback := BuildFeedback(events, now.Add(-2*time.Hour), now)
 	if feedback.SchemaVersion != 1 || len(feedback.Questions) != 1 || feedback.Questions[0].Asked != 2 {
 		t.Fatalf("feedback=%+v", feedback)
+	}
+}
+
+func TestReadEventsIgnoresMutableActiveSegment(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "20260914T000000.000000000Z-a.jsonl"), eventJSONL(t, Event{Kind: EventQuestion}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, activeSegmentName), append(eventJSONL(t, Event{Kind: EventAnswer}), []byte("{\"partial\":")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	events, err := ReadEvents(dir)
+	if err != nil || len(events) != 1 || events[0].Kind != EventQuestion {
+		t.Fatalf("events=%+v err=%v, want only immutable event", events, err)
+	}
+}
+
+func TestReadEventsSupportsRecordsLargerThanFourMiB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	want := strings.Repeat("x", 5<<20)
+	data := eventJSONL(t, Event{Kind: EventProviderOutput, Text: want})
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	events, err := ReadEvents(path)
+	if err != nil || len(events) != 1 || !bytes.Equal([]byte(events[0].Text), []byte(want)) {
+		t.Fatalf("large event length=%d events=%d err=%v", len(want), len(events), err)
 	}
 }
 

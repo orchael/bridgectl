@@ -207,3 +207,30 @@ func TestSegmentSpoolRejectsDiskBudgetSmallerThanSegment(t *testing.T) {
 		t.Fatal("disk budget smaller than segment limit was accepted")
 	}
 }
+
+func TestSegmentSpoolRecoveryDropsPartialActiveRecordAndStaleIncoming(t *testing.T) {
+	dir := t.TempDir()
+	complete := []byte("{\"schema_version\":1}\n")
+	if err := os.WriteFile(filepath.Join(dir, activeSegmentName), append(complete, []byte("{\"partial\":")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, ".incoming-crash.jsonl")
+	if err := os.WriteFile(stale, []byte("uncommitted"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spool, err := NewSegmentSpool(dir, 1024, 4096, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments, err := spool.Pending()
+	if err != nil || len(segments) != 1 {
+		t.Fatalf("Pending=%v err=%v, want one recovered segment", segments, err)
+	}
+	data, err := spool.Read(segments[0].ID)
+	if err != nil || !bytes.Equal(data, complete) {
+		t.Fatalf("recovered data=%q err=%v, want %q", data, err, complete)
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale incoming file remains: %v", err)
+	}
+}

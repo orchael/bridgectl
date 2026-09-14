@@ -280,6 +280,58 @@ Evidence:
   absence assertion remains green.
 
 
+# Session context and incremental collaboration analysis (2026-09-14)
+
+Mode: Approval-Required schema, metadata, and privacy change, explicitly
+authorized by the user. Governing requirements: PRD §17.2 (`TEL-116` through
+`TEL-119`).
+
+Scope and acceptance criteria:
+- [x] Emit schema-v2 `session_context` with optional opaque actor/source labels,
+  machine platform, HMAC directory identity, and sanitized Git identity.
+- [x] Generate/load the context HMAC key securely and never persist raw paths,
+  remotes, hostnames, environment values, or inferred user identity.
+- [x] Implement incremental turn reconstruction and data-quality counters keyed
+  by `(source_id, session_id)` with legacy-v1 compatibility.
+- [x] Add a bounded example for deterministic findings, read-only analytics HTTP
+  APIs, and model-review packet construction without an external model call.
+- [x] Resolve actionable Copilot review findings in the affected ingestion,
+  streaming, recovery, redaction, and report paths.
+- [x] Create `orchael/bridge` issues for authenticated actor/tenant attribution,
+  production analysis orchestration, product UI, and Parquet/query storage.
+- [x] Run focused failures first, then formatting, full race tests, coverage,
+  lint, build, Compose validation, and the live collector E2E.
+- [x] Commit the implementation; push PR #239, check CI, and complete the
+  bounded Copilot cycle before handoff.
+
+Risks and rollback:
+- Context can increase privacy exposure; all automatically discovered location
+  data is keyed before it crosses the async/persistence boundary, and readable
+  labels require explicit configuration.
+- Chunk reconstruction must not leak credentials or reorder interaction data;
+  boundary tests cover UTF-8 and split-secret cases before implementation.
+- Roll back by disabling telemetry or reverting schema-v2 emission. The reader
+  continues to accept retained v1/v2 JSONL, so no destructive migration is
+  required.
+
+Deferred production work:
+- Authenticated tenant/actor attribution: `orchael/bridge#5`.
+- Versioned analysis orchestration and APIs: `orchael/bridge#3`.
+- Interaction analytics UI: `orchael/bridge#2`.
+- Parquet/DuckDB local and S3 query layer: `orchael/bridge#4`.
+
+Verification evidence:
+- Focused regressions failed first for schema/context, incremental reconstruction,
+  split UTF-8/secrets, filtered sequencing, crash recovery, live report safety,
+  collector envelopes, and size-triggered delivery; affected package tests pass.
+- `make test` passes the full race suite.
+- `make test-cover-maintained` reports 81.0% overall and 81.1% telemetry coverage,
+  above the 75% gate.
+- `make lint`, `make build`, `pnpm build` in `docs/`, all Compose configurations,
+  and `make test-e2e-live-telemetry` pass. The live E2E observed schema-v2 context,
+  both interaction directions, derived question/answer, and a final session end
+  in the collector-owned volume.
+
 # CLI Security Follow-ups (from PR #92 Copilot review)
 
 Cert lifecycle items moved to GitHub Issues: #225 (cert renewal), #224 (SAN mismatch detection).

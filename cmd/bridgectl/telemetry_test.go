@@ -60,11 +60,11 @@ func TestTelemetryExportRejectsUnknownFormat(t *testing.T) {
 }
 
 func TestParseTelemetryEventKinds(t *testing.T) {
-	kinds, err := parseTelemetryEventKinds([]string{"question", "answer"})
+	kinds, err := parseTelemetryEventKinds([]string{"session_context", "question", "answer"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(kinds) != 2 || kinds[0] != telemetry.EventQuestion || kinds[1] != telemetry.EventAnswer {
+	if len(kinds) != 3 || kinds[0] != telemetry.EventSessionContext || kinds[1] != telemetry.EventQuestion || kinds[2] != telemetry.EventAnswer {
 		t.Fatalf("kinds=%v", kinds)
 	}
 	if _, err := parseTelemetryEventKinds([]string{"transcript"}); err == nil {

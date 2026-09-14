@@ -75,13 +75,75 @@ type bufferWriteCloser struct{ bytes.Buffer }
 
 func (*bufferWriteCloser) Close() error { return nil }
 
+type orderedTelemetrySpy struct {
+	mu           sync.Mutex
+	events       []string
+	inputStarted chan struct{}
+	releaseInput chan struct{}
+}
+
+func (*orderedTelemetrySpy) SessionStarted(telemetry.Session) {}
+func (*orderedTelemetrySpy) ObserveProviderChunk(telemetry.Session, telemetry.StreamType, []byte) {
+}
+func (s *orderedTelemetrySpy) ObserveInputChunk(telemetry.Session, []byte) {
+	close(s.inputStarted)
+	<-s.releaseInput
+	s.mu.Lock()
+	s.events = append(s.events, "input")
+	s.mu.Unlock()
+}
+func (s *orderedTelemetrySpy) SessionEnded(telemetry.Session) {
+	s.mu.Lock()
+	s.events = append(s.events, "ended")
+	s.mu.Unlock()
+}
+func (*orderedTelemetrySpy) Close(context.Context) error { return nil }
+
+func TestSupervisorNeverRecordsInputAfterSessionEnded(t *testing.T) {
+	spy := &orderedTelemetrySpy{inputStarted: make(chan struct{}), releaseInput: make(chan struct{})}
+	sup := NewSupervisor(NewRegistry(), DefaultPolicy(), 1024, time.Minute, WithTelemetry(spy))
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	stdin := &bufferWriteCloser{}
+	ms := &managedSession{
+		info: SessionInfo{SessionID: "ordered", Provider: "codex", State: SessionStateRunning, ActiveWriterClientID: "writer"},
+		cmd:  cmd, stdin: stdin, streamJSON: true, buf: NewByteBuffer(1024), cancel: func() {},
+		readerDone: make(chan struct{}), observers: make(map[string]*observerEntry),
+	}
+	close(ms.readerDone)
+	sup.sessions["ordered"] = ms
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := sup.WriteInput("ordered", "writer", []byte("yes\n"))
+		writeDone <- err
+	}()
+	<-spy.inputStarted
+	waitDone := make(chan struct{})
+	go func() {
+		sup.waitLoop(ms)
+		close(waitDone)
+	}()
+	close(spy.releaseInput)
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
+	}
+	<-waitDone
+	spy.mu.Lock()
+	defer spy.mu.Unlock()
+	if len(spy.events) != 2 || spy.events[0] != "input" || spy.events[1] != "ended" {
+		t.Fatalf("telemetry order=%v, want input then ended", spy.events)
+	}
+}
+
 func TestSupervisorTelemetryObservesOutputAndAuthorizedInput(t *testing.T) {
 	spy := &telemetrySpy{}
 	sup := NewSupervisor(NewRegistry(), DefaultPolicy(), 1024, time.Minute, WithTelemetry(spy))
 	defer sup.Close()
 	stdin := &bufferWriteCloser{}
 	ms := &managedSession{
-		info: SessionInfo{SessionID: "s1", ProjectID: "p1", Provider: "codex", State: SessionStateStopped, ActiveWriterClientID: "writer"},
+		info: SessionInfo{SessionID: "s1", ProjectID: "p1", Provider: "codex", State: SessionStateRunning, ActiveWriterClientID: "writer"},
 		buf:  NewByteBuffer(1024), streamJSON: true, stdin: stdin,
 		observers: make(map[string]*observerEntry),
 	}
@@ -104,5 +166,26 @@ func TestSupervisorTelemetryObservesOutputAndAuthorizedInput(t *testing.T) {
 	}
 	if got, _ := io.ReadAll(&stdin.Buffer); string(got) != "yes\n" {
 		t.Fatalf("provider input=%q", got)
+	}
+	ms.mu.Lock()
+	ms.info.State = SessionStateStopped
+	ms.mu.Unlock()
+}
+
+func TestSupervisorTelemetrySeesRawANSIWhileClientsSeeStrippedOutput(t *testing.T) {
+	spy := &telemetrySpy{}
+	sup := NewSupervisor(NewRegistry(), DefaultPolicy(), 1024, time.Minute, WithTelemetry(spy))
+	ms := &managedSession{
+		info: SessionInfo{SessionID: "ansi", Provider: "codex", State: SessionStateRunning},
+		buf:  NewByteBuffer(1024), stripANSI: true, observers: make(map[string]*observerEntry),
+	}
+	raw := []byte("\x1b[31mhello\x1b[0m")
+	sup.appendChunk(ms, raw, ChunkTypeOutput)
+	if len(spy.outputs) != 1 || !bytes.Equal(spy.outputs[0].data, raw) {
+		t.Fatalf("telemetry output=%q, want original bytes", spy.outputs)
+	}
+	chunks := ms.buf.After(0)
+	if len(chunks) != 1 || string(chunks[0].Payload) != "hello" {
+		t.Fatalf("client chunks=%+v, want stripped output", chunks)
 	}
 }

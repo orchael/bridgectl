@@ -27,6 +27,7 @@ type GRPCForwardingSink struct {
 	closed  bool
 	stop    chan struct{}
 	done    chan struct{}
+	sealed  chan struct{}
 	ctx     context.Context
 	cancel  context.CancelFunc
 
@@ -43,8 +44,14 @@ func NewGRPCForwardingSink(spool *SegmentSpool, client bridgev1.TelemetryCollect
 	ctx, cancel := context.WithCancel(context.Background())
 	sink := &GRPCForwardingSink{
 		spool: spool, client: client, closer: closer, flushInterval: flushInterval, retryInterval: retryInterval,
-		deliveryTimeout: 10 * time.Second, onError: onError, stop: make(chan struct{}), done: make(chan struct{}), ctx: ctx, cancel: cancel,
+		deliveryTimeout: 10 * time.Second, onError: onError, stop: make(chan struct{}), done: make(chan struct{}), sealed: make(chan struct{}, 1), ctx: ctx, cancel: cancel,
 	}
+	spool.SetSealNotifier(func(Segment) {
+		select {
+		case sink.sealed <- struct{}{}:
+		default:
+		}
+	})
 	go sink.run()
 	return sink
 }
@@ -70,6 +77,15 @@ func (s *GRPCForwardingSink) run() {
 		select {
 		case <-s.stop:
 			return
+		case <-s.sealed:
+			if err := s.deliverPending(s.ctx); err != nil && !errors.Is(err, context.Canceled) {
+				s.report(fmt.Errorf("stream telemetry segment: %w", err))
+				resetTimer(deliveryTimer, backoff)
+				backoff = min(backoff*2, maxBackoff)
+			} else {
+				backoff = s.retryInterval
+				resetTimer(deliveryTimer, s.flushInterval)
+			}
 		case <-flushTicker.C:
 			segment, err := s.spool.Seal()
 			if err != nil {

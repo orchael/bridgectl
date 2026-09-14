@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +41,7 @@ type SegmentSpool struct {
 	maxSegmentBytes int64
 	maxDiskBytes    int64
 	onEvict         func(Segment)
+	onSeal          func(Segment)
 	now             func() time.Time
 	newID           func() string
 }
@@ -60,7 +62,13 @@ func NewSegmentSpool(dir string, maxSegmentBytes, maxDiskBytes int64, onEvict fu
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.cleanupIncomingLocked(); err != nil {
+		return nil, fmt.Errorf("clean telemetry spool staging files: %w", err)
+	}
 	if info, err := os.Stat(s.activePath()); err == nil && info.Size() > 0 {
+		if err := s.repairActiveLocked(); err != nil {
+			return nil, fmt.Errorf("repair telemetry spool: %w", err)
+		}
 		if _, err := s.sealLocked(); err != nil {
 			return nil, fmt.Errorf("recover telemetry spool: %w", err)
 		}
@@ -74,6 +82,14 @@ func NewSegmentSpool(dir string, maxSegmentBytes, maxDiskBytes int64, onEvict fu
 }
 
 func (s *SegmentSpool) Dir() string { return s.dir }
+
+// SetSealNotifier installs a non-blocking notification hook for newly sealed
+// segments, including segments sealed automatically by size rotation.
+func (s *SegmentSpool) SetSealNotifier(notify func(Segment)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onSeal = notify
+}
 
 // Record implements Sink by appending one JSON event to the active segment.
 func (s *SegmentSpool) Record(event Event) error {
@@ -150,7 +166,41 @@ func (s *SegmentSpool) sealLocked() (Segment, error) {
 	if err := s.enforceLimitLocked(); err != nil {
 		return Segment{}, err
 	}
+	if s.onSeal != nil {
+		s.onSeal(segment)
+	}
 	return segment, nil
+}
+
+func (s *SegmentSpool) cleanupIncomingLocked() error {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), ".incoming-") || filepath.Ext(entry.Name()) != ".jsonl" {
+			continue
+		}
+		if err := os.Remove(filepath.Join(s.dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return syncDirectory(s.dir)
+}
+
+func (s *SegmentSpool) repairActiveLocked() error {
+	data, err := os.ReadFile(s.activePath())
+	if err != nil {
+		return err
+	}
+	lastComplete := bytes.LastIndexByte(data, '\n')
+	if lastComplete < 0 {
+		return os.Remove(s.activePath())
+	}
+	if lastComplete == len(data)-1 {
+		return nil
+	}
+	return os.Truncate(s.activePath(), int64(lastComplete+1))
 }
 
 // Accept durably stores a remotely supplied immutable segment. Repeating the

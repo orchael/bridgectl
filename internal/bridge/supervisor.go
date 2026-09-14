@@ -113,6 +113,7 @@ type Supervisor struct {
 
 type managedSession struct {
 	mu           sync.Mutex
+	telemetryMu  sync.Mutex
 	info         SessionInfo
 	provider     Provider
 	cmd          *exec.Cmd
@@ -600,9 +601,6 @@ func (s *Supervisor) readLoop(ms *managedSession) {
 		n, err := ms.ptmx.Read(buf)
 		if n > 0 {
 			chunk := buf[:n]
-			if ms.stripANSI {
-				chunk = ansiEscape.ReplaceAll(chunk, nil)
-			}
 			slog.Debug("provider output", "session_id", ms.info.SessionID, "provider", ms.info.Provider, "bytes", len(chunk))
 			s.appendChunk(ms, chunk, ChunkTypeOutput)
 		}
@@ -740,7 +738,11 @@ func (s *Supervisor) appendChunk(ms *managedSession, payload []byte, ctype Chunk
 			s.telemetry.ObserveProviderChunk(telemetrySession(ms), telemetry.StreamThinking, bytes.Clone(payload))
 		}
 	}
-	chunk := ms.buf.AppendTyped(payload, ctype)
+	displayPayload := payload
+	if ctype == ChunkTypeOutput && ms.stripANSI {
+		displayPayload = ansiEscape.ReplaceAll(payload, nil)
+	}
+	chunk := ms.buf.AppendTyped(displayPayload, ctype)
 	s.persistChunk(ms.info.SessionID, chunk)
 	ms.mu.Lock()
 	ms.info.OldestSeq = ms.buf.OldestSeq()
@@ -835,11 +837,14 @@ func (s *Supervisor) waitLoop(ms *managedSession) {
 		ms.info.State = SessionStateStopped
 		slog.Info("session process exited", "session_id", ms.info.SessionID, "provider", ms.info.Provider, "exit_code", exitCode)
 	}
+	tsession := telemetry.Session{SessionID: ms.info.SessionID, ProjectID: ms.info.ProjectID, Provider: ms.info.Provider, RepoPath: ms.info.RepoPath}
+	ms.telemetryMu.Lock()
 	ms.cancel()
 	ms.mu.Unlock()
 	if s.telemetry != nil {
-		s.telemetry.SessionEnded(telemetrySession(ms))
+		s.telemetry.SessionEnded(tsession)
 	}
+	ms.telemetryMu.Unlock()
 
 	s.persistSession(ms.snapshotInfo())
 }
@@ -950,6 +955,10 @@ func (s *Supervisor) WriteInput(sessionID, clientID string, data []byte) (int, e
 		ms.mu.Unlock()
 		return 0, ErrSessionRecoveryUnavailable
 	}
+	if ms.info.State != SessionStateRunning && ms.info.State != SessionStateAttached {
+		ms.mu.Unlock()
+		return 0, ErrSessionNotRunning
+	}
 	if ms.info.ActiveWriterClientID == "" {
 		ms.mu.Unlock()
 		return 0, ErrClientNotAttached
@@ -962,11 +971,13 @@ func (s *Supervisor) WriteInput(sessionID, clientID string, data []byte) (int, e
 	streamJSON := ms.streamJSON
 	stdin := ms.stdin
 	ptmx := ms.ptmx
-	tsession := telemetry.Session{SessionID: ms.info.SessionID, ProjectID: ms.info.ProjectID, Provider: ms.info.Provider}
+	tsession := telemetry.Session{SessionID: ms.info.SessionID, ProjectID: ms.info.ProjectID, Provider: ms.info.Provider, RepoPath: ms.info.RepoPath}
+	ms.telemetryMu.Lock()
 	ms.mu.Unlock()
 	if s.telemetry != nil {
 		s.telemetry.ObserveInputChunk(tsession, bytes.Clone(data))
 	}
+	ms.telemetryMu.Unlock()
 	slog.Debug("provider input", "session_id", sessionID, "provider", ms.info.Provider, "bytes", len(data))
 	if streamJSON {
 		n, err := stdin.Write(data)
@@ -1307,7 +1318,7 @@ func (s *Supervisor) observeSessionStarted(ms *managedSession) {
 func telemetrySession(ms *managedSession) telemetry.Session {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
-	return telemetry.Session{SessionID: ms.info.SessionID, ProjectID: ms.info.ProjectID, Provider: ms.info.Provider}
+	return telemetry.Session{SessionID: ms.info.SessionID, ProjectID: ms.info.ProjectID, Provider: ms.info.Provider, RepoPath: ms.info.RepoPath}
 }
 
 func (s *Supervisor) closeTelemetry(ctx context.Context) {

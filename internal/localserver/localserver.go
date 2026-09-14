@@ -688,6 +688,17 @@ func Start(cfg Config) (*Server, error) {
 			}
 			return nil, fmt.Errorf("configure telemetry source identity: %w", err)
 		}
+		identityKeyPath := filepath.Join(stateDir, "telemetry", "identity-key")
+		if telemetryCfg.IdentityKeyFile != "" {
+			identityKeyPath = expandTelemetryPath(telemetryCfg.IdentityKeyFile)
+		}
+		identityKey, err := telemetry.LoadOrCreateIdentityKey(identityKeyPath)
+		if err != nil {
+			if store != nil {
+				_ = store.Close()
+			}
+			return nil, fmt.Errorf("configure telemetry context identity: %w", err)
+		}
 		maxDiskBytes, err := config.ParseByteSize(telemetryCfg.MaxDiskSpace)
 		if err != nil {
 			if store != nil {
@@ -760,11 +771,11 @@ func Start(cfg Config) (*Server, error) {
 		for _, kind := range telemetryCfg.Kinds {
 			kinds = append(kinds, telemetry.EventKind(kind))
 		}
-		collector := telemetry.NewLiveCollectorForSource(
+		collector := telemetry.NewLiveCollectorWithIdentity(
 			eventSink,
 			telemetryCfg.QueueSize,
 			telemetryCfg.IncludeRedactedText,
-			sourceID,
+			telemetry.LiveIdentity{SourceID: sourceID, ActorID: telemetryCfg.ActorID, SourceLabel: telemetryCfg.SourceLabel, ContextKey: identityKey},
 			func(err error) { logger.Warn("telemetry persistence", "error", err) },
 			kinds...,
 		)

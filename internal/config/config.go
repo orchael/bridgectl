@@ -122,22 +122,45 @@ type RepoSetupConfig struct {
 }
 
 type TelemetryConfig struct {
-	Enabled               bool     `yaml:"enabled"`
-	SourceID              string   `yaml:"source_id"`
-	SpoolDir              string   `yaml:"spool_dir"`
-	CollectorTarget       string   `yaml:"collector_target"`
-	CollectorInsecure     bool     `yaml:"collector_insecure"`
-	CollectorCA           string   `yaml:"collector_ca"`
-	CollectorServerName   string   `yaml:"collector_server_name"`
-	Kinds                 []string `yaml:"kinds"`
-	QueueSize             int      `yaml:"queue_size"`
-	RollingWindow         string   `yaml:"rolling_window"`
-	FlushInterval         string   `yaml:"flush_interval"`
-	RetryInterval         string   `yaml:"retry_interval"`
-	MaxSegmentBytes       int64    `yaml:"max_segment_bytes"`
-	MaxDiskSpace          string   `yaml:"max_disk_space"`
-	DeprecatedMaxSegments *int     `yaml:"max_segments"`
-	IncludeRedactedText   bool     `yaml:"include_redacted_text"`
+	Enabled               bool               `yaml:"enabled"`
+	SourceID              string             `yaml:"source_id"`
+	ActorID               string             `yaml:"actor_id"`
+	SourceLabel           string             `yaml:"source_label"`
+	IdentityKeyFile       string             `yaml:"identity_key_file"`
+	SpoolDir              string             `yaml:"spool_dir"`
+	CollectorTarget       string             `yaml:"collector_target"`
+	CollectorInsecure     bool               `yaml:"collector_insecure"`
+	CollectorCA           string             `yaml:"collector_ca"`
+	CollectorServerName   string             `yaml:"collector_server_name"`
+	Kinds                 []string           `yaml:"kinds"`
+	QueueSize             int                `yaml:"queue_size"`
+	RollingWindow         string             `yaml:"rolling_window"`
+	FlushInterval         string             `yaml:"flush_interval"`
+	RetryInterval         string             `yaml:"retry_interval"`
+	MaxSegmentBytes       int64              `yaml:"max_segment_bytes"`
+	MaxDiskSpace          string             `yaml:"max_disk_space"`
+	DeprecatedMaxSegments removedConfigField `yaml:"-"`
+	IncludeRedactedText   bool               `yaml:"include_redacted_text"`
+}
+
+// removedConfigField records the presence of a retired YAML key, including
+// when the value is explicitly null.
+type removedConfigField struct {
+	present bool
+}
+
+func (c *TelemetryConfig) UnmarshalYAML(node *yaml.Node) error {
+	type plainTelemetryConfig TelemetryConfig
+	if err := node.Decode((*plainTelemetryConfig)(c)); err != nil {
+		return err
+	}
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		if node.Content[index].Value == "max_segments" {
+			c.DeprecatedMaxSegments.present = true
+			break
+		}
+	}
+	return nil
 }
 
 func (r RepoSetupConfig) IsEnabled() bool {
@@ -458,9 +481,9 @@ func applyDefaults(cfg *Config) {
 		cfg.Telemetry.RetryInterval = "1s"
 	}
 	if len(cfg.Telemetry.Kinds) == 0 {
-		cfg.Telemetry.Kinds = []string{"session_started", "question", "answer", "session_ended"}
+		cfg.Telemetry.Kinds = []string{"session_started", "session_context", "question", "answer", "session_ended"}
 	} else if len(cfg.Telemetry.Kinds) == 1 && cfg.Telemetry.Kinds[0] == "all" {
-		cfg.Telemetry.Kinds = []string{"session_started", "provider_output", "user_input", "question", "answer", "session_ended"}
+		cfg.Telemetry.Kinds = []string{"session_started", "session_context", "provider_output", "user_input", "question", "answer", "session_ended"}
 	}
 	if cfg.Telemetry.MaxSegmentBytes == 0 {
 		cfg.Telemetry.MaxSegmentBytes = 10 << 20
@@ -570,7 +593,7 @@ func validate(cfg *Config) error {
 	if rollingWindow <= 0 {
 		return fmt.Errorf("config: telemetry.rolling_window must be positive")
 	}
-	validTelemetryKinds := map[string]bool{"session_started": true, "provider_output": true, "user_input": true, "question": true, "answer": true, "session_ended": true}
+	validTelemetryKinds := map[string]bool{"session_started": true, "session_context": true, "provider_output": true, "user_input": true, "question": true, "answer": true, "session_ended": true}
 	seenTelemetryKinds := make(map[string]bool, len(cfg.Telemetry.Kinds))
 	for _, kind := range cfg.Telemetry.Kinds {
 		if !validTelemetryKinds[kind] {
@@ -601,11 +624,17 @@ func validate(cfg *Config) error {
 	if cfg.Telemetry.MaxSegmentBytes < 1 {
 		return fmt.Errorf("config: telemetry.max_segment_bytes must be positive")
 	}
-	if cfg.Telemetry.DeprecatedMaxSegments != nil {
+	if cfg.Telemetry.DeprecatedMaxSegments.present {
 		return fmt.Errorf("config: telemetry.max_segments has been removed; use max_disk_space")
 	}
 	if cfg.Telemetry.SourceID != "" && !telemetry.ValidSourceID(cfg.Telemetry.SourceID) {
 		return fmt.Errorf("config: telemetry.source_id must start with an alphanumeric character and contain only alphanumerics, '.', '_', or '-'")
+	}
+	if cfg.Telemetry.ActorID != "" && !telemetry.ValidSourceID(cfg.Telemetry.ActorID) {
+		return fmt.Errorf("config: telemetry.actor_id must use the telemetry identity character set")
+	}
+	if cfg.Telemetry.SourceLabel != "" && !telemetry.ValidSourceID(cfg.Telemetry.SourceLabel) {
+		return fmt.Errorf("config: telemetry.source_label must use the telemetry identity character set")
 	}
 	maxDiskBytes, err := ParseByteSize(cfg.Telemetry.MaxDiskSpace)
 	if err != nil {

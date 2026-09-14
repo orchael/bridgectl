@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -49,13 +50,11 @@ func retainedEventPaths(path string) ([]string, error) {
 			return nil, readErr
 		}
 		var paths []string
-		var active string
 		for _, entry := range entries {
 			if entry.IsDir() || filepath.Ext(entry.Name()) != ".jsonl" {
 				continue
 			}
 			if entry.Name() == activeSegmentName {
-				active = filepath.Join(path, entry.Name())
 				continue
 			}
 			id := strings.TrimSuffix(entry.Name(), ".jsonl")
@@ -64,9 +63,6 @@ func retainedEventPaths(path string) ([]string, error) {
 			}
 		}
 		sort.Strings(paths)
-		if active != "" {
-			paths = append(paths, active)
-		}
 		return paths, nil
 	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -113,6 +109,14 @@ func retainedEventPaths(path string) ([]string, error) {
 }
 
 func visitEvents(path string, visit func(Event)) error {
+	return VisitEvents(path, func(event Event) error {
+		visit(event)
+		return nil
+	})
+}
+
+// VisitEvents streams complete events from immutable retained segments.
+func VisitEvents(path string, visit func(Event) error) error {
 	paths, err := retainedEventPaths(path)
 	if err != nil {
 		return err
@@ -125,24 +129,36 @@ func visitEvents(path string, visit func(Event)) error {
 	return nil
 }
 
-func visitEventFile(path string, visit func(Event)) error {
+func visitEventFile(path string, visit func(Event) error) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 4<<20)
+	reader := bufio.NewReader(f)
 	line := 0
-	for scanner.Scan() {
+	for {
+		data, readErr := reader.ReadBytes('\n')
+		if errors.Is(readErr, io.EOF) && len(data) == 0 {
+			return nil
+		}
+		if errors.Is(readErr, io.EOF) {
+			// A mutable legacy log may be observed between write and newline.
+			// Immutable spool segments always end in a newline.
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
 		line++
 		var event Event
-		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+		if err := json.Unmarshal(data, &event); err != nil {
 			return fmt.Errorf("decode telemetry event %s line %d: %w", path, line, err)
 		}
-		visit(event)
+		if err := visit(event); err != nil {
+			return err
+		}
 	}
-	return scanner.Err()
 }
 
 func BuildReport(events []Event, opts ReportOptions) Report {

@@ -161,14 +161,23 @@ configuration. The collector image itself does not hard-code a transport mode;
 TLS deployments should configure a runtime health check with `telemetry health`
 and the appropriate `--ca` and `--server-name` options.
 
-Every new event includes a `source_id`, and telemetry session identity is the
-composite `(source_id, session_id)`. Set `source_id` explicitly when an
+Every new event uses schema v2 and includes a `source_id`; telemetry session
+identity is the composite `(source_id, session_id)`. Set `source_id` explicitly when an
 orchestrator owns bridge identity, or leave it empty to generate a UUID once at
 the bridge state directory (by default
 `~/.config/bridgectl/telemetry/source-id`). The generated file is mode `0600`.
 Legacy events without `source_id` remain readable in an empty legacy namespace.
 
-Supported concrete kinds are `session_started`, `provider_output`,
+Schema v2 emits one `session_context` event after `session_started`. It includes
+OS/architecture, branch and commit, the Git remote host, and stable HMAC IDs for
+the machine, working directory, and repository. It never stores the raw working
+directory, repository path, remote URL credentials, hostname, Git author, or
+environment variables. The private 32-byte HMAC key defaults to
+`~/.config/bridgectl/telemetry/identity-key` (mode `0600`) and can be relocated
+with `identity_key_file`. Optional `actor_id` and `source_label` values are
+operator-provided non-secret labels; they are not authenticated identities.
+
+Supported concrete kinds are `session_started`, `session_context`, `provider_output`,
 `user_input`, `question`, `answer`, and `session_ended`. To build a complete
 redacted interaction corpus, explicitly enable all kinds and retained text:
 
@@ -187,7 +196,13 @@ active writer. Every event has a per-session sequence number, and stream events
 include their direction, stream type, and original byte count. Terminal
 controls and recognized secrets are removed before local spooling or gRPC
 delivery. Invalid UTF-8 content is omitted with its byte count, digest, and
-omission reason instead of being forwarded as opaque data.
+omission reason instead of being forwarded as opaque data. Chunk boundaries are
+reassembled before redaction, so split UTF-8 characters and split secret tokens
+cannot bypass those checks.
+
+For a small, non-production analysis reference covering deterministic findings,
+read-only HTTP APIs, and bounded LLM evidence packets, see
+[`examples/telemetry-analysis`](examples/telemetry-analysis/README.md).
 
 Full capture can contain personal or proprietary material even after
 best-effort redaction. Protect collector volumes and S3 access, use an explicit

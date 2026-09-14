@@ -27,6 +27,7 @@ const (
 	EventQuestion       EventKind = "question"
 	EventAnswer         EventKind = "answer"
 	EventSessionStarted EventKind = "session_started"
+	EventSessionContext EventKind = "session_context"
 	EventSessionEnded   EventKind = "session_ended"
 	EventProviderOutput EventKind = "provider_output"
 	EventUserInput      EventKind = "user_input"
@@ -43,6 +44,7 @@ const (
 )
 
 const OmittedInvalidUTF8 = "invalid_utf8"
+const OmittedBufferLimit = "buffer_limit"
 
 // QuestionClass describes why an agent appears to be asking for input.
 type QuestionClass string
@@ -67,25 +69,27 @@ const (
 
 // Event is safe to persist after Redactor has processed its text fields.
 type Event struct {
-	SchemaVersion int           `json:"schema_version"`
-	Timestamp     time.Time     `json:"timestamp"`
-	SourceID      string        `json:"source_id,omitempty"`
-	SessionID     string        `json:"session_id"`
-	ProjectID     string        `json:"project_id,omitempty"`
-	Provider      string        `json:"provider,omitempty"`
-	Direction     Direction     `json:"direction,omitempty"`
-	Kind          EventKind     `json:"kind"`
-	Stream        StreamType    `json:"stream,omitempty"`
-	Sequence      uint64        `json:"sequence"`
-	Class         QuestionClass `json:"class,omitempty"`
-	Decision      Decision      `json:"decision,omitempty"`
-	Fingerprint   string        `json:"fingerprint,omitempty"`
-	Text          string        `json:"text,omitempty"`
-	ByteCount     int           `json:"byte_count,omitempty"`
-	Redactions    int           `json:"redactions,omitempty"`
-	ContentHash   string        `json:"content_sha256,omitempty"`
-	OmittedReason string        `json:"omitted_reason,omitempty"`
-	LatencyMS     int64         `json:"latency_ms,omitempty"`
+	SchemaVersion int             `json:"schema_version"`
+	Timestamp     time.Time       `json:"timestamp"`
+	SourceID      string          `json:"source_id,omitempty"`
+	ActorID       string          `json:"actor_id,omitempty"`
+	SessionID     string          `json:"session_id"`
+	ProjectID     string          `json:"project_id,omitempty"`
+	Provider      string          `json:"provider,omitempty"`
+	Direction     Direction       `json:"direction,omitempty"`
+	Kind          EventKind       `json:"kind"`
+	Stream        StreamType      `json:"stream,omitempty"`
+	Sequence      uint64          `json:"sequence"`
+	Class         QuestionClass   `json:"class,omitempty"`
+	Decision      Decision        `json:"decision,omitempty"`
+	Fingerprint   string          `json:"fingerprint,omitempty"`
+	Text          string          `json:"text,omitempty"`
+	ByteCount     int             `json:"byte_count,omitempty"`
+	Redactions    int             `json:"redactions,omitempty"`
+	ContentHash   string          `json:"content_sha256,omitempty"`
+	OmittedReason string          `json:"omitted_reason,omitempty"`
+	LatencyMS     int64           `json:"latency_ms,omitempty"`
+	Context       *SessionContext `json:"context,omitempty"`
 }
 
 // Session identifies an agent session without requiring telemetry to depend on
@@ -93,8 +97,10 @@ type Event struct {
 type Session struct {
 	SourceID  string
 	SessionID string
+	ActorID   string
 	ProjectID string
 	Provider  string
+	RepoPath  string
 }
 
 // Sink synchronously receives normalized telemetry events. Analyzer ignores
@@ -207,14 +213,18 @@ func (a *Analyzer) ObserveSessionStart(session Session) {
 	a.sequenceMu.Lock()
 	delete(a.sequences, sessionKey(session))
 	a.sequenceMu.Unlock()
-	a.record(Event{Timestamp: a.now().UTC(), SourceID: session.SourceID, SessionID: session.SessionID, ProjectID: session.ProjectID, Provider: session.Provider, Kind: EventSessionStarted})
+	a.record(Event{Timestamp: a.now().UTC(), SourceID: session.SourceID, ActorID: session.ActorID, SessionID: session.SessionID, ProjectID: session.ProjectID, Provider: session.Provider, Kind: EventSessionStarted})
+}
+
+func (a *Analyzer) ObserveSessionContext(session Session, context SessionContext) {
+	a.record(Event{Timestamp: a.now().UTC(), SourceID: session.SourceID, ActorID: session.ActorID, SessionID: session.SessionID, ProjectID: session.ProjectID, Provider: session.Provider, Kind: EventSessionContext, Context: &context})
 }
 
 func (a *Analyzer) ObserveSessionEnd(session Session) {
 	a.mu.Lock()
 	delete(a.pending, sessionKey(session))
 	a.mu.Unlock()
-	a.record(Event{Timestamp: a.now().UTC(), SourceID: session.SourceID, SessionID: session.SessionID, ProjectID: session.ProjectID, Provider: session.Provider, Kind: EventSessionEnded})
+	a.record(Event{Timestamp: a.now().UTC(), SourceID: session.SourceID, ActorID: session.ActorID, SessionID: session.SessionID, ProjectID: session.ProjectID, Provider: session.Provider, Kind: EventSessionEnded})
 }
 
 // DefaultRedactor strips ANSI controls and common inline secret assignments.
@@ -238,19 +248,28 @@ func (a *Analyzer) ObserveUserInteraction(session Session, data []byte) {
 	a.observeInteraction(session, DirectionHuman, EventUserInput, StreamInput, data)
 }
 
+func (a *Analyzer) ObserveOmittedInteraction(session Session, direction Direction, kind EventKind, stream StreamType, data []byte, reason string) {
+	if len(data) == 0 {
+		return
+	}
+	sum := sha256.Sum256(data)
+	a.record(Event{
+		Timestamp: a.now().UTC(), SourceID: session.SourceID, ActorID: session.ActorID, SessionID: session.SessionID,
+		ProjectID: session.ProjectID, Provider: session.Provider, Direction: direction, Kind: kind, Stream: stream,
+		ByteCount: len(data), ContentHash: hex.EncodeToString(sum[:]), OmittedReason: reason,
+	})
+}
+
 func (a *Analyzer) observeInteraction(session Session, direction Direction, kind EventKind, stream StreamType, data []byte) {
 	if len(data) == 0 {
 		return
 	}
 	event := Event{
-		Timestamp: a.now().UTC(), SourceID: session.SourceID, SessionID: session.SessionID, ProjectID: session.ProjectID,
+		Timestamp: a.now().UTC(), SourceID: session.SourceID, ActorID: session.ActorID, SessionID: session.SessionID, ProjectID: session.ProjectID,
 		Provider: session.Provider, Direction: direction, Kind: kind, Stream: stream, ByteCount: len(data),
 	}
 	if !utf8.Valid(data) {
-		sum := sha256.Sum256(data)
-		event.ContentHash = hex.EncodeToString(sum[:])
-		event.OmittedReason = OmittedInvalidUTF8
-		a.record(event)
+		a.ObserveOmittedInteraction(session, direction, kind, stream, data, OmittedInvalidUTF8)
 		return
 	}
 	redacted := a.redact(string(data))
@@ -294,7 +313,7 @@ func (a *Analyzer) ObserveOutput(session Session, data []byte) {
 	a.mu.Unlock()
 
 	a.record(Event{
-		Timestamp: now, SourceID: session.SourceID, SessionID: session.SessionID, ProjectID: session.ProjectID,
+		Timestamp: now, SourceID: session.SourceID, ActorID: session.ActorID, SessionID: session.SessionID, ProjectID: session.ProjectID,
 		Provider: session.Provider, Direction: DirectionAgent, Kind: EventQuestion,
 		Class: class, Fingerprint: fingerprint, Text: a.eventText(redacted),
 	})
@@ -334,7 +353,7 @@ func (a *Analyzer) ObserveInput(session Session, data []byte) {
 	a.mu.Unlock()
 
 	a.record(Event{
-		Timestamp: now, SourceID: session.SourceID, SessionID: session.SessionID, ProjectID: session.ProjectID,
+		Timestamp: now, SourceID: session.SourceID, ActorID: session.ActorID, SessionID: session.SessionID, ProjectID: session.ProjectID,
 		Provider: session.Provider, Direction: DirectionHuman, Kind: EventAnswer,
 		Class: pending.class, Decision: decision, Fingerprint: pending.fingerprint,
 		Text: a.eventText(truncate(a.redact(answer), 2048)), LatencyMS: now.Sub(pending.askedAt).Milliseconds(),
@@ -373,7 +392,7 @@ func (f Feedback) JSON() ([]byte, error) {
 func (a *Analyzer) record(event Event) {
 	a.sequenceMu.Lock()
 	defer a.sequenceMu.Unlock()
-	event.SchemaVersion = 1
+	event.SchemaVersion = 2
 	key := eventKey(event)
 	a.sequences[key]++
 	event.Sequence = a.sequences[key]

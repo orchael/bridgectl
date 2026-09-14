@@ -46,12 +46,17 @@ telemetry:
   enabled: false
   # Empty generates and persists a stable UUID in the bridge state directory.
   source_id: ""
+  # Optional operator-assigned, non-secret labels (not authenticated identity).
+  actor_id: ""
+  source_label: ""
+  # Empty stores a private HMAC key beside source-id; raw paths are never sent.
+  identity_key_file: ""
   spool_dir: ""
   collector_target: ""
   collector_insecure: false
   collector_ca: ""
   collector_server_name: ""
-  kinds: ["session_started", "question", "answer", "session_ended"]
+  kinds: ["session_started", "session_context", "question", "answer", "session_ended"]
   queue_size: 1024
   rolling_window: "168h"
   flush_interval: "10s"

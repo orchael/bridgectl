@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -33,7 +34,7 @@ func TestGRPCCollectorDurableAckAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := eventJSONL(t, Event{Timestamp: time.Now(), SessionID: "session-1", Kind: EventQuestion})
+	payload := eventJSONL(t, validCollectorEvent(EventQuestion))
 	for index := 0; index < 2; index++ {
 		if err := stream.Send(&bridgev1.TelemetrySegment{Id: "batch-1", Jsonl: payload}); err != nil {
 			t.Fatal(err)
@@ -61,10 +62,10 @@ func TestGRPCCollectorRejectsInvalidOrFilteredSegments(t *testing.T) {
 		segment *bridgev1.TelemetrySegment
 		code    codes.Code
 	}{
-		{name: "unsafe ID", segment: &bridgev1.TelemetrySegment{Id: "../bad", Jsonl: eventJSONL(t, Event{Kind: EventQuestion})}, code: codes.InvalidArgument},
+		{name: "unsafe ID", segment: &bridgev1.TelemetrySegment{Id: "../bad", Jsonl: eventJSONL(t, validCollectorEvent(EventQuestion))}, code: codes.InvalidArgument},
 		{name: "invalid JSONL", segment: &bridgev1.TelemetrySegment{Id: "bad-json", Jsonl: []byte("not-json\n")}, code: codes.InvalidArgument},
-		{name: "filtered kind", segment: &bridgev1.TelemetrySegment{Id: "wrong-kind", Jsonl: eventJSONL(t, Event{Kind: EventSessionStarted})}, code: codes.InvalidArgument},
-		{name: "too large", segment: &bridgev1.TelemetrySegment{Id: "too-large", Jsonl: eventJSONL(t, Event{Kind: EventQuestion, Text: "long"})}, code: codes.ResourceExhausted},
+		{name: "filtered kind", segment: &bridgev1.TelemetrySegment{Id: "wrong-kind", Jsonl: eventJSONL(t, validCollectorEvent(EventSessionStarted))}, code: codes.InvalidArgument},
+		{name: "too large", segment: &bridgev1.TelemetrySegment{Id: "too-large", Jsonl: eventJSONL(t, validCollectorEvent(EventQuestion))}, code: codes.ResourceExhausted},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -96,17 +97,23 @@ func TestGRPCCollectorRejectsInvalidOrFilteredSegments(t *testing.T) {
 }
 
 func TestGRPCCollectorRejectsMalformedFullInteractionEvents(t *testing.T) {
+	base := validCollectorEvent(EventProviderOutput)
+	base.Direction, base.Stream, base.ByteCount = DirectionAgent, StreamOutput, 1
 	tests := []struct {
 		name  string
 		event Event
 	}{
-		{name: "provider direction", event: Event{SchemaVersion: 1, Sequence: 1, Kind: EventProviderOutput, Direction: DirectionHuman, Stream: StreamOutput, ByteCount: 1}},
-		{name: "provider stream", event: Event{SchemaVersion: 1, Sequence: 1, Kind: EventProviderOutput, Direction: DirectionAgent, Stream: StreamInput, ByteCount: 1}},
-		{name: "user direction", event: Event{SchemaVersion: 1, Sequence: 1, Kind: EventUserInput, Direction: DirectionAgent, Stream: StreamInput, ByteCount: 1}},
-		{name: "missing sequence", event: Event{SchemaVersion: 1, Kind: EventUserInput, Direction: DirectionHuman, Stream: StreamInput, ByteCount: 1}},
-		{name: "opaque content leaked", event: Event{SchemaVersion: 1, Sequence: 1, Kind: EventProviderOutput, Direction: DirectionAgent, Stream: StreamOutput, ByteCount: 2, Text: "unsafe", OmittedReason: OmittedInvalidUTF8, ContentHash: "hash"}},
-		{name: "unredacted content", event: Event{SchemaVersion: 1, Sequence: 1, Kind: EventProviderOutput, Direction: DirectionAgent, Stream: StreamOutput, ByteCount: 20, Text: "token=collector-secret"}},
-		{name: "invalid source ID", event: Event{SchemaVersion: 1, SourceID: "bridge east", Sequence: 1, Kind: EventProviderOutput, Direction: DirectionAgent, Stream: StreamOutput, ByteCount: 1}},
+		{name: "provider direction", event: withEvent(base, func(e *Event) { e.Direction = DirectionHuman })},
+		{name: "provider stream", event: withEvent(base, func(e *Event) { e.Stream = StreamInput })},
+		{name: "user direction", event: withEvent(base, func(e *Event) { e.Kind, e.Stream = EventUserInput, StreamInput })},
+		{name: "missing sequence", event: withEvent(base, func(e *Event) {
+			e.Kind, e.Direction, e.Stream, e.Sequence = EventUserInput, DirectionHuman, StreamInput, 0
+		})},
+		{name: "opaque content leaked", event: withEvent(base, func(e *Event) {
+			e.ByteCount, e.Text, e.OmittedReason, e.ContentHash = 2, "unsafe", OmittedInvalidUTF8, "hash"
+		})},
+		{name: "unredacted content", event: withEvent(base, func(e *Event) { e.ByteCount, e.Text = 20, "token=collector-secret" })},
+		{name: "invalid source ID", event: withEvent(base, func(e *Event) { e.SourceID = "bridge east" })},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -132,6 +139,43 @@ func TestGRPCCollectorRejectsMalformedFullInteractionEvents(t *testing.T) {
 	}
 }
 
+func TestValidateCollectorEventRequiresCommonEnvelope(t *testing.T) {
+	valid := validCollectorEvent(EventSessionStarted)
+	v2 := valid
+	v2.SchemaVersion, v2.SourceID = 2, "bridge-a"
+	contextEvent := v2
+	contextEvent.Kind, contextEvent.Context = EventSessionContext, &SessionContext{OS: "linux", Arch: "amd64"}
+	for _, event := range []Event{valid, v2, contextEvent} {
+		if err := validateCollectorEvent(event); err != nil {
+			t.Fatalf("valid event rejected: %+v: %v", event, err)
+		}
+	}
+	badLabelContext := contextEvent
+	badLabel := *contextEvent.Context
+	badLabel.SourceLabel = "private laptop"
+	badLabelContext.Context = &badLabel
+	badDirectoryContext := contextEvent
+	badDirectory := *contextEvent.Context
+	badDirectory.WorkingDirectoryID = "raw/path"
+	badDirectoryContext.Context = &badDirectory
+	invalid := []Event{
+		withEvent(valid, func(e *Event) { e.SchemaVersion = 0 }),
+		withEvent(valid, func(e *Event) { e.Timestamp = time.Time{} }),
+		withEvent(valid, func(e *Event) { e.SessionID = "" }),
+		withEvent(valid, func(e *Event) { e.Sequence = 0 }),
+		withEvent(v2, func(e *Event) { e.SourceID = "" }),
+		withEvent(v2, func(e *Event) { e.Kind = EventSessionContext }),
+		withEvent(v2, func(e *Event) { e.ActorID = "user@example.com" }),
+		badLabelContext,
+		badDirectoryContext,
+	}
+	for _, event := range invalid {
+		if err := validateCollectorEvent(event); err == nil {
+			t.Fatalf("invalid event accepted: %+v", event)
+		}
+	}
+}
+
 // TestGRPCForwardingSinkRetriesUnacknowledgedSegment proves TEL-111: a stream
 // failure leaves the bridge segment durable and the same ID is retried.
 func TestGRPCForwardingSinkRetriesUnacknowledgedSegment(t *testing.T) {
@@ -151,7 +195,7 @@ func TestGRPCForwardingSinkRetriesUnacknowledgedSegment(t *testing.T) {
 	forwarder := NewGRPCForwardingSink(bridgeSpool, client, nil, 10*time.Millisecond, 10*time.Millisecond, func(error) {
 		observedErrors.Add(1)
 	})
-	if err := forwarder.Record(Event{Timestamp: time.Now(), SessionID: "session-1", Kind: EventQuestion}); err != nil {
+	if err := forwarder.Record(validCollectorEvent(EventQuestion)); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, 5*time.Second, func() bool {
@@ -190,7 +234,9 @@ func TestGRPCForwardingSinkRetainsDataWhileCollectorUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	forwarder := NewGRPCForwardingSink(spool, bridgev1.NewTelemetryCollectorServiceClient(conn), conn, 5*time.Millisecond, 5*time.Millisecond, nil)
-	if err := forwarder.Record(Event{Timestamp: time.Now(), SessionID: "offline", Kind: EventQuestion}); err != nil {
+	offlineEvent := validCollectorEvent(EventQuestion)
+	offlineEvent.SessionID = "offline"
+	if err := forwarder.Record(offlineEvent); err != nil {
 		t.Fatal(err)
 	}
 	closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
@@ -231,10 +277,44 @@ func TestGRPCForwardingSinkDeliversImmediatelyAfterFlush(t *testing.T) {
 	// the delivery timer then raced ahead of the flush and delayed this record by
 	// almost a second interval.
 	time.Sleep(50 * time.Millisecond)
-	if err := forwarder.Record(Event{Timestamp: time.Now(), SessionID: "flush", Kind: EventQuestion}); err != nil {
+	flushEvent := validCollectorEvent(EventQuestion)
+	flushEvent.SessionID = "flush"
+	if err := forwarder.Record(flushEvent); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, 80*time.Millisecond, func() bool {
+		segments, err := collectorSpool.Pending()
+		return err == nil && len(segments) == 1
+	})
+}
+
+func TestGRPCForwardingSinkDeliversSizeRotatedSegmentImmediately(t *testing.T) {
+	bridgeSpool, err := NewSegmentSpool(t.TempDir(), 1024, 10<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	collectorSpool, err := NewSegmentSpool(t.TempDir(), 2048, 10<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, cleanup := startCollectorTestServer(t, NewGRPCCollectorServer(collectorSpool, 2048))
+	defer cleanup()
+	forwarder := NewGRPCForwardingSink(bridgeSpool, client, nil, time.Hour, time.Second, nil)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := forwarder.Close(ctx); err != nil {
+			t.Error(err)
+		}
+	}()
+	for index := 0; index < 2; index++ {
+		event := validCollectorEvent(EventQuestion)
+		event.Text = strings.Repeat("x", 700)
+		if err := forwarder.Record(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitFor(t, 500*time.Millisecond, func() bool {
 		segments, err := collectorSpool.Pending()
 		return err == nil && len(segments) == 1
 	})
@@ -255,7 +335,9 @@ func TestGRPCForwardingSinkTimesOutMissingAcknowledgement(t *testing.T) {
 		}
 	})
 	forwarder.deliveryTimeout = 25 * time.Millisecond
-	if err := forwarder.Record(Event{Timestamp: time.Now(), SessionID: "hung", Kind: EventQuestion}); err != nil {
+	hungEvent := validCollectorEvent(EventQuestion)
+	hungEvent.SessionID = "hung"
+	if err := forwarder.Record(hungEvent); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -323,6 +405,15 @@ func eventJSONL(t *testing.T, event Event) []byte {
 		t.Fatal(err)
 	}
 	return append(data, '\n')
+}
+
+func validCollectorEvent(kind EventKind) Event {
+	return Event{SchemaVersion: 1, Timestamp: time.Now(), SessionID: "session-1", Sequence: 1, Kind: kind}
+}
+
+func withEvent(event Event, change func(*Event)) Event {
+	change(&event)
+	return event
 }
 
 func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {

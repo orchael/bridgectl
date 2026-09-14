@@ -87,7 +87,7 @@ func TestLiveCollectorFiltersEventKindsBeforeQueueing(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := sink.snapshot()
-	if len(events) != 2 || events[0].Kind != EventQuestion || events[1].Kind != EventAnswer {
+	if len(events) != 2 || events[0].Kind != EventQuestion || events[1].Kind != EventAnswer || events[0].Sequence != 1 || events[1].Sequence != 2 {
 		t.Fatalf("filtered events=%+v", events)
 	}
 }
@@ -121,8 +121,8 @@ func TestLiveCollectorCapturesFullBidirectionalInteraction(t *testing.T) {
 		if event.SourceID != "bridge-live" {
 			t.Fatalf("event[%d].SourceID=%q, want bridge-live", index, event.SourceID)
 		}
-		if event.SchemaVersion != 1 {
-			t.Fatalf("event[%d].SchemaVersion=%d, want 1", index, event.SchemaVersion)
+		if event.SchemaVersion != 2 {
+			t.Fatalf("event[%d].SchemaVersion=%d, want 2", index, event.SchemaVersion)
 		}
 		if index > 0 && event.Sequence <= events[index-1].Sequence {
 			t.Fatalf("event sequences are not increasing: %+v", events)
@@ -150,6 +150,36 @@ func TestLiveCollectorCapturesFullBidirectionalInteraction(t *testing.T) {
 	}
 	if providerEvents != 4 || userEvents != 1 || !sawThinking || !sawQuestion || !sawAnswer || !sawInvalid {
 		t.Fatalf("incomplete full capture: events=%+v", events)
+	}
+}
+
+func TestLiveCollectorReassemblesSplitUTF8AndSecrets(t *testing.T) {
+	sink := &memorySink{}
+	collector := NewLiveCollector(sink, 32, true, nil, EventProviderOutput, EventUserInput, EventQuestion, EventAnswer)
+	session := Session{SessionID: "split", Provider: "codex"}
+	collector.ObserveOutputChunk(session, []byte{'P', 'r', 'o', 'c', 'e', 'e', 'd', '?', ' ', 0xe2})
+	collector.ObserveOutputChunk(session, []byte{0x82, 0xac})
+	collector.ObserveInputChunk(session, []byte{'y', 0xc3})
+	collector.ObserveInputChunk(session, []byte{0xa9, 's', '\n'})
+	collector.ObserveOutputChunk(session, []byte("token=super-"))
+	collector.ObserveOutputChunk(session, []byte("secret done\n"))
+	collector.ObserveOutputChunk(session, []byte("api_key "))
+	collector.ObserveOutputChunk(session, []byte("=second-secret done\n"))
+	collector.SessionEnded(session)
+	if err := collector.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	events := sink.snapshot()
+	joined := ""
+	var sawEuro, sawInput, sawRedaction bool
+	for _, event := range events {
+		joined += event.Text
+		sawEuro = sawEuro || strings.Contains(event.Text, "€")
+		sawInput = sawInput || event.Kind == EventUserInput && event.Text == "yés\n"
+		sawRedaction = sawRedaction || event.Redactions > 0
+	}
+	if strings.Contains(joined, "super-secret") || strings.Contains(joined, "second-secret") || !sawEuro || !sawInput || !sawRedaction {
+		t.Fatalf("split chunks were not safely reconstructed: %+v", events)
 	}
 }
 

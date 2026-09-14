@@ -186,7 +186,8 @@
 - Validation added (test/check/alert): Unit tests force multiple rotations and
   verify ordered reads and kind exclusion; the Docker e2e crosses a distinct
   collector service and reads only `question` and `answer` from its volume.
-# 2026-09-14 Telemetry Retention Must Use a Disk Budget
+
+## 2026-09-14 Telemetry Retention Must Use a Disk Budget
 - Incident/bug: A one-second flush interval combined with a 128-segment limit
   evicted collector-volume telemetry after roughly two minutes even though the
   stored segments used only a few megabytes.
@@ -199,3 +200,17 @@
 - Validation added: Config tests assert the 10-second bridge flush default;
   spool tests cover byte eviction and recovery, and the CLI/Compose tests assert
   the default `1GB` disk budget.
+
+## 2026-09-14 Telemetry Boundaries Are Security and Consistency Boundaries
+
+- Incident/bug: Per-read redaction could miss credentials and UTF-8 code points
+  split across transport chunks, while reports could race a mutable active file.
+- Root cause pattern: Transport reads and filesystem writes are not semantic
+  record boundaries; treating them as complete records leaks implementation
+  timing into privacy and analysis correctness.
+- Preventative rule: Reassemble bounded interaction records before redaction,
+  sequence only retained events, and expose only newline-complete immutable
+  segments to report readers.
+- Validation added: Split UTF-8 and multi-chunk secret regressions, filtered
+  sequence assertions, active-segment exclusion, partial-write recovery, and a
+  live collector E2E ending with `session_ended`.
