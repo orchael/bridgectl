@@ -1,10 +1,12 @@
-.PHONY: build proto tools test test-e2e test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down logs up-local down-local logs-local up-step-ca down-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
+.PHONY: build proto tools test test-telemetry-e2e test-telemetry-s3-e2e test-e2e test-e2e-live-telemetry test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down reset logs up-local down-local reset-local logs-local up-collector down-collector reset-collector ps-collector logs-collector up-step-ca down-step-ca reset-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
 
 BIN_DIR := bin
 BRIDGE_CA := $(BIN_DIR)/bridge-ca
 BRIDGE_CLI := $(BIN_DIR)/bridgectl
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
+GO_BUILD_FLAGS ?= -buildvcs=false
+GO_BUILD_ENV = GOCACHE="$${GOCACHE:-/tmp/go-build}" GOMODCACHE="$${GOMODCACHE:-/tmp/go-mod}"
 CONFIG ?= config/bridge.yaml
 DEV_CONFIG ?= config/bridge-dev.yaml
 CHAT_TARGET ?= bridge.local:9445
@@ -14,12 +16,12 @@ CHAT_REPO ?= /repos/penduin
 CHAT_JWT_KEY ?= ../../certs/jwt-signing.key
 build: proto
 	@mkdir -p $(BIN_DIR)
-	go build $(LDFLAGS) -o $(BRIDGE_CA) ./cmd/bridge-ca
-	go build $(LDFLAGS) -o $(BRIDGE_CLI) ./cmd/bridgectl
+	$(GO_BUILD_ENV) go build $(GO_BUILD_FLAGS) $(LDFLAGS) -o $(BRIDGE_CA) ./cmd/bridge-ca
+	$(GO_BUILD_ENV) go build $(GO_BUILD_FLAGS) $(LDFLAGS) -o $(BRIDGE_CLI) ./cmd/bridgectl
 
 build-cli:
 	@mkdir -p $(BIN_DIR)
-	go build $(LDFLAGS) -o $(BRIDGE_CLI) ./cmd/bridgectl
+	$(GO_BUILD_ENV) go build $(GO_BUILD_FLAGS) $(LDFLAGS) -o $(BRIDGE_CLI) ./cmd/bridgectl
 
 tools:
 	go install google.golang.org/protobuf/cmd/protoc-gen-go@$(shell go list -m -f '{{.Version}}' google.golang.org/protobuf)
@@ -37,6 +39,13 @@ proto:
 test:
 	./scripts/test-go.sh
 
+test-telemetry-e2e:
+	GOCACHE="$${GOCACHE:-/tmp/go-build}" GOMODCACHE="$${GOMODCACHE:-/tmp/go-mod}" GOFLAGS="$${GOFLAGS:-} -buildvcs=false" go test -race -count=1 ./e2e/telemetry
+
+test-telemetry-s3-e2e:
+	@test -n "$${BRIDGECTL_TELEMETRY_S3_BUCKET}" || { echo "BRIDGECTL_TELEMETRY_S3_BUCKET must name an existing test bucket" >&2; exit 2; }
+	GOCACHE="$${GOCACHE:-/tmp/go-build}" GOMODCACHE="$${GOMODCACHE:-/tmp/go-mod}" GOFLAGS="$${GOFLAGS:-} -buildvcs=false" go test -race -count=1 -run TestTelemetryGRPCToS3 ./e2e/telemetry
+
 E2E_ONLY ?=
 
 test-e2e:
@@ -45,6 +54,9 @@ test-e2e:
 	rc=$$?; \
 	docker compose -f e2e/docker-compose.yml down -v; \
 	exit $$rc
+
+test-e2e-live-telemetry:
+	@$(MAKE) test-e2e E2E_ONLY=telemetry
 
 test-e2e-unprotected:
 	@set +e; \
@@ -160,11 +172,23 @@ smoke-container:
 smoke-ec2:
 	./scripts/with_env_secrets.sh ./scripts/smoke-ec2.sh
 
+define confirm_compose_reset
+@printf 'Delete all containers and volumes for the $(1) Compose stack? [y/N] '; \
+read -r answer; \
+case "$$answer" in \
+	[yY]|[yY][eE][sS]) $(2) down -v ;; \
+	*) echo 'Reset cancelled.' ;; \
+esac
+endef
+
 up:
 	./scripts/with_env_secrets.sh docker compose up --build
 
 down:
 	docker compose down
+
+reset:
+	$(call confirm_compose_reset,default,docker compose)
 
 logs:
 	docker compose logs -f
@@ -175,8 +199,28 @@ up-local:
 down-local:
 	docker compose -f docker-compose.yml -f docker-compose.local.yaml down
 
+reset-local:
+	$(call confirm_compose_reset,local,docker compose -f docker-compose.yml -f docker-compose.local.yaml)
+
 logs-local:
 	docker compose -f docker-compose.yml -f docker-compose.local.yaml logs -f
+
+TELEMETRY_COMPOSE := docker compose -f telemetry/docker-compose.yml
+
+up-collector:
+	$(TELEMETRY_COMPOSE) up --build -d
+
+down-collector:
+	$(TELEMETRY_COMPOSE) down
+
+reset-collector:
+	$(call confirm_compose_reset,telemetry collector,$(TELEMETRY_COMPOSE))
+
+ps-collector:
+	$(TELEMETRY_COMPOSE) ps
+
+logs-collector:
+	$(TELEMETRY_COMPOSE) logs -f
 
 STEP_CA_COMPOSE := docker compose -f step-ca/docker-compose.step-ca.yaml
 
@@ -185,6 +229,9 @@ up-step-ca:
 
 down-step-ca:
 	$(STEP_CA_COMPOSE) down
+
+reset-step-ca:
+	$(call confirm_compose_reset,Step CA,$(STEP_CA_COMPOSE))
 
 logs-step-ca:
 	$(STEP_CA_COMPOSE) logs -f

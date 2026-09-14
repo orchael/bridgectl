@@ -2,12 +2,15 @@ package config
 
 import (
 	"fmt"
+	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/dustin/go-humanize"
 	"gopkg.in/yaml.v3"
 )
 
@@ -25,6 +28,7 @@ type Config struct {
 	Persistence  PersistenceConfig         `yaml:"persistence"`
 	Runtime      RuntimeConfig             `yaml:"runtime"`
 	RepoSetup    RepoSetupConfig           `yaml:"repo_setup"`
+	Telemetry    TelemetryConfig           `yaml:"telemetry"`
 	Providers    map[string]ProviderConfig `yaml:"providers"`
 	AllowedPaths []string                  `yaml:"allowed_paths"`
 	Logging      LoggingConfig             `yaml:"logging"`
@@ -114,6 +118,24 @@ type RepoSetupConfig struct {
 	ConfigPath     string `yaml:"config_path"`
 	DefaultTimeout string `yaml:"default_timeout"`
 	MaxTimeout     string `yaml:"max_timeout"`
+}
+
+type TelemetryConfig struct {
+	Enabled               bool     `yaml:"enabled"`
+	SpoolDir              string   `yaml:"spool_dir"`
+	CollectorTarget       string   `yaml:"collector_target"`
+	CollectorInsecure     bool     `yaml:"collector_insecure"`
+	CollectorCA           string   `yaml:"collector_ca"`
+	CollectorServerName   string   `yaml:"collector_server_name"`
+	Kinds                 []string `yaml:"kinds"`
+	QueueSize             int      `yaml:"queue_size"`
+	RollingWindow         string   `yaml:"rolling_window"`
+	FlushInterval         string   `yaml:"flush_interval"`
+	RetryInterval         string   `yaml:"retry_interval"`
+	MaxSegmentBytes       int64    `yaml:"max_segment_bytes"`
+	MaxDiskSpace          string   `yaml:"max_disk_space"`
+	DeprecatedMaxSegments *int     `yaml:"max_segments"`
+	IncludeRedactedText   bool     `yaml:"include_redacted_text"`
 }
 
 func (r RepoSetupConfig) IsEnabled() bool {
@@ -293,6 +315,18 @@ func ParseDuration(s string, fallback time.Duration) time.Duration {
 	return d
 }
 
+// ParseByteSize parses a positive human-readable SI or IEC byte size.
+func ParseByteSize(value string) (int64, error) {
+	bytes, err := humanize.ParseBytes(strings.TrimSpace(value))
+	if err != nil {
+		return 0, err
+	}
+	if bytes == 0 || bytes > math.MaxInt64 {
+		return 0, fmt.Errorf("byte size must be between 1 and %d", int64(math.MaxInt64))
+	}
+	return int64(bytes), nil
+}
+
 // synthesizeSecurity fills in cfg.Security from legacy fields when the
 // security block is not explicitly configured in the YAML file. This
 // provides backward compatibility so existing configs continue to work
@@ -409,6 +443,29 @@ func applyDefaults(cfg *Config) {
 	if cfg.RepoSetup.MaxTimeout == "" {
 		cfg.RepoSetup.MaxTimeout = "15m"
 	}
+	if cfg.Telemetry.QueueSize == 0 {
+		cfg.Telemetry.QueueSize = 1024
+	}
+	if cfg.Telemetry.RollingWindow == "" {
+		cfg.Telemetry.RollingWindow = "168h"
+	}
+	if cfg.Telemetry.FlushInterval == "" {
+		cfg.Telemetry.FlushInterval = "10s"
+	}
+	if cfg.Telemetry.RetryInterval == "" {
+		cfg.Telemetry.RetryInterval = "1s"
+	}
+	if len(cfg.Telemetry.Kinds) == 0 {
+		cfg.Telemetry.Kinds = []string{"session_started", "question", "answer", "session_ended"}
+	} else if len(cfg.Telemetry.Kinds) == 1 && cfg.Telemetry.Kinds[0] == "all" {
+		cfg.Telemetry.Kinds = []string{"session_started", "provider_output", "user_input", "question", "answer", "session_ended"}
+	}
+	if cfg.Telemetry.MaxSegmentBytes == 0 {
+		cfg.Telemetry.MaxSegmentBytes = 10 << 20
+	}
+	if cfg.Telemetry.MaxDiskSpace == "" {
+		cfg.Telemetry.MaxDiskSpace = "1GB"
+	}
 }
 
 func expandRuntimeConfig(cfg *Config) error {
@@ -500,6 +557,57 @@ func validate(cfg *Config) error {
 	}
 	if defaultSetupTimeout > maxSetupTimeout {
 		return fmt.Errorf("config: repo_setup.default_timeout must not exceed repo_setup.max_timeout")
+	}
+	if cfg.Telemetry.QueueSize < 1 {
+		return fmt.Errorf("config: telemetry.queue_size must be positive")
+	}
+	rollingWindow, err := time.ParseDuration(cfg.Telemetry.RollingWindow)
+	if err != nil {
+		return fmt.Errorf("config: telemetry.rolling_window: %w", err)
+	}
+	if rollingWindow <= 0 {
+		return fmt.Errorf("config: telemetry.rolling_window must be positive")
+	}
+	validTelemetryKinds := map[string]bool{"session_started": true, "provider_output": true, "user_input": true, "question": true, "answer": true, "session_ended": true}
+	seenTelemetryKinds := make(map[string]bool, len(cfg.Telemetry.Kinds))
+	for _, kind := range cfg.Telemetry.Kinds {
+		if !validTelemetryKinds[kind] {
+			return fmt.Errorf("config: telemetry.kinds contains unsupported value %q", kind)
+		}
+		if seenTelemetryKinds[kind] {
+			return fmt.Errorf("config: telemetry.kinds contains duplicate value %q", kind)
+		}
+		seenTelemetryKinds[kind] = true
+	}
+	if cfg.Telemetry.CollectorTarget != "" {
+		host, port, splitErr := net.SplitHostPort(cfg.Telemetry.CollectorTarget)
+		if splitErr != nil || strings.TrimSpace(host) == "" || strings.TrimSpace(port) == "" {
+			return fmt.Errorf("config: telemetry.collector_target must be a host:port address")
+		}
+	}
+	if cfg.Telemetry.CollectorInsecure && (cfg.Telemetry.CollectorCA != "" || cfg.Telemetry.CollectorServerName != "") {
+		return fmt.Errorf("config: telemetry.collector_ca and collector_server_name require TLS")
+	}
+	flushInterval, err := time.ParseDuration(cfg.Telemetry.FlushInterval)
+	if err != nil || flushInterval <= 0 {
+		return fmt.Errorf("config: telemetry.flush_interval must be a positive duration")
+	}
+	retryInterval, err := time.ParseDuration(cfg.Telemetry.RetryInterval)
+	if err != nil || retryInterval <= 0 {
+		return fmt.Errorf("config: telemetry.retry_interval must be a positive duration")
+	}
+	if cfg.Telemetry.MaxSegmentBytes < 1 {
+		return fmt.Errorf("config: telemetry.max_segment_bytes must be positive")
+	}
+	if cfg.Telemetry.DeprecatedMaxSegments != nil {
+		return fmt.Errorf("config: telemetry.max_segments has been removed; use max_disk_space")
+	}
+	maxDiskBytes, err := ParseByteSize(cfg.Telemetry.MaxDiskSpace)
+	if err != nil {
+		return fmt.Errorf("config: telemetry.max_disk_space: %w", err)
+	}
+	if maxDiskBytes < cfg.Telemetry.MaxSegmentBytes {
+		return fmt.Errorf("config: telemetry.max_disk_space must be at least telemetry.max_segment_bytes")
 	}
 	if _, err := time.ParseDuration(cfg.Auth.JWTMaxTTL); err != nil {
 		return fmt.Errorf("config: auth.jwt_max_ttl: %w", err)

@@ -234,7 +234,7 @@ providers:
     startup_timeout: 5s
     required_env: ["BRIDGE_E2E_SETUP_VALUE"]
 repo_setup:
-  default_timeout: 5s
+  default_timeout: 10s
   max_timeout: 30s
 `), 0o644))
 	s.Require().NoError(os.WriteFile(filepath.Join(repoDir, ".bridgectl.yaml"), []byte(`
@@ -256,7 +256,7 @@ setup:
 	defer func() { _ = client.Close() }()
 	client.SetProject("test")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	sessionID := uuid.NewString()

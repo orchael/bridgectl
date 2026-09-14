@@ -8,6 +8,7 @@ trap 'rm -f "$profile" "$log_file"' EXIT
 
 export GOCACHE="${GOCACHE:-/tmp/go-build}"
 export GOMODCACHE="${GOMODCACHE:-/tmp/go-mod}"
+export GOFLAGS="${GOFLAGS:-} -buildvcs=false"
 
 packages=(
   ./internal/auth
@@ -17,6 +18,7 @@ packages=(
   ./internal/config
   ./internal/pki
   ./internal/redact
+  ./internal/telemetry
   ./pkg/...
 )
 

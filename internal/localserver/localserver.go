@@ -7,6 +7,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -30,6 +32,7 @@ import (
 	"github.com/orchael/bridgectl/internal/redact"
 	"github.com/orchael/bridgectl/internal/reposetup"
 	"github.com/orchael/bridgectl/internal/server"
+	"github.com/orchael/bridgectl/internal/telemetry"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -47,6 +50,24 @@ func StateDir() string {
 		home = os.TempDir()
 	}
 	return filepath.Join(home, ".config/bridgectl")
+}
+
+// TelemetrySpoolDir resolves a configured segmented telemetry spool directory.
+func TelemetrySpoolDir(path, stateDir string) string {
+	if strings.TrimSpace(path) == "" {
+		return filepath.Join(stateDir, "telemetry", "segments")
+	}
+	return expandTelemetryPath(path)
+}
+
+func expandTelemetryPath(path string) string {
+	path = os.ExpandEnv(path)
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			path = filepath.Join(home, strings.TrimPrefix(path, "~/"))
+		}
+	}
+	return filepath.Clean(path)
 }
 
 // SocketPath returns the default unix socket path.
@@ -328,6 +349,7 @@ func Start(cfg Config) (*Server, error) {
 	repoSetupConfigPath := ".bridgectl.yaml"
 	repoSetupDefaultTimeout := 2 * time.Minute
 	repoSetupMaxTimeout := 15 * time.Minute
+	telemetryCfg := config.TelemetryConfig{}
 	configHasServerListen := false
 	if cfg.ConfigPath != "" {
 		var err error
@@ -340,6 +362,7 @@ func Start(cfg Config) (*Server, error) {
 			return nil, fmt.Errorf("load config %q: %w", cfg.ConfigPath, err)
 		}
 		if fileCfg != nil {
+			telemetryCfg = fileCfg.Telemetry
 			if len(fileCfg.Providers) > 0 {
 				configProviderDefs = fileCfg.Providers
 			}
@@ -655,6 +678,90 @@ func Start(cfg Config) (*Server, error) {
 			return nil, fmt.Errorf("open session store %q: %w", cfg.DBPath, err)
 		}
 		supOpts = append(supOpts, bridge.WithStore(store))
+	}
+	if telemetryCfg.Enabled {
+		spoolDir := TelemetrySpoolDir(telemetryCfg.SpoolDir, stateDir)
+		maxDiskBytes, err := config.ParseByteSize(telemetryCfg.MaxDiskSpace)
+		if err != nil {
+			if store != nil {
+				_ = store.Close()
+			}
+			return nil, fmt.Errorf("configure telemetry disk budget: %w", err)
+		}
+		segmentSpool, err := telemetry.NewSegmentSpool(spoolDir, telemetryCfg.MaxSegmentBytes, maxDiskBytes, func(segment telemetry.Segment) {
+			logger.Warn("telemetry spool evicted oldest segment", "segment_id", segment.ID, "bytes", segment.Size)
+		})
+		if err != nil {
+			if store != nil {
+				_ = store.Close()
+			}
+			return nil, fmt.Errorf("configure telemetry spool: %w", err)
+		}
+		var eventSink telemetry.Sink = segmentSpool
+		destination := "local"
+		if telemetryCfg.CollectorTarget != "" {
+			var transportCredentials credentials.TransportCredentials
+			if telemetryCfg.CollectorInsecure {
+				transportCredentials = insecure.NewCredentials()
+			} else {
+				host, _, _ := net.SplitHostPort(telemetryCfg.CollectorTarget)
+				serverName := telemetryCfg.CollectorServerName
+				if serverName == "" {
+					serverName = host
+				}
+				tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName}
+				if telemetryCfg.CollectorCA != "" {
+					caPEM, readErr := os.ReadFile(expandTelemetryPath(telemetryCfg.CollectorCA))
+					if readErr != nil {
+						if store != nil {
+							_ = store.Close()
+						}
+						return nil, fmt.Errorf("read telemetry collector CA: %w", readErr)
+					}
+					roots, poolErr := x509.SystemCertPool()
+					if poolErr != nil {
+						roots = x509.NewCertPool()
+					}
+					if !roots.AppendCertsFromPEM(caPEM) {
+						if store != nil {
+							_ = store.Close()
+						}
+						return nil, fmt.Errorf("parse telemetry collector CA: no certificates found")
+					}
+					tlsConfig.RootCAs = roots
+				}
+				transportCredentials = credentials.NewTLS(tlsConfig)
+			}
+			conn, err := grpc.NewClient(telemetryCfg.CollectorTarget, grpc.WithTransportCredentials(transportCredentials))
+			if err != nil {
+				if store != nil {
+					_ = store.Close()
+				}
+				return nil, fmt.Errorf("configure telemetry collector: %w", err)
+			}
+			eventSink = telemetry.NewGRPCForwardingSink(
+				segmentSpool,
+				bridgev1.NewTelemetryCollectorServiceClient(conn),
+				conn,
+				config.ParseDuration(telemetryCfg.FlushInterval, time.Second),
+				config.ParseDuration(telemetryCfg.RetryInterval, time.Second),
+				func(err error) { logger.Warn("telemetry delivery", "error", err) },
+			)
+			destination = "grpc_collector"
+		}
+		kinds := make([]telemetry.EventKind, 0, len(telemetryCfg.Kinds))
+		for _, kind := range telemetryCfg.Kinds {
+			kinds = append(kinds, telemetry.EventKind(kind))
+		}
+		collector := telemetry.NewLiveCollector(
+			eventSink,
+			telemetryCfg.QueueSize,
+			telemetryCfg.IncludeRedactedText,
+			func(err error) { logger.Warn("telemetry persistence", "error", err) },
+			kinds...,
+		)
+		supOpts = append(supOpts, bridge.WithTelemetry(collector))
+		logger.Info("telemetry enabled", "destination", destination, "kinds", telemetryCfg.Kinds, "rolling_window", telemetryCfg.RollingWindow)
 	}
 
 	sup := bridge.NewSupervisor(registry, policy, cfg.EventBufferSize, cfg.IdleTimeout, supOpts...)

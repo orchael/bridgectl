@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	bridgev1 "github.com/orchael/bridgectl/gen/bridge/v1"
+	"github.com/orchael/bridgectl/internal/telemetry"
 	"github.com/orchael/bridgectl/pkg/bridgeclient"
 )
 
@@ -30,6 +31,7 @@ var (
 	suiteJWTKey  = flag.String("bridge.jwt-key", "", "JWT signing key path")
 	suiteIssuer  = flag.String("bridge.jwt-issuer", "e2e", "JWT issuer")
 	suiteRepo    = flag.String("bridge.repo", "/tmp/bridgectl", "repo path")
+	suiteEvents  = flag.String("bridge.telemetry-events", "/telemetry/segments", "telemetry segmented JSONL directory")
 	suiteTimeout = flag.Duration("bridge.timeout", 15*time.Minute, "per-scenario timeout")
 )
 
@@ -136,6 +138,68 @@ func (s *BridgeSuite) TestEcho() {
 		SessionId: sessionID,
 		Force:     true,
 	})
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+	}
+}
+
+// TestTelemetry proves that the Docker bridge observes a real provider's
+// output and authorized client input, then persists their correlated events.
+func (s *BridgeSuite) TestTelemetry() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	sessionID := uuid.NewString()
+	_, err := s.client.StartSession(ctx, &bridgev1.StartSessionRequest{
+		ProjectId:   "e2e",
+		SessionId:   sessionID,
+		RepoPath:    *suiteRepo,
+		Provider:    "telemetry-fixture",
+		InitialCols: 120,
+		InitialRows: 40,
+	})
+	s.Require().NoError(err, "start telemetry fixture session")
+
+	stream, err := s.client.AttachSession(ctx, &bridgev1.AttachSessionRequest{
+		SessionId: sessionID,
+		ClientId:  uuid.NewString(),
+	})
+	s.Require().NoError(err, "attach telemetry fixture session")
+
+	var log transcript
+	done := make(chan error, 1)
+	go func() {
+		done <- stream.RecvAll(ctx, func(ev *bridgev1.AttachSessionEvent) error {
+			if ev.Type == bridgev1.AttachEventType_ATTACH_EVENT_TYPE_OUTPUT {
+				log.append(ev.Payload)
+			}
+			if ev.Type == bridgev1.AttachEventType_ATTACH_EVENT_TYPE_ERROR {
+				return errors.New(ev.Error)
+			}
+			return nil
+		})
+	}()
+
+	s.Require().NoError(waitForLiteral(&log, "Do you want me to run this telemetry fixture?", 10*time.Second), "fixture question not received")
+	_, err = s.client.WriteInput(ctx, &bridgev1.WriteInputRequest{
+		SessionId: sessionID,
+		ClientId:  stream.ClientID(),
+		Data:      []byte("yes\n"),
+	})
+	s.Require().NoError(err, "answer telemetry fixture")
+	s.Require().NoError(waitForLiteral(&log, "TELEMETRY_FIXTURE_ANSWER=yes", 10*time.Second), "fixture answer not received")
+
+	_, err = s.client.StopSession(ctx, &bridgev1.StopSessionRequest{SessionId: sessionID, Force: true})
+	s.Require().NoError(err, "stop telemetry fixture session")
+	time.Sleep(250 * time.Millisecond)
+	events, err := waitForTelemetryEvents(*suiteEvents, sessionID, 10*time.Second)
+	s.Require().NoError(err, "persist correlated telemetry events")
+	for _, event := range events {
+		s.T().Logf("telemetry event: kind=%s stream=%s sequence=%d class=%s decision=%s fingerprint=%s bytes=%d redactions=%d", event.Kind, event.Stream, event.Sequence, event.Class, event.Decision, event.Fingerprint, event.ByteCount, event.Redactions)
+	}
+
 	cancel()
 	select {
 	case <-done:
@@ -418,6 +482,57 @@ func waitForFileContent(path, want string, timeout time.Duration) error {
 		time.Sleep(250 * time.Millisecond)
 	}
 	return fmt.Errorf("timed out waiting for %q to contain %q", path, want)
+}
+
+func waitForTelemetryEvents(path, sessionID string, timeout time.Duration) ([]telemetry.Event, error) {
+	deadline := time.Now().Add(timeout)
+	lastErr := errors.New("no telemetry events observed")
+	for time.Now().Before(deadline) {
+		events, err := telemetry.ReadEvents(path)
+		if err != nil {
+			lastErr = err
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		seen := make(map[telemetry.EventKind]telemetry.Event)
+		var sessionEvents []telemetry.Event
+		var providerText, userText strings.Builder
+		var previousSequence uint64
+		ordered := true
+		for _, event := range events {
+			if event.SessionID == sessionID {
+				seen[event.Kind] = event
+				sessionEvents = append(sessionEvents, event)
+				if previousSequence > 0 && event.Sequence <= previousSequence {
+					ordered = false
+				}
+				previousSequence = event.Sequence
+				if event.Kind == telemetry.EventProviderOutput {
+					providerText.WriteString(event.Text)
+				}
+				if event.Kind == telemetry.EventUserInput {
+					userText.WriteString(event.Text)
+				}
+			}
+		}
+		question, hasQuestion := seen[telemetry.EventQuestion]
+		answer, hasAnswer := seen[telemetry.EventAnswer]
+		_, hasProviderOutput := seen[telemetry.EventProviderOutput]
+		_, hasUserInput := seen[telemetry.EventUserInput]
+		_, hasStarted := seen[telemetry.EventSessionStarted]
+		_, hasEnded := seen[telemetry.EventSessionEnded]
+		if hasStarted && hasProviderOutput && hasUserInput && hasQuestion && hasAnswer && hasEnded && ordered &&
+			question.Class == telemetry.ClassPermission &&
+			answer.Decision == telemetry.DecisionAccepted &&
+			answer.Fingerprint == question.Fingerprint &&
+			strings.Contains(providerText.String(), "Do you want me to run this telemetry fixture?") &&
+			strings.Contains(userText.String(), "yes") {
+			return sessionEvents, nil
+		}
+		lastErr = fmt.Errorf("full capture unexpected: started=%t provider_output=%t user_input=%t question=%t answer=%t ended=%t ordered=%t", hasStarted, hasProviderOutput, hasUserInput, hasQuestion, hasAnswer, hasEnded, ordered)
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("timed out reading telemetry for session %s from %s: %w", sessionID, path, lastErr)
 }
 
 // TestBridgeSuite is the entry point that runs all provider tests.

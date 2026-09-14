@@ -40,6 +40,24 @@ rate_limits:
   send_input_per_session_rps: 5
   send_input_per_session_burst: 20
 
+# Local, opt-in telemetry. Use kinds: [all] for the full redacted interaction
+# stream; the safe default below retains only lifecycle and derived analytics.
+telemetry:
+  enabled: false
+  spool_dir: ""
+  collector_target: ""
+  collector_insecure: false
+  collector_ca: ""
+  collector_server_name: ""
+  kinds: ["session_started", "question", "answer", "session_ended"]
+  queue_size: 1024
+  rolling_window: "168h"
+  flush_interval: "10s"
+  retry_interval: "1s"
+  max_segment_bytes: 10485760
+  max_disk_space: 1GB
+  include_redacted_text: false
+
 providers:
   claude:
     binary: "./node_modules/@anthropic-ai/claude-code/bin/claude.exe"

@@ -37,6 +37,104 @@ sessions:
 	if cfg.RateLimits.GlobalRPS == 0 || cfg.RateLimits.GlobalBurst == 0 {
 		t.Fatal("expected default global rate limits")
 	}
+	if cfg.Telemetry.Enabled || cfg.Telemetry.QueueSize <= 0 || cfg.Telemetry.RollingWindow == "" {
+		t.Fatalf("unexpected telemetry defaults: %+v", cfg.Telemetry)
+	}
+	if cfg.Telemetry.FlushInterval != "10s" {
+		t.Fatalf("Telemetry.FlushInterval=%q, want 10s", cfg.Telemetry.FlushInterval)
+	}
+	if len(cfg.Telemetry.Kinds) != 4 || cfg.Telemetry.MaxSegmentBytes != 10<<20 || cfg.Telemetry.MaxDiskSpace != "1GB" {
+		t.Fatalf("unexpected telemetry retention defaults: %+v", cfg.Telemetry)
+	}
+}
+
+func TestLoadTelemetry(t *testing.T) {
+	path := writeTestConfig(t, `
+telemetry:
+  enabled: true
+  spool_dir: /tmp/telemetry-spool
+  collector_target: telemetry-collector:9464
+  collector_insecure: true
+  kinds: [question, answer]
+  queue_size: 64
+  rolling_window: 24h
+  flush_interval: 250ms
+  retry_interval: 500ms
+  max_segment_bytes: 4096
+  max_disk_space: 16KiB
+  include_redacted_text: false
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Telemetry.Enabled || cfg.Telemetry.SpoolDir != "/tmp/telemetry-spool" || cfg.Telemetry.CollectorTarget != "telemetry-collector:9464" || !cfg.Telemetry.CollectorInsecure || cfg.Telemetry.QueueSize != 64 || cfg.Telemetry.RollingWindow != "24h" || cfg.Telemetry.FlushInterval != "250ms" || cfg.Telemetry.RetryInterval != "500ms" || cfg.Telemetry.MaxSegmentBytes != 4096 || cfg.Telemetry.MaxDiskSpace != "16KiB" || cfg.Telemetry.IncludeRedactedText {
+		t.Fatalf("Telemetry=%+v", cfg.Telemetry)
+	}
+	if len(cfg.Telemetry.Kinds) != 2 || cfg.Telemetry.Kinds[0] != "question" || cfg.Telemetry.Kinds[1] != "answer" {
+		t.Fatalf("Telemetry.Kinds=%v", cfg.Telemetry.Kinds)
+	}
+}
+
+func TestLoadTelemetryAllExpandsToEveryConcreteKind(t *testing.T) {
+	cfg, err := Load(writeTestConfig(t, "telemetry:\n  kinds: [all]\n  include_redacted_text: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"session_started", "provider_output", "user_input", "question", "answer", "session_ended"}
+	if strings.Join(cfg.Telemetry.Kinds, ",") != strings.Join(want, ",") {
+		t.Fatalf("Telemetry.Kinds=%v, want %v", cfg.Telemetry.Kinds, want)
+	}
+}
+
+func TestLoadRejectsInvalidTelemetryBounds(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  string
+		wantErr string
+	}{
+		{name: "negative queue", config: "telemetry:\n  queue_size: -1\n", wantErr: "telemetry.queue_size"},
+		{name: "bad window", config: "telemetry:\n  rolling_window: eventually\n", wantErr: "telemetry.rolling_window"},
+		{name: "zero window", config: "telemetry:\n  rolling_window: 0s\n", wantErr: "telemetry.rolling_window"},
+		{name: "unknown kind", config: "telemetry:\n  kinds: [question, transcript]\n", wantErr: "telemetry.kinds"},
+		{name: "all combined with concrete kind", config: "telemetry:\n  kinds: [all, question]\n", wantErr: "telemetry.kinds"},
+		{name: "empty kind", config: "telemetry:\n  kinds: [question, '']\n", wantErr: "telemetry.kinds"},
+		{name: "bad collector target", config: "telemetry:\n  collector_target: missing-port\n", wantErr: "telemetry.collector_target"},
+		{name: "insecure collector with CA", config: "telemetry:\n  collector_target: localhost:9464\n  collector_insecure: true\n  collector_ca: /tmp/ca.pem\n", wantErr: "telemetry.collector_ca"},
+		{name: "bad flush interval", config: "telemetry:\n  flush_interval: later\n", wantErr: "telemetry.flush_interval"},
+		{name: "zero retry interval", config: "telemetry:\n  retry_interval: 0s\n", wantErr: "telemetry.retry_interval"},
+		{name: "negative segment size", config: "telemetry:\n  max_segment_bytes: -1\n", wantErr: "telemetry.max_segment_bytes"},
+		{name: "invalid disk budget", config: "telemetry:\n  max_disk_space: lots\n", wantErr: "telemetry.max_disk_space"},
+		{name: "zero disk budget", config: "telemetry:\n  max_disk_space: 0B\n", wantErr: "telemetry.max_disk_space"},
+		{name: "disk budget smaller than segment", config: "telemetry:\n  max_segment_bytes: 1024\n  max_disk_space: 512B\n", wantErr: "telemetry.max_disk_space"},
+		{name: "removed segment count", config: "telemetry:\n  max_segments: 5\n", wantErr: "telemetry.max_segments has been removed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(writeTestConfig(t, tt.config))
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Load error=%v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseByteSize(t *testing.T) {
+	tests := map[string]int64{
+		"1GB":   1_000_000_000,
+		"1gb":   1_000_000_000,
+		"1GiB":  1 << 30,
+		"16KiB": 16 << 10,
+	}
+	for value, want := range tests {
+		got, err := ParseByteSize(value)
+		if err != nil {
+			t.Fatalf("ParseByteSize(%q): %v", value, err)
+		}
+		if got != want {
+			t.Fatalf("ParseByteSize(%q)=%d, want %d", value, got, want)
+		}
+	}
 }
 
 func TestLoadValidateBadDuration(t *testing.T) {

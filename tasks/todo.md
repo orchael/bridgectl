@@ -161,6 +161,77 @@ old seed over a refreshed file during rollback.
 
 ---
 
+# Telemetry retention defaults (2026-09-14)
+
+Mode: Approval-Required operator/runtime default change, explicitly authorized
+by the user. Governing requirement: PRD §17.2 (`TEL-110`).
+
+Scope and acceptance criteria:
+- [x] Change the bridge telemetry flush default from 1 second to 10 seconds.
+- [x] Set collector retention to 100 segments at the 10 MiB default, providing
+  approximately 1 GiB of bounded local-volume capacity.
+- [x] Keep bridge outbox retention independently configurable and unchanged.
+- [x] Prove defaults through unit tests and validate the collector Compose file.
+- [x] Update examples and operator documentation.
+
+Risks and rollback:
+- A longer flush interval can delay delivery of low-volume active telemetry by
+  up to 10 seconds, while shutdown still performs an explicit final flush.
+- Revert the default values or override `flush_interval` and
+  `TELEMETRY_MAX_SEGMENTS` for an immediate operator rollback.
+
+Evidence:
+- The new config and collector-default tests failed against the prior `1s` and
+  `128` defaults, then passed with `10s` and `100`.
+- `docker compose -f telemetry/docker-compose.yml config` rendered
+  `--max-segments 100` and the existing named volume.
+- Focused race tests passed for `internal/config`, `internal/telemetry`, and
+  `cmd/bridgectl`.
+- `make test`, `make build`, and
+  `docker build --check -f telemetry/Dockerfile .` passed.
+
+# Disk-budget telemetry retention (2026-09-14)
+
+Mode: Approval-Required storage/config contract change, explicitly authorized
+by the user. Governing requirement: PRD §17.2 (`TEL-110`).
+
+Scope and acceptance criteria:
+- [x] Replace `max_segments`/`--max-segments` with the human-readable
+  `max_disk_space`/`--max-disk-space` across bridge and collector configuration.
+- [x] Default bridge-local and collector-local spools to exactly 1 GB while
+  accepting decimal and binary byte-size suffixes.
+- [x] Count active and immutable segment bytes toward the steady-state budget
+  and evict the oldest immutable segments until usage is within it.
+- [x] Enforce the byte budget when opening an existing spool as well as while
+  appending, sealing, and accepting remote segments.
+- [x] Reject invalid budgets and segments that cannot fit within the configured
+  per-segment or total-disk limits.
+- [x] Update unit/E2E fixtures, Compose, container defaults, and documentation;
+  run the full verification suite.
+
+Risks and rollback:
+- This intentionally removes the count-based configuration contract; stale
+  `max_segments` keys must fail configuration decoding instead of being ignored.
+- A spool may contain many small files up to the byte budget; filesystem inode
+  monitoring remains an operator responsibility.
+- Roll back by reverting the contract change. Operators can lower
+  `max_disk_space` or `TELEMETRY_MAX_DISK_SPACE` without changing segment format.
+
+Evidence:
+- The new tests first failed against count-based retention and the removed
+  settings, then passed with aggregate byte enforcement and `1GB` defaults.
+- Focused race tests passed for config, telemetry, local-server integration,
+  and the collector CLI.
+- `make test`, `make lint`, and `make build` passed; maintained coverage is
+  81.0%, above the required 75%.
+- Both Compose files rendered successfully, the collector Dockerfile check
+  reported no warnings, and `make test-e2e-live-telemetry` passed through the
+  real bridge, durable gRPC outbox, collector, and collector-owned volume.
+- The first E2E image build exhausted the host disk. With explicit approval,
+  2.321 GB of unused Docker build cache was removed; no images, containers,
+  named volumes, or telemetry data were removed. The retry passed.
+
+
 # CLI Security Follow-ups (from PR #92 Copilot review)
 
 Cert lifecycle items moved to GitHub Issues: #225 (cert renewal), #224 (SAN mismatch detection).
@@ -368,3 +439,309 @@ Final CI coverage integration:
 - Codecov patch coverage initially reported 0% because the e2e suite built a CLI without coverage instrumentation, even though it exercised the changed code.
 - The coverage job now instruments the real CLI, collects subprocess counters in a temporary directory, and appends their atomic profile to the Go test profile. This measures the existing end-to-end assertions without lowering coverage gates.
 - `make test-cover` passed with subprocess instrumentation: `attachSession` is 77.4% covered and the Linux input-discard helper is 100% covered. Lint and shell syntax checks passed.
+
+# PR #230 question telemetry review (2026-09-13)
+
+Mode: Approval-Required feature/security-sensitive telemetry work; explicitly
+authorized by the user. Governing requirements: PRD §17 (`TEL-001`–`TEL-006`).
+
+Scope:
+- Rebase the four PR #230 changes conceptually onto current `main` in an isolated
+  worktree and keep live Supervisor wiring/reporting out of scope for #231.
+- Correct lint, privacy, persistence-permission, and coverage defects in the
+  telemetry foundation.
+- Add a deterministic black-box e2e test for question → answer → JSONL → feedback.
+
+Risks and tradeoffs:
+- PTY reads/writes are arbitrary chunks, not logical prompts. The foundation
+  will state its framing boundary explicitly; #231 must frame/deduplicate live
+  provider streams before calling it.
+- Making persistence asynchronous without a lifecycle/flush contract can lose
+  events. That integration behavior remains in #231 rather than adding a hidden
+  goroutine to the foundation.
+- Telemetry can contain credentials. Redaction must precede persistence and
+  fingerprinting, and existing file permissions must be hardened.
+
+Test strategy:
+- First add and run the package-level e2e test against `main` to prove the
+  telemetry package/pipeline is absent.
+- Add focused table-driven unit tests for classification, decisions, redaction,
+  JSONL errors/permissions/concurrency, deterministic feedback, and edge cases.
+- Run race tests, the dedicated e2e target, maintained coverage, lint, and the
+  full repository test suite.
+
+Rollback:
+- Revert the new telemetry package, e2e test/target, and PRD section. No runtime
+  wiring, migration, or external data is introduced by #230.
+
+Execution checklist:
+- [x] Review PR #230 and issues #231/#232; identify scope and current CI failures.
+- [x] Create `review/pr-230` from current `main` in a separate worktree.
+- [x] Add governing PRD requirements before implementation.
+- [x] Add the failing e2e proof.
+- [x] Apply and correct the PR #230 foundation.
+- [x] Run focused and full verification with coverage and lint evidence.
+- [x] Record final review findings, evidence, and reusable lessons.
+
+Review outcome and evidence:
+- Original PR CI: `go-lint` failed on unchecked `Close` plus two formatting
+  errors; Codecov reported 73.43% patch coverage and 0% for `jsonl.go`.
+- The first `make test-telemetry-e2e` run against `main` failed because
+  `internal/telemetry` did not exist. After applying PR #230 unchanged, it
+  failed because `Authorization: Bearer top-secret-1` persisted the token.
+- A later permission-classification assertion failed because a realistic
+  `Do you want me to run /tmp/build-42?` prompt was labeled confirmation.
+- The final e2e test passes across question detection, per-session answer
+  correlation, default redaction, JSONL persistence, file permissions, stable
+  aggregation, decisions, and schema-v1 export.
+- `make test-telemetry-e2e` -> passed with race detection.
+- `go test -race -count=1 -coverprofile=/tmp/telemetry-cover.out
+  ./internal/telemetry` -> passed; 99.0% statement coverage.
+- `make lint` -> passed; zero issues.
+- `make test-cover-maintained` -> passed; 80.9% overall, above 75%.
+- `make test` -> passed with race detection across all packages. The isolated
+  worktree required `GOFLAGS=-buildvcs=false`; socket-based existing tests were
+  run with loopback access outside the filesystem sandbox.
+- After fast-forwarding new test-only commits from `main`, the full parallel
+  race suite reproduced an existing boundary-tight repo-setup e2e timeout: its
+  setup and context budgets were both only five seconds from the relevant
+  operation. Increasing the test-only budgets to 10/20 seconds preserves the
+  behavior under test and removes load-sensitive failure.
+- `go build ./cmd/...` -> passed with the same VCS-stamping workaround.
+- Follow-up review found that direct `make build` still failed because Go
+  discovered a non-repository `/tmp/.git` sandbox marker before interrogating
+  the linked worktree. The Make build commands now pass `-buildvcs=false`; the
+  explicit `main.version` ldflag remains the authoritative build version. They
+  also use the same writable Go-cache fallback as the repository test scripts.
+- No Supervisor/config/CLI runtime integration was added; rollback remains a
+  source-only revert with no persisted schema migration.
+
+# Issue #231 live question telemetry (2026-09-13)
+
+Mode: Approval-Required telemetry/runtime behavior change, explicitly authorized
+by the user. Governing requirements: PRD §17.2 (`TEL-101`–`TEL-107`).
+
+Plan:
+- [x] Define live telemetry acceptance criteria and retain local-only storage.
+- [x] Add failing config, framing, async failure-isolation, reporting, CLI, and
+  Supervisor integration tests.
+- [x] Implement a bounded asynchronous collector with deterministic flush.
+- [x] Wire session lifecycle, output framing, and authorized input framing into
+  Supervisor without changing provider I/O behavior.
+- [x] Add telemetry YAML configuration and local-server lifecycle ownership.
+- [x] Add rolling-window `telemetry report` and generic schema-v1 JSON export.
+- [x] Add Claude/Codex prompt fixtures and tests.
+- [x] Add and run a real bridge Docker Compose telemetry e2e.
+- [x] Run formatting, lint, race tests, coverage, build, and document evidence.
+
+Constraints and risks:
+- Never perform filesystem/network sink work on provider I/O goroutines.
+- Keep the queue bounded; dropping telemetry is preferable to blocking a
+  session. Surface drop/write counts in logs without logging event text.
+- Preserve immediate raw PTY input writes; framing operates on a copy.
+- Flush only within the existing bounded server shutdown lifecycle.
+- Keep shared collectors, S3, and generic performance findings in #232.
+
+Rollback:
+- Disable `telemetry.enabled` to remove all live capture without changing
+  sessions. Reverting #231 removes only optional local events/CLI reporting;
+  there is no database or remote-service migration.
+
+Evidence:
+- Focused race tests for config, telemetry, Supervisor integration, the CLI,
+  and local path expansion passed.
+- `make test-e2e-live-telemetry` passed against the real Compose bridge and a
+  separate client container, validating start/question/accepted-answer/end
+  events from the shared mode-`0600` JSONL file. A later display-only formatter
+  rerun exhausted the host Docker filesystem while recompiling images; it did
+  not reach the test phase or invalidate the completed e2e run.
+- `make build` passed from the linked `/tmp` worktree.
+- `make lint` passed with zero issues.
+- `make test` passed the full race suite.
+- `make test-cover-maintained` passed at 81.3% overall coverage (75% required);
+  `internal/telemetry` measured 88.4%.
+
+## Issue #231 telemetry filtering, collector, and retention follow-up (2026-09-13)
+
+Mode: Approval-Required data/runtime and cross-service change, explicitly
+authorized by the user. Governing requirements: PRD §17.2 (`TEL-108`–`TEL-110`).
+
+Plan:
+- [x] Define event-filter, collector, and bounded-storage acceptance criteria.
+- [x] Add failing tests for kind validation/filtering and JSONL rotation reads.
+- [x] Add failing HTTP collector and delivery tests with bounded request sizes.
+- [x] Implement filter-aware live capture and rotating private JSONL storage.
+- [x] Implement the collector command and asynchronous bridge HTTP delivery.
+- [x] Add a standalone collector Compose stack with a persistent volume.
+- [x] Update the real bridge Docker e2e to cross the collector service boundary.
+- [x] Document operator configuration, security boundary, and retention math.
+- [x] Run formatting, lint, race, coverage, build, Compose, and Docker e2e gates.
+
+Constraints and risks:
+- Filtering must occur before local or remote delivery; excluded kinds must not
+  consume collector storage.
+- Collector requests are redacted normalized events, never raw PTY streams.
+- Collector downtime may drop bounded telemetry but must not affect sessions.
+- The listener is unauthenticated in this increment and must remain loopback or
+  private-network only; public exposure is unsupported.
+- Storage is bounded by approximately `max_file_size_bytes * max_files`, plus
+  at most one oversized event.
+
+Rollback:
+- Remove `collector_url` to return to local rotating JSONL, or disable telemetry
+  entirely. Existing JSONL files remain readable and require no migration.
+
+Evidence:
+- Focused race tests passed for kind filtering, validation, HTTP delivery,
+  request limits, rotation, retained-file ordering, and collector CLI parsing.
+- The standalone `telemetry/docker-compose.yml` built and started a non-root,
+  read-only-root collector; its health check returned success, a smoke event
+  returned HTTP 202, and the in-container report read the volume-backed event.
+- `make test-e2e-live-telemetry` passed across separate bridge, collector, and
+  client containers. The volume contained exactly the configured `question`
+  and `answer` records with a matching fingerprint and accepted decision.
+- Both Compose files passed `docker compose config` validation.
+- `docker build --check -f telemetry/Dockerfile .` completed with no warnings.
+- `make test` passed the full race suite; `make test-cover-maintained` passed at
+  81.6% overall (75% required), with `internal/telemetry` at 87.9%.
+- `make lint` passed with zero issues and `make build` passed.
+
+# Durable gRPC Telemetry and S3 Collector
+
+Mode: Approval-Required, approved by user on 2026-09-14.
+
+Governing PRD: `17.2 Live Question Telemetry (#231)`, TEL-111 through TEL-113.
+
+Scope and decisions:
+- Replace per-event HTTP delivery with acknowledged bidirectional gRPC batches.
+- Use one bounded segmented JSONL spool for bridge outbox, collector volume
+  retention, and collector-to-S3 upload staging.
+- Acknowledge only after collector durable persistence; retry stable segment IDs
+  idempotently across disconnects and restarts.
+- Use standard AWS configuration and require the operator/E2E harness to supply
+  an existing bucket.
+- Evict oldest segments at configured storage limits and report the loss.
+
+Risks:
+- Telemetry contains redacted but still potentially sensitive context; spool
+  files remain private and transport requires an explicit private/insecure or
+  TLS choice.
+- Network ambiguity can cause retries; stable segment IDs must prevent duplicate
+  collector files and S3 objects.
+- S3 failures can exhaust the collector spool; failure must remain observable
+  without blocking agent sessions.
+
+Test strategy:
+- Unit tests first for segment rotation/eviction/recovery, idempotent acceptance,
+  acknowledgement/replay, and S3 upload retention on failure.
+- In-process gRPC integration test for disconnect and resend behavior.
+- Opt-in real-S3 E2E using a unique key prefix in an operator-created bucket.
+- Existing volume Compose E2E remains green through the same spool path.
+
+Rollback:
+- Clear `telemetry.collector_target` to return to local segmented persistence.
+- Run the collector without S3 flags to retain segments only in its volume.
+- Revert the gRPC service/config fields to restore the earlier HTTP collector.
+
+Execution checklist:
+- [x] Update PRD and record approved architecture.
+- [x] Add failing segmented-spool and gRPC contract tests.
+- [x] Implement bounded durable segmented spool and idempotent acceptance.
+- [x] Implement bridge gRPC sender, acknowledgements, retry, and shutdown.
+- [x] Implement collector S3 uploader and CLI/Compose configuration.
+- [x] Add opt-in real-S3 E2E without bucket lifecycle permissions.
+- [x] Update examples and operator documentation.
+- [x] Regenerate protobufs and run formatting, lint, unit, race, coverage, and E2E checks.
+- [x] Record evidence and lessons.
+
+Evidence:
+- Spool, gRPC collector, forwarder-retry, complete-outage retention, and S3
+  failure-retention tests failed before their implementations and now pass
+  under the race detector.
+- `make build` passed with regenerated protobuf and gRPC stubs.
+- `make test` passed the full race-enabled Go suite.
+- `make lint` passed with zero issues.
+- `make test-cover-maintained` passed at 80.8% (75% required), with
+  `internal/telemetry` at 81.0%.
+- `make test-e2e-live-telemetry` passed across the real bridge, gRPC collector,
+  and client containers, verifying correlated question/answer data from the
+  collector's segmented volume.
+- Both Compose files passed `docker compose config`; the standalone collector
+  image built, started as non-root with a read-only root filesystem, and its
+  gRPC health check returned `SERVING`.
+- `make up-collector`, `make down-collector`, `make ps-collector`, and
+  `make logs-collector` provide consistent operator entrypoints; the down target
+  preserves the named volume.
+- Each operator Compose stack has a matching reset target that asks for explicit
+  confirmation before running `down -v` and deleting its volumes.
+- `TestTelemetryGRPCToS3` compiles and skips unless
+  `BRIDGECTL_TELEMETRY_S3_BUCKET` names an operator-created bucket. The live AWS
+  proof remains for the operator to run once that bucket exists.
+
+Observed failure and correction:
+- The first Docker rerun correctly failed because the bridge outbox targeted a
+  root-owned repository volume. The outbox now uses a dedicated bridge-state
+  volume whose mount point the entrypoint assigns to the non-root bridge user.
+- A subsequent build exhausted the host filesystem. With explicit approval,
+  4.675 GB of unused Docker build cache was removed; no images, containers,
+  volumes, or source files were deleted.
+
+## Full bidirectional interaction capture (2026-09-14)
+
+Mode: Approval-Required security-sensitive data expansion, explicitly approved
+by the user. Governing requirement: PRD §17.2 (`TEL-114`).
+
+Scope and decisions:
+- [x] Define an opt-in full-interaction contract without changing safe defaults.
+- [x] Add failing tests for `provider_output`, `user_input`, thinking streams,
+  sequencing, redaction, invalid UTF-8 omission, and the `all` selector.
+- [x] Capture every authorized input and provider output chunk before semantic
+  framing while retaining derived question/answer events.
+- [x] Extend collector validation, CLI filters, configuration, documentation,
+  example configuration, and Docker E2E coverage.
+- [x] Run focused race tests, full tests, coverage, lint, build, Compose
+  validation, and the live telemetry Docker E2E.
+- [x] Record evidence, failure paths, rollback, and reusable lessons.
+
+Risks and constraints:
+- Full transcripts can contain credentials, personal data, proprietary code,
+  and model reasoning. Capture remains disabled unless stream kinds are
+  explicitly selected; redaction must happen before all persistence/network
+  boundaries, and invalid opaque bytes must never bypass inspection.
+- PTY and structured-provider reads are chunks rather than logical turns.
+  Preserve their source ordering and stream identity while continuing to emit
+  framed semantic question/answer events for analysis.
+- Telemetry remains off the provider I/O path and bounded. Full capture may
+  increase queue drops and spool eviction, which must remain observable without
+  delaying sessions.
+
+Rollback:
+- Remove `provider_output` and `user_input` (or `all`) from `telemetry.kinds` to
+  return immediately to derived telemetry without changing stored segment
+  format or collector deployment. Existing full-stream segments remain subject
+  to the configured volume/S3 retention policy.
+
+Evidence:
+- The initial focused tests failed because the stream kinds, typed provider
+  streams, sequencing fields, and `all` expansion did not exist. Malformed
+  collector events were then proven to fail only after correcting their outer
+  segment IDs so the intended validation path was actually reached.
+- Focused race tests pass for full bidirectional capture, normal/thinking stream
+  identity, authorized input, monotonic sequences, secret/ANSI removal, invalid
+  UTF-8 omission, collector validation, and configuration/CLI parsing.
+- `make test-e2e-live-telemetry` passed through the real bridge, durable gRPC
+  outbox, collector, and collector-owned volume. It persisted an ordered eight
+  event session containing lifecycle, provider output, question, user input,
+  answer, and subsequent provider output records.
+- `make test` passed the full race-enabled repository suite; `make lint`
+  reported zero issues; `make build` passed; and maintained coverage was 80.9%
+  overall with `internal/telemetry` at 81.5% (75% required).
+- The first Docker build was stopped when the host reached 100% usage. Removing
+  only 3.424 GB of unused build cache restored enough space; no images,
+  containers, named volumes, or telemetry data were deleted. The subsequent
+  E2E passed and removed only its isolated test volumes.
+- The operator config at `~/.config/bridgectl/bridge.yaml` now selects `all`
+  with redacted text enabled and remains mode `0600`; a collector rebuild and
+  server restart are required before the running processes use the new schema.
+
+---

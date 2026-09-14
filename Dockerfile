@@ -29,6 +29,7 @@ FROM ${BUILD_FROM} AS build
 # When true, copy the e2e helper into a staging directory.
 FROM busybox AS e2e-scripts-true
 COPY e2e/scripts/opencode_repl.js /scripts/opencode_repl.js
+COPY e2e/scripts/telemetry_fixture.sh /scripts/telemetry_fixture.sh
 
 # When false, create the same path as an empty directory so the COPY is a no-op.
 FROM busybox AS e2e-scripts-false
