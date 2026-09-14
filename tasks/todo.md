@@ -231,6 +231,54 @@ Evidence:
   2.321 GB of unused Docker build cache was removed; no images, containers,
   named volumes, or telemetry data were removed. The retry passed.
 
+# Composite telemetry session identity (2026-09-14)
+
+Mode: Approval-Required telemetry schema and identity change, explicitly
+authorized by the user. Governing requirement: PRD §17.2 (`TEL-115`).
+
+Scope and acceptance criteria:
+- [x] Add `source_id` to telemetry sessions/events and use
+  `(source_id, session_id)` for correlation, framing, sequencing, and reports.
+- [x] Support an explicit `telemetry.source_id`; otherwise generate a UUID once
+  and persist it securely under the bridge telemetry state directory.
+- [x] Keep existing events without `source_id` readable under a legacy empty
+  source namespace so upgrades do not strand retained JSONL.
+- [x] Validate source identifiers at configuration/runtime and collector
+  boundaries without exposing source identity through segment filenames.
+- [x] Extend unit and live Docker E2E coverage, documentation, and examples.
+- [x] Commit and push the change to PR #239, then rerun CI and Copilot review.
+
+Risks and rollback:
+- Source identity becomes part of aggregation semantics, but the JSON schema
+  remains version 1 because the new field is additive and omitted for legacy
+  data.
+- A deliberately duplicated explicit source ID can still conflate sessions;
+  generated IDs avoid accidental duplication and explicit IDs are operator
+  responsibility.
+- Roll back by reverting the additive field/keying change; retained events
+  remain valid JSONL and older readers ignore `source_id`.
+
+Evidence:
+- The analyzer and report tests initially failed because `source_id`, composite
+  state keys, and source resolution did not exist; the focused race suite now
+  passes for telemetry, config, local-server integration, and telemetry E2E.
+- Generated identities persist as mode `0600`, concurrent first starts converge
+  on one UUID, and pre-existing symlinks/non-regular identity files are rejected
+  without chmodding their targets.
+- `make test`, `make lint`, and `make build` pass; maintained coverage is 81.0%
+  overall and 81.2% for `internal/telemetry`, above the required 75%.
+- Both collector and live-E2E Compose files render, and the collector Dockerfile
+  check reports no warnings.
+- `make test-e2e-live-telemetry` passes through the real bridge, durable gRPC
+  outbox, collector, and collector-owned volume. It selects and validates the
+  complete ordered interaction using `(e2e-bridge, session_id)`.
+- Copilot's first review identified seven broader telemetry risks. Compound
+  environment secret redaction, reader/end ordering, bounded acknowledgement
+  waits, immediate post-seal delivery, streaming report/export aggregation, and
+  transport-correct container health checks are now fixed and covered. The
+  reported bearer fixture already used an actual bearer credential and its
+  absence assertion remains green.
+
 
 # CLI Security Follow-ups (from PR #92 Copilot review)
 

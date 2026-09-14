@@ -25,7 +25,7 @@ func TestQuestionTelemetryPipeline(t *testing.T) {
 	}
 
 	analyzer := telemetry.NewAnalyzer(telemetry.NewJSONLSink(eventsPath), nil)
-	session := telemetry.Session{SessionID: "session-1", ProjectID: "project-1", Provider: "codex"}
+	session := telemetry.Session{SourceID: "bridge-e2e", SessionID: "session-1", ProjectID: "project-1", Provider: "codex"}
 	analyzer.ObserveOutput(session, []byte("\x1b[33mAuthorization: Bearer top-secret-1\x1b[0m\nDo you want me to run /tmp/build-42?"))
 	analyzer.ObserveInput(session, []byte("yes\n"))
 	analyzer.ObserveOutput(session, []byte("Authorization: Bearer top-secret-2\nDo you want me to run /var/build-99?"))
@@ -55,6 +55,11 @@ func TestQuestionTelemetryPipeline(t *testing.T) {
 	}
 	if len(events) != 4 {
 		t.Fatalf("events=%d, want 4", len(events))
+	}
+	for _, event := range events {
+		if event.SourceID != "bridge-e2e" {
+			t.Fatalf("event source_id=%q, want bridge-e2e", event.SourceID)
+		}
 	}
 	if events[0].Kind != telemetry.EventQuestion || events[0].Class != telemetry.ClassPermission {
 		t.Fatalf("first event=%+v, want permission question", events[0])

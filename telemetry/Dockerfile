@@ -21,8 +21,5 @@ USER collector
 VOLUME ["/data"]
 EXPOSE 9464
 
-HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
-  CMD /usr/local/bin/bridgectl telemetry health --target 127.0.0.1:9464 --insecure || exit 1
-
 ENTRYPOINT ["/usr/local/bin/bridgectl", "telemetry", "collect"]
 CMD ["--listen", "0.0.0.0:9464", "--spool-dir", "/data/segments", "--max-segment-bytes", "10485760", "--max-disk-space", "1GB"]

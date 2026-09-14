@@ -681,6 +681,13 @@ func Start(cfg Config) (*Server, error) {
 	}
 	if telemetryCfg.Enabled {
 		spoolDir := TelemetrySpoolDir(telemetryCfg.SpoolDir, stateDir)
+		sourceID, err := telemetry.ResolveSourceID(telemetryCfg.SourceID, filepath.Join(stateDir, "telemetry", "source-id"))
+		if err != nil {
+			if store != nil {
+				_ = store.Close()
+			}
+			return nil, fmt.Errorf("configure telemetry source identity: %w", err)
+		}
 		maxDiskBytes, err := config.ParseByteSize(telemetryCfg.MaxDiskSpace)
 		if err != nil {
 			if store != nil {
@@ -753,15 +760,16 @@ func Start(cfg Config) (*Server, error) {
 		for _, kind := range telemetryCfg.Kinds {
 			kinds = append(kinds, telemetry.EventKind(kind))
 		}
-		collector := telemetry.NewLiveCollector(
+		collector := telemetry.NewLiveCollectorForSource(
 			eventSink,
 			telemetryCfg.QueueSize,
 			telemetryCfg.IncludeRedactedText,
+			sourceID,
 			func(err error) { logger.Warn("telemetry persistence", "error", err) },
 			kinds...,
 		)
 		supOpts = append(supOpts, bridge.WithTelemetry(collector))
-		logger.Info("telemetry enabled", "destination", destination, "kinds", telemetryCfg.Kinds, "rolling_window", telemetryCfg.RollingWindow)
+		logger.Info("telemetry enabled", "source_id", sourceID, "destination", destination, "kinds", telemetryCfg.Kinds, "rolling_window", telemetryCfg.RollingWindow)
 	}
 
 	sup := bridge.NewSupervisor(registry, policy, cfg.EventBufferSize, cfg.IdleTimeout, supOpts...)

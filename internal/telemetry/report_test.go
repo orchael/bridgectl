@@ -35,6 +35,43 @@ func TestBuildReportRollingWindow(t *testing.T) {
 	}
 }
 
+func TestBuildReportCountsCompositeSessionIdentities(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	events := []Event{
+		{Timestamp: now.Add(-time.Hour), SourceID: "bridge-a", SessionID: "shared", Kind: EventSessionStarted},
+		{Timestamp: now.Add(-time.Hour), SourceID: "bridge-b", SessionID: "shared", Kind: EventSessionStarted},
+		{Timestamp: now.Add(-time.Minute), SourceID: "bridge-a", SessionID: "shared", Kind: EventSessionEnded},
+		{Timestamp: now.Add(-time.Minute), SourceID: "bridge-b", SessionID: "shared", Kind: EventSessionEnded},
+	}
+	report := BuildReport(events, ReportOptions{Since: now.Add(-2 * time.Hour), Until: now})
+	if report.Sessions != 2 {
+		t.Fatalf("Sessions=%d, want two composite identities", report.Sessions)
+	}
+}
+
+func TestBuildReportFromPathStreamsCompositeSessions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	sink := NewJSONLSink(path)
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	for _, event := range []Event{
+		{Timestamp: now.Add(-time.Hour), SourceID: "bridge-a", SessionID: "shared", Kind: EventSessionStarted},
+		{Timestamp: now.Add(-time.Hour), SourceID: "bridge-b", SessionID: "shared", Kind: EventSessionStarted},
+		{Timestamp: now.Add(-time.Minute), SourceID: "bridge-a", SessionID: "shared", Kind: EventSessionEnded},
+		{Timestamp: now.Add(-time.Minute), SourceID: "bridge-b", SessionID: "shared", Kind: EventSessionEnded},
+	} {
+		if err := sink.Record(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report, err := BuildReportFromPath(path, ReportOptions{Since: now.Add(-2 * time.Hour), Until: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Sessions != 2 {
+		t.Fatalf("Sessions=%d, want two composite identities", report.Sessions)
+	}
+}
+
 func TestReadEventsFromSegmentDirectory(t *testing.T) {
 	dir := t.TempDir()
 	first := eventJSONL(t, Event{Timestamp: time.Now(), SessionID: "s1", Kind: EventQuestion})

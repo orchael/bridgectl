@@ -12,9 +12,14 @@ type LiveCollector struct {
 	async    *AsyncSink
 	framer   *Framer
 	onError  func(error)
+	sourceID string
 }
 
 func NewLiveCollector(sink Sink, queueSize int, includeRedactedText bool, onError func(error), kinds ...EventKind) *LiveCollector {
+	return NewLiveCollectorForSource(sink, queueSize, includeRedactedText, "", onError, kinds...)
+}
+
+func NewLiveCollectorForSource(sink Sink, queueSize int, includeRedactedText bool, sourceID string, onError func(error), kinds ...EventKind) *LiveCollector {
 	async := NewAsyncSink(sink, queueSize, onError)
 	filtered := NewFilteredSink(async, kinds...)
 	return &LiveCollector{
@@ -22,11 +27,22 @@ func NewLiveCollector(sink Sink, queueSize int, includeRedactedText bool, onErro
 		async:    async,
 		framer:   NewFramer(defaultFrameBufferSize),
 		onError:  onError,
+		sourceID: sourceID,
 	}
 }
 
+func (c *LiveCollector) sourceSession(session Session) Session {
+	if c.sourceID != "" {
+		session.SourceID = c.sourceID
+	}
+	return session
+}
+
+func frameKey(session Session) string { return session.SourceID + "\x00" + session.SessionID }
+
 func (c *LiveCollector) SessionStarted(session Session) {
-	c.framer.Reset(session.SessionID)
+	session = c.sourceSession(session)
+	c.framer.Reset(frameKey(session))
 	c.analyzer.ObserveSessionStart(session)
 }
 
@@ -35,30 +51,33 @@ func (c *LiveCollector) ObserveOutputChunk(session Session, data []byte) {
 }
 
 func (c *LiveCollector) ObserveProviderChunk(session Session, stream StreamType, data []byte) {
+	session = c.sourceSession(session)
 	c.analyzer.ObserveProviderInteraction(session, stream, data)
 	if stream != StreamOutput || !utf8.Valid(data) {
 		return
 	}
-	for _, frame := range c.framer.FeedOutput(session.SessionID, data) {
+	for _, frame := range c.framer.FeedOutput(frameKey(session), data) {
 		c.analyzer.ObserveOutput(session, []byte(frame))
 	}
 }
 
 func (c *LiveCollector) ObserveInputChunk(session Session, data []byte) {
+	session = c.sourceSession(session)
 	c.analyzer.ObserveUserInteraction(session, data)
 	if !utf8.Valid(data) {
 		return
 	}
-	for _, frame := range c.framer.FeedInput(session.SessionID, data) {
+	for _, frame := range c.framer.FeedInput(frameKey(session), data) {
 		c.analyzer.ObserveInput(session, []byte(frame))
 	}
 }
 
 func (c *LiveCollector) SessionEnded(session Session) {
-	if frame := c.framer.FlushOutput(session.SessionID); frame != "" {
+	session = c.sourceSession(session)
+	if frame := c.framer.FlushOutput(frameKey(session)); frame != "" {
 		c.analyzer.ObserveOutput(session, []byte(frame))
 	}
-	if frame := c.framer.FlushInput(session.SessionID); frame != "" {
+	if frame := c.framer.FlushInput(frameKey(session)); frame != "" {
 		c.analyzer.ObserveInput(session, []byte(frame))
 	}
 	c.analyzer.ObserveSessionEnd(session)

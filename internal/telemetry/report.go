@@ -36,19 +36,9 @@ type Report struct {
 }
 
 func ReadEvents(path string) ([]Event, error) {
-	paths, err := retainedEventPaths(path)
-	if err != nil {
-		return nil, err
-	}
 	var events []Event
-	for _, eventPath := range paths {
-		fileEvents, err := readEventFile(eventPath)
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, fileEvents...)
-	}
-	return events, nil
+	err := visitEvents(path, func(event Event) { events = append(events, event) })
+	return events, err
 }
 
 func retainedEventPaths(path string) ([]string, error) {
@@ -122,28 +112,56 @@ func retainedEventPaths(path string) ([]string, error) {
 	return paths, nil
 }
 
-func readEventFile(path string) ([]Event, error) {
+func visitEvents(path string, visit func(Event)) error {
+	paths, err := retainedEventPaths(path)
+	if err != nil {
+		return err
+	}
+	for _, eventPath := range paths {
+		if err := visitEventFile(eventPath, visit); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func visitEventFile(path string, visit func(Event)) error {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { _ = f.Close() }()
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64*1024), 4<<20)
-	var events []Event
 	line := 0
 	for scanner.Scan() {
 		line++
 		var event Event
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
-			return nil, fmt.Errorf("decode telemetry event %s line %d: %w", path, line, err)
+			return fmt.Errorf("decode telemetry event %s line %d: %w", path, line, err)
 		}
-		events = append(events, event)
+		visit(event)
 	}
-	return events, scanner.Err()
+	return scanner.Err()
 }
 
 func BuildReport(events []Event, opts ReportOptions) Report {
+	report, _ := buildReport(opts, func(visit func(Event)) error {
+		for _, event := range events {
+			visit(event)
+		}
+		return nil
+	})
+	return report
+}
+
+// BuildReportFromPath streams retained JSONL into the report accumulator so
+// transcript-only events do not need to be materialized in memory.
+func BuildReportFromPath(path string, opts ReportOptions) (Report, error) {
+	return buildReport(opts, func(visit func(Event)) error { return visitEvents(path, visit) })
+}
+
+func buildReport(opts ReportOptions, consume func(func(Event)) error) (Report, error) {
 	until := opts.Until.UTC()
 	if until.IsZero() {
 		until = time.Now().UTC()
@@ -154,14 +172,15 @@ func BuildReport(events []Event, opts ReportOptions) Report {
 	}
 	report := Report{Since: since, Until: until}
 	type interval struct{ start, end time.Time }
-	intervals := make(map[string]interval)
-	sessions := make(map[string]struct{})
+	intervals := make(map[sessionIdentity]interval)
+	sessions := make(map[sessionIdentity]struct{})
 	stats := make(map[string]*QuestionStat)
 	var latencies []int64
 	answers := 0
 
-	for _, event := range events {
-		iv := intervals[event.SessionID]
+	if err := consume(func(event Event) {
+		key := eventKey(event)
+		iv := intervals[key]
 		switch event.Kind {
 		case EventSessionStarted:
 			if iv.start.IsZero() || event.Timestamp.Before(iv.start) {
@@ -172,13 +191,13 @@ func BuildReport(events []Event, opts ReportOptions) Report {
 				iv.end = event.Timestamp
 			}
 		}
-		intervals[event.SessionID] = iv
+		intervals[key] = iv
 		if event.Timestamp.Before(since) || event.Timestamp.After(until) {
-			continue
+			return
 		}
 		switch event.Kind {
 		case EventQuestion:
-			sessions[event.SessionID] = struct{}{}
+			sessions[key] = struct{}{}
 			report.Questions++
 			stat := stats[event.Fingerprint]
 			if stat == nil {
@@ -207,9 +226,11 @@ func BuildReport(events []Event, opts ReportOptions) Report {
 				stat.Unknown++
 			}
 		}
+	}); err != nil {
+		return Report{}, err
 	}
 
-	for sessionID, iv := range intervals {
+	for key, iv := range intervals {
 		if iv.start.IsZero() {
 			continue
 		}
@@ -222,7 +243,7 @@ func BuildReport(events []Event, opts ReportOptions) Report {
 			start = since
 		}
 		if end.After(start) {
-			sessions[sessionID] = struct{}{}
+			sessions[key] = struct{}{}
 			report.AgentHours += end.Sub(start).Hours()
 		}
 	}
@@ -268,7 +289,7 @@ func BuildReport(events []Event, opts ReportOptions) Report {
 	if opts.Top > 0 && len(report.TopQuestions) > opts.Top {
 		report.TopQuestions = report.TopQuestions[:opts.Top]
 	}
-	return report
+	return report, nil
 }
 
 func BuildFeedback(events []Event, since, until time.Time) Feedback {
@@ -277,4 +298,16 @@ func BuildFeedback(events []Event, since, until time.Time) Feedback {
 	}
 	report := BuildReport(events, ReportOptions{Since: since, Until: until})
 	return Feedback{SchemaVersion: 1, GeneratedAt: until.UTC(), Questions: report.TopQuestions}
+}
+
+// BuildFeedbackFromPath streams retained JSONL into a provider-neutral export.
+func BuildFeedbackFromPath(path string, since, until time.Time) (Feedback, error) {
+	if until.IsZero() {
+		until = time.Now().UTC()
+	}
+	report, err := BuildReportFromPath(path, ReportOptions{Since: since, Until: until})
+	if err != nil {
+		return Feedback{}, err
+	}
+	return Feedback{SchemaVersion: 1, GeneratedAt: until.UTC(), Questions: report.TopQuestions}, nil
 }

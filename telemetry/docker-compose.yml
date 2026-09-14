@@ -34,6 +34,11 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/bridgectl", "telemetry", "health", "--target", "127.0.0.1:9464", "--insecure"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
 volumes:
   telemetry-data:

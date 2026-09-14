@@ -52,6 +52,7 @@ func TestLoadTelemetry(t *testing.T) {
 	path := writeTestConfig(t, `
 telemetry:
   enabled: true
+  source_id: bridge-east-1
   spool_dir: /tmp/telemetry-spool
   collector_target: telemetry-collector:9464
   collector_insecure: true
@@ -68,7 +69,7 @@ telemetry:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Telemetry.Enabled || cfg.Telemetry.SpoolDir != "/tmp/telemetry-spool" || cfg.Telemetry.CollectorTarget != "telemetry-collector:9464" || !cfg.Telemetry.CollectorInsecure || cfg.Telemetry.QueueSize != 64 || cfg.Telemetry.RollingWindow != "24h" || cfg.Telemetry.FlushInterval != "250ms" || cfg.Telemetry.RetryInterval != "500ms" || cfg.Telemetry.MaxSegmentBytes != 4096 || cfg.Telemetry.MaxDiskSpace != "16KiB" || cfg.Telemetry.IncludeRedactedText {
+	if !cfg.Telemetry.Enabled || cfg.Telemetry.SourceID != "bridge-east-1" || cfg.Telemetry.SpoolDir != "/tmp/telemetry-spool" || cfg.Telemetry.CollectorTarget != "telemetry-collector:9464" || !cfg.Telemetry.CollectorInsecure || cfg.Telemetry.QueueSize != 64 || cfg.Telemetry.RollingWindow != "24h" || cfg.Telemetry.FlushInterval != "250ms" || cfg.Telemetry.RetryInterval != "500ms" || cfg.Telemetry.MaxSegmentBytes != 4096 || cfg.Telemetry.MaxDiskSpace != "16KiB" || cfg.Telemetry.IncludeRedactedText {
 		t.Fatalf("Telemetry=%+v", cfg.Telemetry)
 	}
 	if len(cfg.Telemetry.Kinds) != 2 || cfg.Telemetry.Kinds[0] != "question" || cfg.Telemetry.Kinds[1] != "answer" {
@@ -108,6 +109,7 @@ func TestLoadRejectsInvalidTelemetryBounds(t *testing.T) {
 		{name: "zero disk budget", config: "telemetry:\n  max_disk_space: 0B\n", wantErr: "telemetry.max_disk_space"},
 		{name: "disk budget smaller than segment", config: "telemetry:\n  max_segment_bytes: 1024\n  max_disk_space: 512B\n", wantErr: "telemetry.max_disk_space"},
 		{name: "removed segment count", config: "telemetry:\n  max_segments: 5\n", wantErr: "telemetry.max_segments has been removed"},
+		{name: "invalid source ID", config: "telemetry:\n  source_id: bridge east\n", wantErr: "telemetry.source_id"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -500,7 +500,7 @@ func waitForTelemetryEvents(path, sessionID string, timeout time.Duration) ([]te
 		var previousSequence uint64
 		ordered := true
 		for _, event := range events {
-			if event.SessionID == sessionID {
+			if event.SourceID == "e2e-bridge" && event.SessionID == sessionID {
 				seen[event.Kind] = event
 				sessionEvents = append(sessionEvents, event)
 				if previousSequence > 0 && event.Sequence <= previousSequence {

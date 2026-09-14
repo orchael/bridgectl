@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dustin/go-humanize"
+	"github.com/orchael/bridgectl/internal/telemetry"
 	"gopkg.in/yaml.v3"
 )
 
@@ -122,6 +123,7 @@ type RepoSetupConfig struct {
 
 type TelemetryConfig struct {
 	Enabled               bool     `yaml:"enabled"`
+	SourceID              string   `yaml:"source_id"`
 	SpoolDir              string   `yaml:"spool_dir"`
 	CollectorTarget       string   `yaml:"collector_target"`
 	CollectorInsecure     bool     `yaml:"collector_insecure"`
@@ -601,6 +603,9 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Telemetry.DeprecatedMaxSegments != nil {
 		return fmt.Errorf("config: telemetry.max_segments has been removed; use max_disk_space")
+	}
+	if cfg.Telemetry.SourceID != "" && !telemetry.ValidSourceID(cfg.Telemetry.SourceID) {
+		return fmt.Errorf("config: telemetry.source_id must start with an alphanumeric character and contain only alphanumerics, '.', '_', or '-'")
 	}
 	maxDiskBytes, err := ParseByteSize(cfg.Telemetry.MaxDiskSpace)
 	if err != nil {

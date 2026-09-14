@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os/exec"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ type telemetrySpy struct {
 	mu      sync.Mutex
 	outputs []telemetryOutput
 	inputs  [][]byte
+	ended   chan struct{}
 }
 
 type telemetryOutput struct {
@@ -23,12 +25,45 @@ type telemetryOutput struct {
 }
 
 func (*telemetrySpy) SessionStarted(telemetry.Session) {}
-func (*telemetrySpy) SessionEnded(telemetry.Session)   {}
-func (*telemetrySpy) Close(context.Context) error      { return nil }
+func (s *telemetrySpy) SessionEnded(telemetry.Session) {
+	if s.ended != nil {
+		close(s.ended)
+	}
+}
+func (*telemetrySpy) Close(context.Context) error { return nil }
 func (s *telemetrySpy) ObserveProviderChunk(_ telemetry.Session, stream telemetry.StreamType, data []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.outputs = append(s.outputs, telemetryOutput{stream: stream, data: bytes.Clone(data)})
+}
+
+func TestSupervisorEndsTelemetryAfterReaderDrains(t *testing.T) {
+	spy := &telemetrySpy{ended: make(chan struct{})}
+	sup := NewSupervisor(NewRegistry(), DefaultPolicy(), 1024, time.Minute, WithTelemetry(spy))
+	defer sup.Close()
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ms := &managedSession{
+		info:       SessionInfo{SessionID: "reader-order", Provider: "test", State: SessionStateRunning},
+		cmd:        cmd,
+		buf:        NewByteBuffer(1024),
+		cancel:     func() {},
+		readerDone: make(chan struct{}),
+	}
+	go sup.waitLoop(ms)
+	select {
+	case <-spy.ended:
+		t.Fatal("telemetry ended before the output reader drained")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(ms.readerDone)
+	select {
+	case <-spy.ended:
+	case <-time.After(time.Second):
+		t.Fatal("telemetry did not end after the output reader drained")
+	}
 }
 func (s *telemetrySpy) ObserveInputChunk(_ telemetry.Session, data []byte) {
 	s.mu.Lock()

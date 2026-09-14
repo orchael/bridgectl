@@ -1,5 +1,46 @@
 # Lessons
 
+## 2026-09-14 Secret Tests Must Not Embed Provider-Shaped Literals
+- Incident/bug: GitHub push protection rejected a telemetry test commit because
+  a synthetic AWS access-key fixture matched the real credential shape.
+- Root cause pattern: A redaction test needs the runtime value to match, but a
+  source-code literal is also scanned as though it could be a live secret.
+- Preventative rule: Assemble provider-shaped redaction fixtures from benign
+  source fragments at test runtime, and never bypass push protection for a test
+  value.
+- Validation added: The same AWS redaction branch remains covered while no
+  AWS-shaped access-key literal exists in the committed source.
+
+## 2026-09-14 Telemetry Reliability Requires Coupled Completion Boundaries
+- Incident/bug: Process exit could precede the output reader's final chunk,
+  flushing and delivery used independent timers, and a connected collector
+  could withhold acknowledgements indefinitely.
+- Root cause pattern: Related lifecycle signals were treated as independent
+  events even though ordering between them defines completeness and latency.
+- Preventative rule: End sessions only after readers drain, trigger delivery as
+  part of successful sealing, and put a deadline around every remote delivery
+  batch. Stream reports directly from retained JSONL so the disk budget does not
+  become an equivalent heap-memory requirement.
+- Validation added: Race tests cover reader/end ordering, post-flush delivery,
+  missing acknowledgements, and streamed composite reports; the real Docker E2E
+  verifies final provider output precedes the session-ended event.
+
+## 2026-09-14 Distributed Session IDs Need a Producer Namespace
+- Incident/bug: Telemetry correlation, sequence state, and reports keyed only by
+  `session_id`, so independent bridges producing the same ID could combine
+  unrelated conversations.
+- Root cause pattern: An identifier unique inside one process is not globally
+  unique after streams from multiple producers share a collector and storage
+  boundary.
+- Preventative rule: Give each producer a stable identity and key all in-memory
+  and analytical session state by `(source_id, session_id)`. Persist generated
+  identities atomically with private permissions, reject symlink identity files,
+  and retain an explicit legacy namespace for old records.
+- Validation added: Race tests cover cross-source correlation and sequences,
+  report counts, persistent and concurrent UUID creation, invalid IDs, and
+  symlink rejection; the live Docker E2E filters collector-volume events by the
+  full composite identity.
+
 ## 2026-09-14 Full-Stream Telemetry Needs Valid Outer Test Fixtures
 - Incident/bug: The first malformed-interaction collector test passed even
   though interaction metadata validation was absent because the test used

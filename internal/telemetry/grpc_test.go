@@ -106,6 +106,7 @@ func TestGRPCCollectorRejectsMalformedFullInteractionEvents(t *testing.T) {
 		{name: "missing sequence", event: Event{SchemaVersion: 1, Kind: EventUserInput, Direction: DirectionHuman, Stream: StreamInput, ByteCount: 1}},
 		{name: "opaque content leaked", event: Event{SchemaVersion: 1, Sequence: 1, Kind: EventProviderOutput, Direction: DirectionAgent, Stream: StreamOutput, ByteCount: 2, Text: "unsafe", OmittedReason: OmittedInvalidUTF8, ContentHash: "hash"}},
 		{name: "unredacted content", event: Event{SchemaVersion: 1, Sequence: 1, Kind: EventProviderOutput, Direction: DirectionAgent, Stream: StreamOutput, ByteCount: 20, Text: "token=collector-secret"}},
+		{name: "invalid source ID", event: Event{SchemaVersion: 1, SourceID: "bridge east", Sequence: 1, Kind: EventProviderOutput, Direction: DirectionAgent, Stream: StreamOutput, ByteCount: 1}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -206,10 +207,85 @@ func TestGRPCForwardingSinkRetainsDataWhileCollectorUnavailable(t *testing.T) {
 	}
 }
 
+func TestGRPCForwardingSinkDeliversImmediatelyAfterFlush(t *testing.T) {
+	bridgeSpool, err := NewSegmentSpool(t.TempDir(), 1<<20, 10<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	collectorSpool, err := NewSegmentSpool(t.TempDir(), 1<<20, 10<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, cleanup := startCollectorTestServer(t, NewGRPCCollectorServer(collectorSpool, 1<<20))
+	defer cleanup()
+	forwarder := NewGRPCForwardingSink(bridgeSpool, client, nil, 100*time.Millisecond, 10*time.Millisecond, nil)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := forwarder.Close(ctx); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	// Let the initial empty delivery run halfway to the first flush. Previously,
+	// the delivery timer then raced ahead of the flush and delayed this record by
+	// almost a second interval.
+	time.Sleep(50 * time.Millisecond)
+	if err := forwarder.Record(Event{Timestamp: time.Now(), SessionID: "flush", Kind: EventQuestion}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 80*time.Millisecond, func() bool {
+		segments, err := collectorSpool.Pending()
+		return err == nil && len(segments) == 1
+	})
+}
+
+func TestGRPCForwardingSinkTimesOutMissingAcknowledgement(t *testing.T) {
+	spool, err := NewSegmentSpool(t.TempDir(), 1<<20, 10<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, cleanup := startCollectorTestServer(t, &neverAckCollector{})
+	defer cleanup()
+	errorCh := make(chan error, 1)
+	forwarder := NewGRPCForwardingSink(spool, client, nil, 5*time.Millisecond, 5*time.Millisecond, func(err error) {
+		select {
+		case errorCh <- err:
+		default:
+		}
+	})
+	forwarder.deliveryTimeout = 25 * time.Millisecond
+	if err := forwarder.Record(Event{Timestamp: time.Now(), SessionID: "hung", Kind: EventQuestion}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-errorCh:
+	case <-time.After(time.Second):
+		t.Fatal("missing acknowledgement did not time out")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := forwarder.Close(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close error=%v, want deadline with no acknowledgement", err)
+	}
+}
+
 type failFirstCollector struct {
 	bridgev1.UnimplementedTelemetryCollectorServiceServer
 	delegate *GRPCCollectorServer
 	calls    atomic.Int64
+}
+
+type neverAckCollector struct {
+	bridgev1.UnimplementedTelemetryCollectorServiceServer
+}
+
+func (*neverAckCollector) StreamSegments(stream grpc.BidiStreamingServer[bridgev1.TelemetrySegment, bridgev1.TelemetryAck]) error {
+	if _, err := stream.Recv(); err != nil {
+		return err
+	}
+	<-stream.Context().Done()
+	return stream.Context().Err()
 }
 
 func (s *failFirstCollector) StreamSegments(stream grpc.BidiStreamingServer[bridgev1.TelemetrySegment, bridgev1.TelemetryAck]) error {

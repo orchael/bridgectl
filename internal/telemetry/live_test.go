@@ -96,7 +96,7 @@ func TestLiveCollectorFiltersEventKindsBeforeQueueing(t *testing.T) {
 // continuing to emit the derived question/answer events used by reports.
 func TestLiveCollectorCapturesFullBidirectionalInteraction(t *testing.T) {
 	sink := &memorySink{}
-	collector := NewLiveCollector(sink, 32, true, nil,
+	collector := NewLiveCollectorForSource(sink, 32, true, "bridge-live", nil,
 		EventProviderOutput, EventUserInput, EventQuestion, EventAnswer,
 	)
 	session := Session{SessionID: "full-capture", ProjectID: "project", Provider: "codex"}
@@ -118,6 +118,9 @@ func TestLiveCollectorCapturesFullBidirectionalInteraction(t *testing.T) {
 	var providerEvents, userEvents int
 	var sawThinking, sawQuestion, sawAnswer, sawInvalid bool
 	for index, event := range events {
+		if event.SourceID != "bridge-live" {
+			t.Fatalf("event[%d].SourceID=%q, want bridge-live", index, event.SourceID)
+		}
 		if event.SchemaVersion != 1 {
 			t.Fatalf("event[%d].SchemaVersion=%d, want 1", index, event.SchemaVersion)
 		}

@@ -44,6 +44,8 @@ rate_limits:
 # stream; the safe default below retains only lifecycle and derived analytics.
 telemetry:
   enabled: false
+  # Empty generates and persists a stable UUID in the bridge state directory.
+  source_id: ""
   spool_dir: ""
   collector_target: ""
   collector_insecure: false

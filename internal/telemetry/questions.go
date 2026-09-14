@@ -69,6 +69,7 @@ const (
 type Event struct {
 	SchemaVersion int           `json:"schema_version"`
 	Timestamp     time.Time     `json:"timestamp"`
+	SourceID      string        `json:"source_id,omitempty"`
 	SessionID     string        `json:"session_id"`
 	ProjectID     string        `json:"project_id,omitempty"`
 	Provider      string        `json:"provider,omitempty"`
@@ -90,6 +91,7 @@ type Event struct {
 // Session identifies an agent session without requiring telemetry to depend on
 // the bridge package.
 type Session struct {
+	SourceID  string
 	SessionID string
 	ProjectID string
 	Provider  string
@@ -109,12 +111,29 @@ type Analyzer struct {
 	mu                  sync.Mutex
 	sink                Sink
 	redact              Redactor
-	pending             map[string]pendingQuestion
+	pending             map[sessionIdentity]pendingQuestion
 	stats               map[string]*QuestionStat
 	now                 func() time.Time
 	includeRedactedText bool
 	sequenceMu          sync.Mutex
-	sequences           map[string]uint64
+	sequences           map[sessionIdentity]uint64
+}
+
+type sessionIdentity struct {
+	sourceID  string
+	sessionID string
+}
+
+func identity(sourceID, sessionID string) sessionIdentity {
+	return sessionIdentity{sourceID: sourceID, sessionID: sessionID}
+}
+
+func sessionKey(session Session) sessionIdentity {
+	return identity(session.SourceID, session.SessionID)
+}
+
+func eventKey(event Event) sessionIdentity {
+	return identity(event.SourceID, event.SessionID)
 }
 
 type AnalyzerOption func(*Analyzer)
@@ -151,7 +170,7 @@ type Feedback struct {
 
 var (
 	ansiRE            = regexp.MustCompile(`\x1b(?:\[[0-9;?=<>]*[a-zA-Z~]|[@-Z\\-_])`)
-	secretRE          = regexp.MustCompile(`(?i)\b(api[_-]?key|token|password|secret|authorization)\s*[:=]\s*(?:bearer\s+)?[^\s]+`)
+	secretRE          = regexp.MustCompile(`(?i)\b(?:[a-z0-9]+[_-])*(?:api[_-]?key|token|password|secret(?:[_-]access[_-]key)?|authorization)\s*[:=]\s*(?:bearer\s+)?[^\s]+`)
 	bearerRE          = regexp.MustCompile(`(?i)\bbearer\s+[^\s]+`)
 	credentialValueRE = regexp.MustCompile(`\b(?:sk-[A-Za-z0-9_-]{12,}|ghp_[A-Za-z0-9]{12,}|github_pat_[A-Za-z0-9_]{12,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,})\b`)
 	privateKeyRE      = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)
@@ -172,9 +191,9 @@ func NewAnalyzer(sink Sink, redactor Redactor, opts ...AnalyzerOption) *Analyzer
 	a := &Analyzer{
 		sink:                sink,
 		redact:              redactor,
-		pending:             make(map[string]pendingQuestion),
+		pending:             make(map[sessionIdentity]pendingQuestion),
 		stats:               make(map[string]*QuestionStat),
-		sequences:           make(map[string]uint64),
+		sequences:           make(map[sessionIdentity]uint64),
 		now:                 time.Now,
 		includeRedactedText: true,
 	}
@@ -186,16 +205,16 @@ func NewAnalyzer(sink Sink, redactor Redactor, opts ...AnalyzerOption) *Analyzer
 
 func (a *Analyzer) ObserveSessionStart(session Session) {
 	a.sequenceMu.Lock()
-	delete(a.sequences, session.SessionID)
+	delete(a.sequences, sessionKey(session))
 	a.sequenceMu.Unlock()
-	a.record(Event{Timestamp: a.now().UTC(), SessionID: session.SessionID, ProjectID: session.ProjectID, Provider: session.Provider, Kind: EventSessionStarted})
+	a.record(Event{Timestamp: a.now().UTC(), SourceID: session.SourceID, SessionID: session.SessionID, ProjectID: session.ProjectID, Provider: session.Provider, Kind: EventSessionStarted})
 }
 
 func (a *Analyzer) ObserveSessionEnd(session Session) {
 	a.mu.Lock()
-	delete(a.pending, session.SessionID)
+	delete(a.pending, sessionKey(session))
 	a.mu.Unlock()
-	a.record(Event{Timestamp: a.now().UTC(), SessionID: session.SessionID, ProjectID: session.ProjectID, Provider: session.Provider, Kind: EventSessionEnded})
+	a.record(Event{Timestamp: a.now().UTC(), SourceID: session.SourceID, SessionID: session.SessionID, ProjectID: session.ProjectID, Provider: session.Provider, Kind: EventSessionEnded})
 }
 
 // DefaultRedactor strips ANSI controls and common inline secret assignments.
@@ -224,7 +243,7 @@ func (a *Analyzer) observeInteraction(session Session, direction Direction, kind
 		return
 	}
 	event := Event{
-		Timestamp: a.now().UTC(), SessionID: session.SessionID, ProjectID: session.ProjectID,
+		Timestamp: a.now().UTC(), SourceID: session.SourceID, SessionID: session.SessionID, ProjectID: session.ProjectID,
 		Provider: session.Provider, Direction: direction, Kind: kind, Stream: stream, ByteCount: len(data),
 	}
 	if !utf8.Valid(data) {
@@ -255,11 +274,12 @@ func (a *Analyzer) ObserveOutput(session Session, data []byte) {
 	fingerprint := fingerprint(session.Provider, class, canonical)
 
 	a.mu.Lock()
-	if pending, ok := a.pending[session.SessionID]; ok && pending.fingerprint == fingerprint {
+	key := sessionKey(session)
+	if pending, ok := a.pending[key]; ok && pending.fingerprint == fingerprint {
 		a.mu.Unlock()
 		return
 	}
-	a.pending[session.SessionID] = pendingQuestion{
+	a.pending[key] = pendingQuestion{
 		askedAt: now, class: class, fingerprint: fingerprint,
 	}
 	stat := a.stats[fingerprint]
@@ -274,7 +294,7 @@ func (a *Analyzer) ObserveOutput(session Session, data []byte) {
 	a.mu.Unlock()
 
 	a.record(Event{
-		Timestamp: now, SessionID: session.SessionID, ProjectID: session.ProjectID,
+		Timestamp: now, SourceID: session.SourceID, SessionID: session.SessionID, ProjectID: session.ProjectID,
 		Provider: session.Provider, Direction: DirectionAgent, Kind: EventQuestion,
 		Class: class, Fingerprint: fingerprint, Text: a.eventText(redacted),
 	})
@@ -290,12 +310,13 @@ func (a *Analyzer) ObserveInput(session Session, data []byte) {
 	}
 
 	a.mu.Lock()
-	pending, ok := a.pending[session.SessionID]
+	key := sessionKey(session)
+	pending, ok := a.pending[key]
 	if !ok {
 		a.mu.Unlock()
 		return
 	}
-	delete(a.pending, session.SessionID)
+	delete(a.pending, key)
 	decision := classifyDecision(answer)
 	stat := a.stats[pending.fingerprint]
 	if stat != nil {
@@ -313,7 +334,7 @@ func (a *Analyzer) ObserveInput(session Session, data []byte) {
 	a.mu.Unlock()
 
 	a.record(Event{
-		Timestamp: now, SessionID: session.SessionID, ProjectID: session.ProjectID,
+		Timestamp: now, SourceID: session.SourceID, SessionID: session.SessionID, ProjectID: session.ProjectID,
 		Provider: session.Provider, Direction: DirectionHuman, Kind: EventAnswer,
 		Class: pending.class, Decision: decision, Fingerprint: pending.fingerprint,
 		Text: a.eventText(truncate(a.redact(answer), 2048)), LatencyMS: now.Sub(pending.askedAt).Milliseconds(),
@@ -353,13 +374,14 @@ func (a *Analyzer) record(event Event) {
 	a.sequenceMu.Lock()
 	defer a.sequenceMu.Unlock()
 	event.SchemaVersion = 1
-	a.sequences[event.SessionID]++
-	event.Sequence = a.sequences[event.SessionID]
+	key := eventKey(event)
+	a.sequences[key]++
+	event.Sequence = a.sequences[key]
 	if a.sink != nil {
 		_ = a.sink.Record(event)
 	}
 	if event.Kind == EventSessionEnded {
-		delete(a.sequences, event.SessionID)
+		delete(a.sequences, key)
 	}
 }
 

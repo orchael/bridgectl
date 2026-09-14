@@ -122,16 +122,15 @@ func newTelemetryReportCmd(configPath *string) *cobra.Command {
 			if top < 0 {
 				return fmt.Errorf("--top must not be negative")
 			}
-			events, err := telemetry.ReadEvents(eventsPath)
-			if err != nil {
-				return err
-			}
 			until := time.Now().UTC()
-			report := telemetry.BuildReport(events, telemetry.ReportOptions{
+			report, err := telemetry.BuildReportFromPath(eventsPath, telemetry.ReportOptions{
 				Since: until.Add(-since),
 				Until: until,
 				Top:   top,
 			})
+			if err != nil {
+				return err
+			}
 			return writeTelemetryReport(cmd.OutOrStdout(), report)
 		},
 	}
@@ -166,12 +165,11 @@ func newTelemetryExportCmd(configPath *string) *cobra.Command {
 			if since <= 0 {
 				return fmt.Errorf("--since must be positive")
 			}
-			events, err := telemetry.ReadEvents(eventsPath)
+			until := time.Now().UTC()
+			feedback, err := telemetry.BuildFeedbackFromPath(eventsPath, until.Add(-since), until)
 			if err != nil {
 				return err
 			}
-			until := time.Now().UTC()
-			feedback := telemetry.BuildFeedback(events, until.Add(-since), until)
 			encoder := json.NewEncoder(cmd.OutOrStdout())
 			encoder.SetIndent("", "  ")
 			if err := encoder.Encode(feedback); err != nil {

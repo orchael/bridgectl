@@ -996,3 +996,11 @@ answers.
   is represented only by metadata rather than forwarded as opaque content.
   Derived question/answer events remain available alongside the stream so
   analytics and corpus reconstruction do not compete for one representation.
+- **TEL-115 — Composite session identity:** Every newly captured event carries
+  a stable bridge `source_id` in addition to its existing `session_id`.
+  Correlation, framing, sequencing, and reporting key sessions by the composite
+  `(source_id, session_id)` identity so independent bridge instances cannot
+  conflate equal session IDs. An explicit `telemetry.source_id` is supported;
+  when omitted, bridgectl generates a UUID once and persists it with mode
+  `0600` under the bridge telemetry state directory. Existing schema-version-1
+  events without `source_id` remain readable as legacy-source events.

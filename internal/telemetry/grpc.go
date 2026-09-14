@@ -102,6 +102,9 @@ func (s *GRPCCollectorServer) validateJSONL(data []byte) error {
 }
 
 func validateCollectorEvent(event Event) error {
+	if event.SourceID != "" && !ValidSourceID(event.SourceID) {
+		return errors.New("invalid source ID")
+	}
 	if event.Text != "" && DefaultRedactor(event.Text) != event.Text {
 		return errors.New("event text contains unredacted sensitive content")
 	}

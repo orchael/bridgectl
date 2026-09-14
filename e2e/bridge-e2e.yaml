@@ -33,6 +33,7 @@ rate_limits:
 
 telemetry:
   enabled: true
+  source_id: "e2e-bridge"
   collector_target: "telemetry-collector:9464"
   collector_insecure: true
   spool_dir: "/home/bridge/.config/bridgectl/telemetry/outbox"

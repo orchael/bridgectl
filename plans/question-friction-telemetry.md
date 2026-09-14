@@ -37,6 +37,7 @@ Add a `telemetry` block to bridgectl configuration:
 ```yaml
 telemetry:
   enabled: true
+  source_id: ""
   spool_dir: ~/.config/bridgectl/telemetry/segments
   collector_target: ""
   collector_insecure: false

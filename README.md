@@ -117,6 +117,8 @@ inspect the rolling report or provider-neutral export:
 ```yaml
 telemetry:
   enabled: true
+  # Empty generates and persists a stable UUID in the bridge state directory.
+  source_id: ""
   # Empty retains segments locally; host:port enables gRPC delivery.
   collector_target: "127.0.0.1:9464"
   # Plaintext is only appropriate for loopback or a private Compose network.
@@ -153,6 +155,18 @@ such as `GiB` are accepted. Override the collector with
 `TELEMETRY_MAX_SEGMENT_BYTES` and `TELEMETRY_MAX_DISK_SPACE`; configure the
 bridge outbox independently with `max_segment_bytes` and `max_disk_space` in
 `bridge.yaml`.
+
+The supplied Compose service health check matches its plaintext private-network
+configuration. The collector image itself does not hard-code a transport mode;
+TLS deployments should configure a runtime health check with `telemetry health`
+and the appropriate `--ca` and `--server-name` options.
+
+Every new event includes a `source_id`, and telemetry session identity is the
+composite `(source_id, session_id)`. Set `source_id` explicitly when an
+orchestrator owns bridge identity, or leave it empty to generate a UUID once at
+the bridge state directory (by default
+`~/.config/bridgectl/telemetry/source-id`). The generated file is mode `0600`.
+Legacy events without `source_id` remain readable in an empty legacy namespace.
 
 Supported concrete kinds are `session_started`, `provider_output`,
 `user_input`, `question`, `answer`, and `session_ended`. To build a complete

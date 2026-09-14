@@ -125,6 +125,7 @@ type managedSession struct {
 	lastActivity time.Time
 	forceStop    bool
 	recovered    bool
+	readerDone   chan struct{}
 
 	stripANSI bool // strip ANSI escape codes from PTY output before forwarding
 
@@ -498,6 +499,7 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 		cancel:       cancel,
 		stopGrace:    provider.StopGrace(),
 		lastActivity: time.Now(),
+		readerDone:   make(chan struct{}),
 	}
 
 	if useStreamJSON {
@@ -591,6 +593,7 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 }
 
 func (s *Supervisor) readLoop(ms *managedSession) {
+	defer signalReaderDone(ms)
 	defer s.closeLive(ms)
 	buf := make([]byte, 8192)
 	for {
@@ -646,6 +649,7 @@ type claudeStreamEvent struct {
 // readLoopStreamJSON reads newline-delimited JSON from a stream-JSON provider's
 // stdout, parses thinking and text deltas, and appends typed OutputChunks.
 func (s *Supervisor) readLoopStreamJSON(ms *managedSession, r io.ReadCloser) {
+	defer signalReaderDone(ms)
 	defer func() { _ = r.Close() }()
 	defer s.closeLive(ms)
 	reader := bufio.NewReader(r)
@@ -696,6 +700,12 @@ func (s *Supervisor) readLoopStreamJSON(ms *managedSession, r io.ReadCloser) {
 			}
 			return
 		}
+	}
+}
+
+func signalReaderDone(ms *managedSession) {
+	if ms.readerDone != nil {
+		close(ms.readerDone)
 	}
 }
 
@@ -795,6 +805,9 @@ func (s *Supervisor) NotifyWriterReleased(sessionID, releasingClientID string) {
 
 func (s *Supervisor) waitLoop(ms *managedSession) {
 	err := ms.cmd.Wait()
+	if ms.readerDone != nil {
+		<-ms.readerDone
+	}
 
 	exitCode := 0
 	if err != nil {

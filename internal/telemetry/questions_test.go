@@ -63,6 +63,38 @@ func TestAcceptedPermissionQuestion(t *testing.T) {
 	}
 }
 
+func TestAnalyzerUsesCompositeSessionIdentity(t *testing.T) {
+	sink := &memorySink{}
+	analyzer := NewAnalyzer(sink, nil)
+	sourceA := Session{SourceID: "bridge-a", SessionID: "shared", Provider: "codex"}
+	sourceB := Session{SourceID: "bridge-b", SessionID: "shared", Provider: "codex"}
+
+	analyzer.ObserveOutput(sourceA, []byte("Proceed with this command?"))
+	analyzer.ObserveOutput(sourceB, []byte("Which environment should I use?"))
+	analyzer.ObserveInput(sourceA, []byte("yes"))
+	analyzer.ObserveInput(sourceB, []byte("staging"))
+
+	events := sink.snapshot()
+	if len(events) != 4 {
+		t.Fatalf("events=%d, want two independently correlated question/answer pairs", len(events))
+	}
+	answers := map[string]Event{}
+	for _, event := range events {
+		if event.SourceID == "" {
+			t.Fatal("event omitted source_id")
+		}
+		if event.Kind == EventAnswer {
+			answers[event.SourceID] = event
+		}
+	}
+	if answers["bridge-a"].Decision != DecisionAccepted || answers["bridge-a"].Sequence != 2 {
+		t.Fatalf("bridge-a answer=%+v", answers["bridge-a"])
+	}
+	if answers["bridge-b"].Decision != DecisionUnknown || answers["bridge-b"].Sequence != 2 {
+		t.Fatalf("bridge-b answer=%+v", answers["bridge-b"])
+	}
+}
+
 func TestRejectAndChangedAreNotAutoApprovalCandidates(t *testing.T) {
 	a := NewAnalyzer(nil, nil)
 	session := Session{SessionID: "s1", Provider: "codex"}
@@ -99,15 +131,18 @@ func TestRedactsSecrets(t *testing.T) {
 }
 
 func TestDefaultRedactorCoversFullCaptureCredentialFamilies(t *testing.T) {
+	awsAccessKeyFixture := "AKIA" + "ABCDEFGHIJKLMNOP"
 	tests := []struct {
 		name   string
 		secret string
 		input  string
 	}{
 		{name: "bearer", secret: "bearer-secret-value", input: "Authorization: Bearer bearer-secret-value"},
+		{name: "compound AWS secret", secret: "short-secret", input: "AWS_SECRET_ACCESS_KEY=short-secret"},
+		{name: "compound client secret", secret: "client-value", input: "CLIENT_SECRET=client-value"},
 		{name: "openai", secret: "sk-abcdefghijklmnop", input: "use sk-abcdefghijklmnop now"},
 		{name: "github", secret: "ghp_abcdefghijklmnop", input: "use ghp_abcdefghijklmnop now"},
-		{name: "aws", secret: "AKIAABCDEFGHIJKLMNOP", input: "use AKIAABCDEFGHIJKLMNOP now"},
+		{name: "aws", secret: awsAccessKeyFixture, input: "use " + awsAccessKeyFixture + " now"},
 		{name: "private key", secret: "private-material", input: "-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----"},
 	}
 	for _, test := range tests {

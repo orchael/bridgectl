@@ -9,19 +9,19 @@ import (
 	"time"
 
 	bridgev1 "github.com/orchael/bridgectl/gen/bridge/v1"
-	"google.golang.org/grpc"
 )
 
 // GRPCForwardingSink durably records events before forwarding sealed segments.
 // Network work happens only in its worker and never in Record's caller beyond
 // the local spool append.
 type GRPCForwardingSink struct {
-	spool         *SegmentSpool
-	client        bridgev1.TelemetryCollectorServiceClient
-	flushInterval time.Duration
-	retryInterval time.Duration
-	onError       func(error)
-	closer        io.Closer
+	spool           *SegmentSpool
+	client          bridgev1.TelemetryCollectorServiceClient
+	flushInterval   time.Duration
+	retryInterval   time.Duration
+	deliveryTimeout time.Duration
+	onError         func(error)
+	closer          io.Closer
 
 	stateMu sync.Mutex
 	closed  bool
@@ -31,7 +31,6 @@ type GRPCForwardingSink struct {
 	cancel  context.CancelFunc
 
 	deliveryMu sync.Mutex
-	stream     grpc.BidiStreamingClient[bridgev1.TelemetrySegment, bridgev1.TelemetryAck]
 }
 
 func NewGRPCForwardingSink(spool *SegmentSpool, client bridgev1.TelemetryCollectorServiceClient, closer io.Closer, flushInterval, retryInterval time.Duration, onError func(error)) *GRPCForwardingSink {
@@ -44,7 +43,7 @@ func NewGRPCForwardingSink(spool *SegmentSpool, client bridgev1.TelemetryCollect
 	ctx, cancel := context.WithCancel(context.Background())
 	sink := &GRPCForwardingSink{
 		spool: spool, client: client, closer: closer, flushInterval: flushInterval, retryInterval: retryInterval,
-		onError: onError, stop: make(chan struct{}), done: make(chan struct{}), ctx: ctx, cancel: cancel,
+		deliveryTimeout: 10 * time.Second, onError: onError, stop: make(chan struct{}), done: make(chan struct{}), ctx: ctx, cancel: cancel,
 	}
 	go sink.run()
 	return sink
@@ -72,70 +71,79 @@ func (s *GRPCForwardingSink) run() {
 		case <-s.stop:
 			return
 		case <-flushTicker.C:
-			if _, err := s.spool.Seal(); err != nil {
+			segment, err := s.spool.Seal()
+			if err != nil {
 				s.report(fmt.Errorf("seal telemetry segment: %w", err))
+			} else if segment.ID != "" {
+				if err := s.deliverPending(s.ctx); err != nil && !errors.Is(err, context.Canceled) {
+					s.report(fmt.Errorf("stream telemetry segment: %w", err))
+					resetTimer(deliveryTimer, backoff)
+					backoff = min(backoff*2, maxBackoff)
+				} else {
+					backoff = s.retryInterval
+					resetTimer(deliveryTimer, s.flushInterval)
+				}
 			}
 		case <-deliveryTimer.C:
-			if err := s.deliverPending(s.ctx, true); err != nil && !errors.Is(err, context.Canceled) {
+			if err := s.deliverPending(s.ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.report(fmt.Errorf("stream telemetry segment: %w", err))
-				deliveryTimer.Reset(backoff)
+				resetTimer(deliveryTimer, backoff)
 				backoff = min(backoff*2, maxBackoff)
 			} else {
 				backoff = s.retryInterval
-				deliveryTimer.Reset(s.flushInterval)
+				resetTimer(deliveryTimer, s.flushInterval)
 			}
 		}
 	}
 }
 
-func (s *GRPCForwardingSink) deliverPending(ctx context.Context, keepOpen bool) error {
+func (s *GRPCForwardingSink) deliverPending(ctx context.Context) error {
 	s.deliveryMu.Lock()
 	defer s.deliveryMu.Unlock()
 	segments, err := s.spool.Pending()
 	if err != nil {
 		return err
 	}
+	if len(segments) == 0 {
+		return nil
+	}
+	attemptCtx, cancel := context.WithTimeout(ctx, s.deliveryTimeout)
+	defer cancel()
+	stream, err := s.client.StreamSegments(attemptCtx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = stream.CloseSend() }()
 	for _, segment := range segments {
-		if s.stream == nil {
-			s.stream, err = s.client.StreamSegments(ctx)
-			if err != nil {
-				return err
-			}
-		}
 		data, err := s.spool.Read(segment.ID)
 		if err != nil {
-			s.resetStreamLocked()
 			return err
 		}
-		if err := s.stream.Send(&bridgev1.TelemetrySegment{Id: segment.ID, Jsonl: data}); err != nil {
-			s.resetStreamLocked()
+		if err := stream.Send(&bridgev1.TelemetrySegment{Id: segment.ID, Jsonl: data}); err != nil {
 			return err
 		}
-		ack, err := s.stream.Recv()
+		ack, err := stream.Recv()
 		if err != nil {
-			s.resetStreamLocked()
 			return err
 		}
 		if ack.GetId() != segment.ID {
-			s.resetStreamLocked()
 			return fmt.Errorf("collector acknowledged segment %q, want %q", ack.GetId(), segment.ID)
 		}
 		if err := s.spool.Remove(segment.ID); err != nil {
-			s.resetStreamLocked()
 			return err
 		}
-	}
-	if !keepOpen {
-		s.resetStreamLocked()
 	}
 	return nil
 }
 
-func (s *GRPCForwardingSink) resetStreamLocked() {
-	if s.stream != nil {
-		_ = s.stream.CloseSend()
-		s.stream = nil
+func resetTimer(timer *time.Timer, delay time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
 	}
+	timer.Reset(delay)
 }
 
 func (s *GRPCForwardingSink) Close(ctx context.Context) (returnErr error) {
@@ -154,9 +162,6 @@ func (s *GRPCForwardingSink) Close(ctx context.Context) (returnErr error) {
 		return ctx.Err()
 	}
 
-	s.deliveryMu.Lock()
-	s.resetStreamLocked()
-	s.deliveryMu.Unlock()
 	if _, err := s.spool.Seal(); err != nil {
 		s.cancel()
 		return err
@@ -171,7 +176,7 @@ func (s *GRPCForwardingSink) Close(ctx context.Context) (returnErr error) {
 			s.cancel()
 			return nil
 		}
-		if err := s.deliverPending(ctx, false); err != nil {
+		if err := s.deliverPending(ctx); err != nil {
 			s.report(fmt.Errorf("flush telemetry segment: %w", err))
 		} else {
 			continue
