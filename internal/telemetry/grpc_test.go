@@ -219,6 +219,48 @@ func TestGRPCForwardingSinkRetriesUnacknowledgedSegment(t *testing.T) {
 	}
 }
 
+// TestGRPCForwardingSinkReusesStreamAcrossDeliveryPasses proves TEL-111: a
+// healthy collector connection remains one long-lived bidirectional stream
+// when separately sealed batches are delivered.
+func TestGRPCForwardingSinkReusesStreamAcrossDeliveryPasses(t *testing.T) {
+	bridgeSpool, err := NewSegmentSpool(t.TempDir(), 1<<20, 10<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	collectorSpool, err := NewSegmentSpool(t.TempDir(), 1<<20, 10<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector := &countingCollector{delegate: NewGRPCCollectorServer(collectorSpool, 1<<20)}
+	client, cleanup := startCollectorTestServer(t, collector)
+	defer cleanup()
+	streamContext, cancelStream := context.WithCancel(context.Background())
+	forwarder := &GRPCForwardingSink{
+		spool: bridgeSpool, client: client, deliveryTimeout: time.Second,
+		ctx: streamContext,
+	}
+	defer func() {
+		cancelStream()
+	}()
+
+	for sequence := uint64(1); sequence <= 2; sequence++ {
+		event := validCollectorEvent(EventQuestion)
+		event.Sequence = sequence
+		if err := bridgeSpool.Record(event); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := bridgeSpool.Seal(); err != nil {
+			t.Fatal(err)
+		}
+		if err := forwarder.deliverPending(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls := collector.calls.Load(); calls != 1 {
+		t.Fatalf("StreamSegments calls=%d, want one long-lived stream", calls)
+	}
+}
+
 func TestGRPCForwardingSinkRetainsDataWhileCollectorUnavailable(t *testing.T) {
 	spool, err := NewSegmentSpool(t.TempDir(), 1<<20, 10<<20, nil)
 	if err != nil {
@@ -358,6 +400,12 @@ type failFirstCollector struct {
 	calls    atomic.Int64
 }
 
+type countingCollector struct {
+	bridgev1.UnimplementedTelemetryCollectorServiceServer
+	delegate *GRPCCollectorServer
+	calls    atomic.Int64
+}
+
 type neverAckCollector struct {
 	bridgev1.UnimplementedTelemetryCollectorServiceServer
 }
@@ -374,6 +422,11 @@ func (s *failFirstCollector) StreamSegments(stream grpc.BidiStreamingServer[brid
 	if s.calls.Add(1) == 1 {
 		return status.Error(codes.Unavailable, "temporary outage")
 	}
+	return s.delegate.StreamSegments(stream)
+}
+
+func (s *countingCollector) StreamSegments(stream grpc.BidiStreamingServer[bridgev1.TelemetrySegment, bridgev1.TelemetryAck]) error {
+	s.calls.Add(1)
 	return s.delegate.StreamSegments(stream)
 }
 

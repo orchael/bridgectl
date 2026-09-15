@@ -37,6 +37,12 @@ question, and answer events. Full capture may contain personal or proprietary
 material after best-effort redaction; enable it only with an appropriate
 consent and retention policy.
 
+The collector is a private-network component. Its `--tls-cert` and `--tls-key`
+flags authenticate the collector server to bridgectl but do not authenticate
+bridge clients. Any non-loopback deployment must use an operator-managed
+network ACL or authenticated proxy. Native tenant/actor authentication is
+tracked in [orchael/bridge#5](https://github.com/orchael/bridge/issues/5).
+
 ## Session identity and context
 
 Schema-v2 sessions are keyed by `(source_id, session_id)`. A

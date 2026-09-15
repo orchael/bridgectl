@@ -140,6 +140,7 @@ func TestDefaultRedactorCoversFullCaptureCredentialFamilies(t *testing.T) {
 		{name: "bearer", secret: "bearer-secret-value", input: "Authorization: Bearer bearer-secret-value"},
 		{name: "compound AWS secret", secret: "short-secret", input: "AWS_SECRET_ACCESS_KEY=short-secret"},
 		{name: "compound client secret", secret: "client-value", input: "CLIENT_SECRET=client-value"},
+		{name: "quoted JSON token", secret: "json-secret", input: `{"token":"json-secret"}`},
 		{name: "openai", secret: "sk-abcdefghijklmnop", input: "use sk-abcdefghijklmnop now"},
 		{name: "github", secret: "ghp_abcdefghijklmnop", input: "use ghp_abcdefghijklmnop now"},
 		{name: "aws", secret: awsAccessKeyFixture, input: "use " + awsAccessKeyFixture + " now"},
@@ -149,6 +150,31 @@ func TestDefaultRedactorCoversFullCaptureCredentialFamilies(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if got := DefaultRedactor(test.input); strings.Contains(got, test.secret) || !strings.Contains(got, "[REDACTED:") {
 				t.Fatalf("DefaultRedactor(%q)=%q", test.input, got)
+			}
+		})
+	}
+}
+
+// TestTerminalStringControlsAreRemoved proves TEL-003 and TEL-102: OSC and
+// DCS payloads are terminal metadata, not transcript text or questions.
+func TestTerminalStringControlsAreRemoved(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "OSC BEL", input: "before\x1b]0;private-title?\x07after"},
+		{name: "OSC ST", input: "before\x1b]8;;https://secret.example\x1b\\after"},
+		{name: "DCS ST", input: "before\x1bP1;2|private-control?\x1b\\after"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := DefaultRedactor(test.input); got != "beforeafter" {
+				t.Fatalf("DefaultRedactor()=%q, want terminal string removed", got)
+			}
+			sink := &memorySink{}
+			NewAnalyzer(sink, nil).ObserveOutput(Session{SessionID: test.name}, []byte(test.input))
+			if events := sink.snapshot(); len(events) != 0 {
+				t.Fatalf("terminal control payload produced events: %+v", events)
 			}
 		})
 	}
@@ -266,5 +292,49 @@ func TestUnicodeTruncationAndConcurrentSessions(t *testing.T) {
 	}
 	if accepted != sessions {
 		t.Fatalf("accepted=%d, want %d", accepted, sessions)
+	}
+}
+
+// TestConcurrentInputWaitsForQuestionPersistence proves TEL-001: once a
+// question observation starts, a concurrent answer cannot be dropped or
+// persisted ahead of that question.
+func TestConcurrentInputWaitsForQuestionPersistence(t *testing.T) {
+	sink := &memorySink{}
+	redactionStarted := make(chan struct{})
+	releaseRedaction := make(chan struct{})
+	redactor := func(text string) string {
+		if strings.Contains(text, "Proceed?") {
+			close(redactionStarted)
+			<-releaseRedaction
+		}
+		return DefaultRedactor(text)
+	}
+	analyzer := NewAnalyzer(sink, redactor)
+	session := Session{SessionID: "concurrent-correlation", Provider: "codex"}
+
+	outputDone := make(chan struct{})
+	go func() {
+		defer close(outputDone)
+		analyzer.ObserveOutput(session, []byte("Proceed?"))
+	}()
+	<-redactionStarted
+
+	inputDone := make(chan struct{})
+	go func() {
+		defer close(inputDone)
+		analyzer.ObserveInput(session, []byte("yes"))
+	}()
+	select {
+	case <-inputDone:
+		close(releaseRedaction)
+	case <-time.After(50 * time.Millisecond):
+		close(releaseRedaction)
+	}
+	<-outputDone
+	<-inputDone
+
+	events := sink.snapshot()
+	if len(events) != 2 || events[0].Kind != EventQuestion || events[1].Kind != EventAnswer {
+		t.Fatalf("events=%+v, want ordered question then answer", events)
 	}
 }

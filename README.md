@@ -223,7 +223,10 @@ Compose file publishes only to host loopback. Plaintext gRPC requires the
 explicit `collector_insecure: true` setting and must not be exposed to a public
 network. For a remote collector, start it with `--tls-cert` and `--tls-key`,
 then configure `collector_ca` and optionally `collector_server_name` on the
-bridge.
+bridge. These flags authenticate the collector to the bridge; they do not
+authenticate bridge clients. Keep the collector behind an operator-managed
+network ACL or authenticated proxy. Native tenant/actor authentication is
+tracked in [orchael/bridge#5](https://github.com/orchael/bridge/issues/5).
 
 The bridge always writes redacted events to its bounded local spool before
 streaming them. The collector acknowledges a segment only after it is durably

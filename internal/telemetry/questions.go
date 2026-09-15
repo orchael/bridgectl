@@ -115,6 +115,7 @@ type Redactor func(string) string
 // Analyzer correlates agent questions with subsequent human input.
 type Analyzer struct {
 	mu                  sync.Mutex
+	observationMu       sync.Mutex
 	sink                Sink
 	redact              Redactor
 	pending             map[sessionIdentity]pendingQuestion
@@ -175,8 +176,8 @@ type Feedback struct {
 }
 
 var (
-	ansiRE            = regexp.MustCompile(`\x1b(?:\[[0-9;?=<>]*[a-zA-Z~]|[@-Z\\-_])`)
-	secretRE          = regexp.MustCompile(`(?i)\b(?:[a-z0-9]+[_-])*(?:api[_-]?key|token|password|secret(?:[_-]access[_-]key)?|authorization)\s*[:=]\s*(?:bearer\s+)?[^\s]+`)
+	ansiRE            = regexp.MustCompile(`\x1b(?:\][^\x07]*?(?:\x1b\\|\x07|$)|[PX^_](?s:.*?)(?:\x1b\\|$)|\[[0-?]*[ -/]*[@-~]|[@-_])`)
+	secretRE          = regexp.MustCompile(`(?i)(\b(?:[a-z0-9]+[_-])*(?:api[_-]?key|token|password|secret(?:[_-]access[_-]key)?|authorization)"?\s*[:=]\s*"?(?:bearer\s+)?)[^\s",}\]]+`)
 	bearerRE          = regexp.MustCompile(`(?i)\bbearer\s+[^\s]+`)
 	credentialValueRE = regexp.MustCompile(`\b(?:sk-[A-Za-z0-9_-]{12,}|ghp_[A-Za-z0-9]{12,}|github_pat_[A-Za-z0-9_]{12,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,})\b`)
 	privateKeyRE      = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)
@@ -233,7 +234,7 @@ func DefaultRedactor(text string) string {
 	text = privateKeyRE.ReplaceAllString(text, "[REDACTED:PRIVATE_KEY]")
 	text = bearerRE.ReplaceAllString(text, "Bearer [REDACTED:TOKEN]")
 	text = credentialValueRE.ReplaceAllString(text, "[REDACTED:TOKEN]")
-	return secretRE.ReplaceAllString(text, "$1=[REDACTED:SECRET]")
+	return secretRE.ReplaceAllString(text, "$1[REDACTED:SECRET]")
 }
 
 // ObserveProviderInteraction records a complete provider chunk before logical
@@ -281,6 +282,9 @@ func (a *Analyzer) observeInteraction(session Session, direction Direction, kind
 // ObserveOutput inspects agent output. It records only likely questions rather
 // than every output byte, which keeps the feedback dataset useful and bounded.
 func (a *Analyzer) ObserveOutput(session Session, data []byte) {
+	a.observationMu.Lock()
+	defer a.observationMu.Unlock()
+
 	text := normalize(string(data))
 	if text == "" || !looksLikeQuestion(text) {
 		return
@@ -322,6 +326,9 @@ func (a *Analyzer) ObserveOutput(session Session, data []byte) {
 // ObserveInput correlates human input with the most recent question in the
 // session. The raw answer is redacted before it reaches the sink.
 func (a *Analyzer) ObserveInput(session Session, data []byte) {
+	a.observationMu.Lock()
+	defer a.observationMu.Unlock()
+
 	now := a.now().UTC()
 	answer := normalize(string(data))
 	if answer == "" {

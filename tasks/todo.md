@@ -844,4 +844,38 @@ Evidence:
   with redacted text enabled and remains mode `0600`; a collector rebuild and
   server restart are required before the running processes use the new schema.
 
+## PR #239 final Copilot thread closure (2026-09-14)
+
+Mode: Autonomous review correction within the already approved TEL-003,
+TEL-102, and TEL-111 contracts. No new public schema or operator choice.
+
+- [x] Add failing regressions for quoted JSON secrets and OSC/DCS terminal
+  controls, then harden redaction before persistence.
+- [x] Add a failing concurrent question/input regression, then serialize the
+  analyzer's question/answer correlation through the persistence boundary.
+- [x] Add a failing two-batch delivery regression, then retain one gRPC stream
+  across successful delivery passes and reset it on transport/protocol errors.
+- [x] Run focused race tests, full tests, maintained coverage, lint, build, and
+  diff checks.
+- [ ] Push the review fixes, reply to and resolve every Copilot thread, and
+  monitor the current-head CI and bounded third review cycle.
+
+Rollback:
+- Reverting the final review-fix commit restores the prior redactor, analyzer
+  scheduling, and one-stream-per-delivery behavior without changing persisted
+  schema or configuration.
+
+Evidence:
+- The four new regressions failed first: JSON secrets and terminal-string
+  payloads remained visible, concurrent input was dropped, and two delivery
+  passes opened two streams. All now pass with the race detector.
+- `make test` passed the full race-enabled suite outside the socket-restricted
+  workspace sandbox. `make test-cover-maintained` passed at 81.2% overall and
+  81.5% for `internal/telemetry`, above the 75% gate.
+- `make lint` reported zero issues, `make build` passed, the Docusaurus static
+  build passed, and `git diff --check` passed.
+- `make test-e2e-live-telemetry` passed through the real bridge and collector;
+  the collector volume received an ordered nine-event session ending in
+  `session_ended`. Its isolated containers and volumes were removed afterward.
+
 ---

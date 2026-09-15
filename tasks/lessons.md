@@ -214,3 +214,18 @@
 - Validation added: Split UTF-8 and multi-chunk secret regressions, filtered
   sequence assertions, active-segment exclusion, partial-write recovery, and a
   live collector E2E ending with `session_ended`.
+
+## 2026-09-15 Telemetry Protocols Need Semantic Coverage
+
+- Incident/bug: Assignment redaction handled shell-style values but missed
+  quoted JSON, ANSI stripping handled CSI controls but exposed OSC/DCS payloads,
+  question state became visible before its event was persisted, and each
+  delivery pass recreated a stream despite the long-lived-stream contract.
+- Root cause pattern: Tests covered common representations and single-threaded
+  happy paths without asserting equivalent wire formats, persistence ordering,
+  or connection lifetime across batches.
+- Preventative rule: At privacy and transport boundaries, test multiple
+  encodings, state visibility versus durable event order, and reuse across at
+  least two separately sealed batches.
+- Validation added: Quoted-JSON secret, OSC/DCS, concurrent correlation, and
+  two-batch one-stream regressions plus the live bridge-to-volume Docker E2E.
