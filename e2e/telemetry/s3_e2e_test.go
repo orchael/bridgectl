@@ -20,7 +20,62 @@ import (
 	"github.com/orchael/bridgectl/internal/telemetry"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 )
+
+// TestTelemetryS3FixturesMeetCollectorContract covers TEL-113 without AWS: the
+// same fixture used by the opt-in S3 test must pass the real collector boundary.
+func TestTelemetryS3FixturesMeetCollectorContract(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	spool, err := telemetry.NewSegmentSpool(t.TempDir(), 64<<10, 2<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := bufconn.Listen(1 << 20)
+	server := grpc.NewServer()
+	bridgev1.RegisterTelemetryCollectorServiceServer(server, telemetry.NewGRPCCollectorServer(spool, 64<<10, telemetry.EventQuestion, telemetry.EventAnswer))
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { server.Stop(); _ = listener.Close() })
+	conn, err := grpc.NewClient("passthrough:///s3-fixture", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+		return listener.Dial()
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	stream, err := bridgev1.NewTelemetryCollectorServiceClient(conn).StreamSegments(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload bytes.Buffer
+	for _, event := range s3FixtureEvents(time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC)) {
+		if err := json.NewEncoder(&payload).Encode(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	segmentID := "s3-fixture-contract"
+	if err := stream.Send(&bridgev1.TelemetrySegment{Id: segmentID, Jsonl: payload.Bytes()}); err != nil {
+		t.Fatal(err)
+	}
+	ack, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("S3 fixture rejected by collector: %v", err)
+	}
+	if ack.GetId() != segmentID || !ack.GetStored() {
+		t.Fatalf("unexpected fixture acknowledgement: %v", ack)
+	}
+	if err := stream.CloseSend(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func s3FixtureEvents(now time.Time) []telemetry.Event {
+	return []telemetry.Event{
+		{SchemaVersion: 2, Timestamp: now, SourceID: "s3-e2e-source", SessionID: "s3-e2e", Sequence: 1, Provider: "codex", Kind: telemetry.EventQuestion, Class: telemetry.ClassPermission, Fingerprint: "e2e-question", Text: "Proceed?"},
+		{SchemaVersion: 2, Timestamp: now.Add(time.Second), SourceID: "s3-e2e-source", SessionID: "s3-e2e", Sequence: 2, Provider: "codex", Kind: telemetry.EventAnswer, Fingerprint: "e2e-question", Decision: telemetry.DecisionAccepted, LatencyMS: 1000},
+	}
+}
 
 // TestTelemetryGRPCToS3 proves TEL-113 against an operator-created bucket. It
 // never creates or deletes the bucket and removes only its generated prefix.
@@ -88,10 +143,7 @@ func TestTelemetryGRPCToS3(t *testing.T) {
 		t.Logf("gRPC delivery retry: %v", err)
 	})
 	now := time.Now().UTC()
-	for _, event := range []telemetry.Event{
-		{Timestamp: now, SessionID: "s3-e2e", Provider: "codex", Kind: telemetry.EventQuestion, Class: telemetry.ClassPermission, Fingerprint: "e2e-question", Text: "Proceed?"},
-		{Timestamp: now.Add(time.Second), SessionID: "s3-e2e", Provider: "codex", Kind: telemetry.EventAnswer, Fingerprint: "e2e-question", Decision: telemetry.DecisionAccepted, LatencyMS: 1000},
-	} {
+	for _, event := range s3FixtureEvents(now) {
 		if err := forwarder.Record(event); err != nil {
 			t.Fatal(err)
 		}
@@ -117,6 +169,9 @@ func TestTelemetryGRPCToS3(t *testing.T) {
 		var event telemetry.Event
 		if err := json.Unmarshal(line, &event); err != nil {
 			t.Fatalf("decode S3 JSONL: %v\n%s", err, data)
+		}
+		if event.SchemaVersion != 2 || event.SourceID != "s3-e2e-source" || event.SessionID != "s3-e2e" || event.Sequence != uint64(len(kinds)+1) {
+			t.Fatalf("invalid S3 event envelope: %+v", event)
 		}
 		kinds = append(kinds, event.Kind)
 	}

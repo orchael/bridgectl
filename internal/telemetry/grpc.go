@@ -68,6 +68,9 @@ func (s *GRPCCollectorServer) validateJSONL(data []byte) error {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return errors.New("empty JSONL")
 	}
+	if data[len(data)-1] != '\n' {
+		return errors.New("JSONL must end with a newline")
+	}
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	maxToken := int(s.maxSegmentBytes)
 	if maxToken < bufio.MaxScanTokenSize {
@@ -77,7 +80,7 @@ func (s *GRPCCollectorServer) validateJSONL(data []byte) error {
 	count := 0
 	for scanner.Scan() {
 		if len(bytes.TrimSpace(scanner.Bytes())) == 0 {
-			continue
+			return errors.New("empty JSONL record")
 		}
 		var event Event
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
@@ -128,6 +131,9 @@ func validateCollectorEvent(event Event) error {
 	if event.Text != "" && DefaultRedactor(event.Text) != event.Text {
 		return errors.New("event text contains unredacted sensitive content")
 	}
+	if event.Kind != EventSessionContext && event.Context != nil {
+		return errors.New("session context metadata is only valid on session_context events")
+	}
 	switch event.Kind {
 	case EventSessionContext:
 		if event.SchemaVersion != 2 || event.Context == nil || !validSessionContext(event.ActorID, *event.Context) {
@@ -157,7 +163,7 @@ func validSessionContext(actorID string, context SessionContext) bool {
 		(context.SourceLabel != "" && !ValidSourceID(context.SourceLabel)) ||
 		!validMetadata(context.OS, 32) || !validMetadata(context.Arch, 32) ||
 		!validOptionalDigest(context.MachineID) || !validOptionalDigest(context.WorkingDirectoryID) || !validOptionalDigest(context.RepositoryID) ||
-		!validMetadata(context.RemoteHost, 253) || !validMetadata(context.Branch, 255) {
+		!validMetadata(context.Branch, 255) {
 		return false
 	}
 	if context.CommitSHA == "" {

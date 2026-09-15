@@ -100,6 +100,18 @@ func ansiSequenceEnd(buffer string, start int) (int, bool) {
 	if start+1 >= len(buffer) {
 		return len(buffer), false
 	}
+	introducer := buffer[start+1]
+	if introducer == ']' || introducer == 'P' || introducer == 'X' || introducer == '^' || introducer == '_' {
+		for i := start + 2; i < len(buffer); i++ {
+			if introducer == ']' && buffer[i] == '\x07' {
+				return i + 1, true
+			}
+			if buffer[i] == '\x1b' && i+1 < len(buffer) && buffer[i+1] == '\\' {
+				return i + 2, true
+			}
+		}
+		return len(buffer), false
+	}
 	if buffer[start+1] != '[' {
 		return start + 2, true
 	}

@@ -299,7 +299,7 @@ message EnrollClientResponse {
 message TelemetrySegment {
   // id is stable across retries and becomes the collector/S3 object identity.
   string id = 1;
-  // jsonl contains normalized, redacted schema-v1 telemetry events.
+  // jsonl contains normalized, redacted schema-v1 or schema-v2 telemetry events.
   bytes jsonl = 2;
 }
 

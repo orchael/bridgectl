@@ -859,6 +859,25 @@ TEL-102, and TEL-111 contracts. No new public schema or operator choice.
   diff checks.
 - [ ] Push the review fixes, reply to and resolve every Copilot thread, and
   monitor the current-head CI and bounded third review cycle.
+- [x] Add failing current-head review regressions for misplaced context,
+  unterminated JSONL, 16-KiB-plus interaction capture, Unicode packet bounds,
+  and raw remote-host metadata; correct the protobuf version comment.
+- [x] Reject context outside `session_context`, require newline-complete
+  segments, retain interactions up to the documented 1-MiB safety bound,
+  truncate evidence by runes, and keep Git remotes only inside keyed IDs.
+- [x] Prove redaction idempotence and complete quoted values with spaces;
+  strengthen the live fixture to verify unchanged user-visible output and
+  redacted collector-volume text. Exclude generated nested dependencies/docs
+  output from Docker build contexts.
+- [ ] Re-run all gates after the current-head fixes and push them without
+  requesting a fourth Copilot cycle.
+- [x] Triage third-cycle suppressed findings: fix local timed sealing, valid S3
+  envelopes/non-root E2E, lifecycle/gap/bounded analysis, linked-worktree Git
+  identity, OSC/DCS framing, blank-record validation, asynchronous discovery,
+  and recovery of valid records after malformed UTF-8 records.
+- [x] Confirm the directory-fsync finding is obsolete: Append calls
+  enforceLimitLocked, which syncs the spool directory, and constructor recovery
+  also syncs it. Preserve the existing durability path.
 
 Rollback:
 - Reverting the final review-fix commit restores the prior redactor, analyzer
@@ -870,12 +889,20 @@ Evidence:
   payloads remained visible, concurrent input was dropped, and two delivery
   passes opened two streams. All now pass with the race detector.
 - `make test` passed the full race-enabled suite outside the socket-restricted
-  workspace sandbox. `make test-cover-maintained` passed at 81.2% overall and
-  81.5% for `internal/telemetry`, above the 75% gate.
+  workspace sandbox. `make test-cover-maintained` passed at 81.9% overall and
+  83.9% for `internal/telemetry`, above the 75% gate after all final regressions.
 - `make lint` reported zero issues, `make build` passed, the Docusaurus static
   build passed, and `git diff --check` passed.
 - `make test-e2e-live-telemetry` passed through the real bridge and collector;
   the collector volume received an ordered nine-event session ending in
   `session_ended`. Its isolated containers and volumes were removed afterward.
+- The strengthened JSON-redaction E2E initially exhausted host disk during
+  concurrent image compilation, before starting test containers. Only this
+  task's regenerable Go cache was cleared; sequential image builds lower peak
+  disk use and preserve all user telemetry storage.
+- Suppressed-finding regressions failed first for reused starts, gap boundaries,
+  unbounded turn text, linked-worktree identity, S3 envelope validation, slow
+  context discovery, terminal-string framing, and malformed/valid record
+  recovery. The consolidated telemetry/example/S3-fixture race suites pass.
 
 ---

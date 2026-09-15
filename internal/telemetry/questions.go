@@ -69,27 +69,28 @@ const (
 
 // Event is safe to persist after Redactor has processed its text fields.
 type Event struct {
-	SchemaVersion int             `json:"schema_version"`
-	Timestamp     time.Time       `json:"timestamp"`
-	SourceID      string          `json:"source_id,omitempty"`
-	ActorID       string          `json:"actor_id,omitempty"`
-	SessionID     string          `json:"session_id"`
-	ProjectID     string          `json:"project_id,omitempty"`
-	Provider      string          `json:"provider,omitempty"`
-	Direction     Direction       `json:"direction,omitempty"`
-	Kind          EventKind       `json:"kind"`
-	Stream        StreamType      `json:"stream,omitempty"`
-	Sequence      uint64          `json:"sequence"`
-	Class         QuestionClass   `json:"class,omitempty"`
-	Decision      Decision        `json:"decision,omitempty"`
-	Fingerprint   string          `json:"fingerprint,omitempty"`
-	Text          string          `json:"text,omitempty"`
-	ByteCount     int             `json:"byte_count,omitempty"`
-	Redactions    int             `json:"redactions,omitempty"`
-	ContentHash   string          `json:"content_sha256,omitempty"`
-	OmittedReason string          `json:"omitted_reason,omitempty"`
-	LatencyMS     int64           `json:"latency_ms,omitempty"`
-	Context       *SessionContext `json:"context,omitempty"`
+	SchemaVersion    int             `json:"schema_version"`
+	Timestamp        time.Time       `json:"timestamp"`
+	SourceID         string          `json:"source_id,omitempty"`
+	ActorID          string          `json:"actor_id,omitempty"`
+	SessionID        string          `json:"session_id"`
+	ProjectID        string          `json:"project_id,omitempty"`
+	Provider         string          `json:"provider,omitempty"`
+	Direction        Direction       `json:"direction,omitempty"`
+	Kind             EventKind       `json:"kind"`
+	Stream           StreamType      `json:"stream,omitempty"`
+	Sequence         uint64          `json:"sequence"`
+	Class            QuestionClass   `json:"class,omitempty"`
+	Decision         Decision        `json:"decision,omitempty"`
+	Fingerprint      string          `json:"fingerprint,omitempty"`
+	Text             string          `json:"text,omitempty"`
+	ByteCount        int             `json:"byte_count,omitempty"`
+	Redactions       int             `json:"redactions,omitempty"`
+	ContentHash      string          `json:"content_sha256,omitempty"`
+	OmittedReason    string          `json:"omitted_reason,omitempty"`
+	LatencyMS        int64           `json:"latency_ms,omitempty"`
+	Context          *SessionContext `json:"context,omitempty"`
+	contextDiscovery *sessionContextDiscovery
 }
 
 // Session identifies an agent session without requiring telemetry to depend on
@@ -175,9 +176,12 @@ type Feedback struct {
 	Questions     []QuestionStat `json:"questions"`
 }
 
+const secretKeyPattern = `(?:[a-z0-9]+[_-])*(?:api[_-]?key|token|password|secret(?:[_-]access[_-]key)?|authorization)`
+
 var (
 	ansiRE            = regexp.MustCompile(`\x1b(?:\][^\x07]*?(?:\x1b\\|\x07|$)|[PX^_](?s:.*?)(?:\x1b\\|$)|\[[0-?]*[ -/]*[@-~]|[@-_])`)
-	secretRE          = regexp.MustCompile(`(?i)(\b(?:[a-z0-9]+[_-])*(?:api[_-]?key|token|password|secret(?:[_-]access[_-]key)?|authorization)"?\s*[:=]\s*"?(?:bearer\s+)?)[^\s",}\]]+`)
+	quotedSecretRE    = regexp.MustCompile(`(?i)(\b` + secretKeyPattern + `"?\s*[:=]\s*")(?:\\.|[^"\\])*`)
+	secretRE          = regexp.MustCompile(`(?i)(\b` + secretKeyPattern + `"?\s*[:=]\s*"?(?:bearer\s+)?)(?:\[REDACTED:[A-Z_]+\]|[^\s",}\]]+)`)
 	bearerRE          = regexp.MustCompile(`(?i)\bbearer\s+[^\s]+`)
 	credentialValueRE = regexp.MustCompile(`\b(?:sk-[A-Za-z0-9_-]{12,}|ghp_[A-Za-z0-9]{12,}|github_pat_[A-Za-z0-9_]{12,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,})\b`)
 	privateKeyRE      = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)
@@ -234,6 +238,7 @@ func DefaultRedactor(text string) string {
 	text = privateKeyRE.ReplaceAllString(text, "[REDACTED:PRIVATE_KEY]")
 	text = bearerRE.ReplaceAllString(text, "Bearer [REDACTED:TOKEN]")
 	text = credentialValueRE.ReplaceAllString(text, "[REDACTED:TOKEN]")
+	text = quotedSecretRE.ReplaceAllString(text, "$1[REDACTED:SECRET]")
 	return secretRE.ReplaceAllString(text, "$1[REDACTED:SECRET]")
 }
 

@@ -2,11 +2,17 @@ package telemetry
 
 import (
 	"sort"
-	"strings"
 	"time"
+	"unicode/utf8"
 )
 
-// Turn is a reconstructed contiguous human or agent interaction.
+// MaxTurnTextBytes bounds retained text per composite identity.
+const MaxTurnTextBytes = 64 * 1024
+
+// Turn is a reconstructed contiguous human or agent interaction, emitted in
+// bounded chunks. ChunkIndex is zero for the first chunk of a logical turn;
+// Continues marks a size-sealed chunk. Chunks of one oversized event can share
+// sequence numbers. ByteCount and Redactions are additive across chunks.
 type Turn struct {
 	SourceID      string     `json:"source_id,omitempty"`
 	SessionID     string     `json:"session_id"`
@@ -20,6 +26,8 @@ type Turn struct {
 	Text          string     `json:"text,omitempty"`
 	ByteCount     int        `json:"byte_count"`
 	Redactions    int        `json:"redactions"`
+	ChunkIndex    int        `json:"chunk_index"`
+	Continues     bool       `json:"continues,omitempty"`
 }
 
 // DataQuality summarizes evidence integrity observed during reconstruction.
@@ -38,11 +46,17 @@ type DataQuality struct {
 type InteractionAnalyzer struct {
 	lastSequence map[sessionIdentity]uint64
 	pending      map[sessionIdentity]Turn
+	starts       map[sessionIdentity]sessionStart
 	quality      DataQuality
 }
 
+type sessionStart struct {
+	sequence  uint64
+	timestamp time.Time
+}
+
 func NewInteractionAnalyzer() *InteractionAnalyzer {
-	return &InteractionAnalyzer{lastSequence: make(map[sessionIdentity]uint64), pending: make(map[sessionIdentity]Turn)}
+	return &InteractionAnalyzer{lastSequence: make(map[sessionIdentity]uint64), pending: make(map[sessionIdentity]Turn), starts: make(map[sessionIdentity]sessionStart)}
 }
 
 // Observe consumes one event and returns any turns completed by that event.
@@ -56,6 +70,21 @@ func (a *InteractionAnalyzer) Observe(event Event) []Turn {
 		a.quality.OmittedEvents++
 	}
 	key := eventKey(event)
+	var completed []Turn
+	if event.Kind == EventSessionStarted {
+		previous, exists := a.starts[key]
+		if exists && previous.sequence == event.Sequence && previous.timestamp.Equal(event.Timestamp) {
+			a.quality.Duplicates++
+			return nil
+		}
+		if exists && !event.Timestamp.IsZero() && event.Timestamp.Before(previous.timestamp) {
+			a.quality.OutOfOrder++
+			return nil
+		}
+		completed = a.flush(key)
+		delete(a.lastSequence, key)
+		a.starts[key] = sessionStart{sequence: event.Sequence, timestamp: event.Timestamp}
+	}
 	last := a.lastSequence[key]
 	if event.Sequence > 0 && last > 0 {
 		switch {
@@ -67,42 +96,78 @@ func (a *InteractionAnalyzer) Observe(event Event) []Turn {
 			return nil
 		case event.Sequence > last+1:
 			a.quality.MissingSequences += int(event.Sequence - last - 1)
+			completed = append(completed, a.flush(key)...)
 		}
 	}
 	if event.Sequence > 0 {
 		a.lastSequence[key] = event.Sequence
 	}
 	if event.Kind == EventSessionEnded {
-		return a.flush(key)
+		return append(completed, a.flush(key)...)
 	}
 	if event.Kind != EventProviderOutput && event.Kind != EventUserInput {
-		return nil
+		return completed
 	}
 	pending, ok := a.pending[key]
 	if ok && (pending.Direction != event.Direction || pending.Stream != event.Stream) {
-		completed := a.flush(key)
-		a.startTurn(key, event)
-		return completed
+		completed = append(completed, a.flush(key)...)
+		ok = false
 	}
 	if !ok {
 		a.startTurn(key, event)
-		return nil
 	}
-	pending.SequenceEnd = event.Sequence
-	pending.EndedAt = event.Timestamp
-	pending.Text += event.Text
-	pending.ByteCount += event.ByteCount
-	pending.Redactions += event.Redactions
-	a.pending[key] = pending
-	return nil
+	return append(completed, a.appendEvent(key, event)...)
 }
 
 func (a *InteractionAnalyzer) startTurn(key sessionIdentity, event Event) {
 	a.pending[key] = Turn{
 		SourceID: event.SourceID, SessionID: event.SessionID, ActorID: event.ActorID,
 		Direction: event.Direction, Stream: event.Stream, SequenceStart: event.Sequence, SequenceEnd: event.Sequence,
-		StartedAt: event.Timestamp, EndedAt: event.Timestamp, Text: event.Text,
-		ByteCount: event.ByteCount, Redactions: event.Redactions,
+		StartedAt: event.Timestamp, EndedAt: event.Timestamp,
+	}
+}
+
+func (a *InteractionAnalyzer) appendEvent(key sessionIdentity, event Event) []Turn {
+	var completed []Turn
+	remaining := event.Text
+	consumed, allocated := 0, 0
+	for {
+		pending := a.pending[key]
+		capacity := MaxTurnTextBytes - len(pending.Text)
+		n := len(remaining)
+		if n > capacity {
+			n = capacity
+		}
+		for n > 0 && n < len(remaining) && !utf8.RuneStart(remaining[n]) {
+			n--
+		}
+		if n == 0 && len(remaining) > 0 {
+			pending.Continues = true
+			completed = append(completed, pending)
+			a.startTurn(key, event)
+			next := a.pending[key]
+			next.ChunkIndex = pending.ChunkIndex + 1
+			a.pending[key] = next
+			continue
+		}
+		pending.Text += remaining[:n]
+		pending.SequenceEnd = event.Sequence
+		pending.EndedAt = event.Timestamp
+		consumed += n
+		bytes := event.ByteCount
+		if consumed < len(event.Text) {
+			bytes = int(int64(event.ByteCount) * int64(consumed) / int64(len(event.Text)))
+		}
+		pending.ByteCount += bytes - allocated
+		allocated = bytes
+		remaining = remaining[n:]
+		if len(remaining) == 0 {
+			pending.Redactions += event.Redactions
+		}
+		a.pending[key] = pending
+		if len(remaining) == 0 {
+			return completed
+		}
 	}
 }
 
@@ -112,7 +177,6 @@ func (a *InteractionAnalyzer) flush(key sessionIdentity) []Turn {
 		return nil
 	}
 	delete(a.pending, key)
-	turn.Text = strings.TrimSpace(turn.Text)
 	return []Turn{turn}
 }
 

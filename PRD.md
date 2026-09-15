@@ -994,6 +994,9 @@ answers.
   stripped of terminal controls and redacted before it reaches the async queue,
   durable bridge spool, gRPC transport, collector volume, or S3. Invalid UTF-8
   is represented only by metadata rather than forwarded as opaque content.
+  Full-capture interaction records have a separate 1-MiB safety bound from the
+  semantic question framer; oversized records carry explicit omission metadata.
+  Malformed records do not cause later valid records to be discarded.
   Derived question/answer events remain available alongside the stream so
   analytics and corpus reconstruction do not compete for one representation.
 - **TEL-115 — Composite session identity:** Every newly captured event carries
@@ -1008,9 +1011,9 @@ answers.
   version 2 and emits one `session_context` record per session. The record may
   include an explicit opaque actor ID and source label, OS/architecture, a
   stable private machine ID, privacy-safe working-directory ID, and best-effort
-  Git repository metadata.
-  Raw absolute paths, repository URLs, credentials, hostnames, Git author
-  identities, and environment values are never persisted as context. Version-1
+  Git branch, commit, and keyed repository metadata.
+  Raw absolute paths, repository URLs, remote hosts, credentials, hostnames,
+  Git author identities, and environment values are never persisted as context. Version-1
   records remain readable and valid only under their legacy contract.
 - **TEL-117 — Private longitudinal identifiers:** Repository and working
   directory identifiers are HMAC-SHA256 values generated with a private
@@ -1024,7 +1027,10 @@ answers.
   session identity and sequence, coalesces adjacent compatible stream events
   into turns, and reports duplicates, gaps, out-of-order data, legacy records,
   omitted content, and redactions. Thinking streams remain distinct from normal
-  output and are excluded from example LLM evidence by default.
+  output and are excluded from example LLM evidence by default. Sequence gaps
+  end contiguous turns; new lifecycle starts reset sequence tracking for reused
+  identities. Turn text is emitted in UTF-8-safe chunks of at most 64 KiB with
+  explicit continuation metadata, while metrics count logical turns.
 - **TEL-119 — Analysis integration examples:** The repository contains a
   non-production example that derives deterministic collaboration metrics and
   evidence-backed findings, exposes read-only HTTP endpoints, and constructs a

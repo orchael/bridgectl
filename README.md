@@ -169,7 +169,7 @@ the bridge state directory (by default
 Legacy events without `source_id` remain readable in an empty legacy namespace.
 
 Schema v2 emits one `session_context` event after `session_started`. It includes
-OS/architecture, branch and commit, the Git remote host, and stable HMAC IDs for
+OS/architecture, branch and commit, and stable HMAC IDs for
 the machine, working directory, and repository. It never stores the raw working
 directory, repository path, remote URL credentials, hostname, Git author, or
 environment variables. The private 32-byte HMAC key defaults to
@@ -199,6 +199,9 @@ delivery. Invalid UTF-8 content is omitted with its byte count, digest, and
 omission reason instead of being forwarded as opaque data. Chunk boundaries are
 reassembled before redaction, so split UTF-8 characters and split secret tokens
 cannot bypass those checks.
+An individual interaction record is buffered up to 1 MiB for this purpose. A
+larger record with no boundary is retained as byte count, digest, and the
+`buffer_limit` omission reason rather than unbounded raw text.
 
 For a small, non-production analysis reference covering deterministic findings,
 read-only HTTP APIs, and bounded LLM evidence packets, see

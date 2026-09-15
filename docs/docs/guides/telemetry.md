@@ -36,6 +36,9 @@ Use `kinds: [all]` to retain both sides of the interaction as
 question, and answer events. Full capture may contain personal or proprietary
 material after best-effort redaction; enable it only with an appropriate
 consent and retention policy.
+Interaction records are buffered up to 1 MiB so secrets split across transport
+chunks are redacted together. A larger record with no boundary within that budget is retained as
+omission metadata (`buffer_limit`, byte count, and hash) rather than raw text.
 
 The collector is a private-network component. Its `--tls-cert` and `--tls-key`
 flags authenticate the collector server to bridgectl but do not authenticate
@@ -46,8 +49,8 @@ tracked in [orchael/bridge#5](https://github.com/orchael/bridge/issues/5).
 ## Session identity and context
 
 Schema-v2 sessions are keyed by `(source_id, session_id)`. A
-`session_context` event records OS/architecture, Git branch/commit and remote
-host, plus stable HMAC identifiers for the machine, repository, and working
+`session_context` event records OS/architecture and Git branch/commit, plus
+stable HMAC identifiers for the machine, repository, and working
 directory. Raw paths, repository URLs and credentials, hostnames, Git author
 identity, and environment variables are not collected.
 
@@ -67,6 +70,12 @@ join pseudonymous repository/directory activity over time; rotate it to break
 that linkage. Authenticated tenant and actor attribution belongs in the
 downstream collector/application, not in these descriptive labels.
 
+Git discovery runs on the bounded telemetry worker rather than session startup.
+Linked worktrees use the common repository metadata for repository identity.
+Reconstruction ends a turn at missing sequences and emits long turns as
+UTF-8-safe 64-KiB continuation chunks; logical-turn metrics do not count those
+chunks as extra interventions.
+
 ## Operate and inspect the collector
 
 ```bash
@@ -85,7 +94,7 @@ Reports read only sealed segments, so they may lag active traffic by at most
 the configured flush interval. Run the built-in question report with:
 
 ```bash
-bridgectl telemetry report --events ~/.config/bridgectl/telemetry/spool
+bridgectl telemetry report --events ~/.config/bridgectl/telemetry/segments
 ```
 
 For downstream design examples, run the non-production metrics/API/model-packet

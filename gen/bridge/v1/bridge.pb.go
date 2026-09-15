@@ -2007,7 +2007,7 @@ type TelemetrySegment struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// id is stable across retries and becomes the collector/S3 object identity.
 	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	// jsonl contains normalized, redacted schema-v1 telemetry events.
+	// jsonl contains normalized, redacted schema-v1 or schema-v2 telemetry events.
 	Jsonl         []byte `protobuf:"bytes,2,opt,name=jsonl,proto3" json:"jsonl,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

@@ -141,6 +141,7 @@ func TestDefaultRedactorCoversFullCaptureCredentialFamilies(t *testing.T) {
 		{name: "compound AWS secret", secret: "short-secret", input: "AWS_SECRET_ACCESS_KEY=short-secret"},
 		{name: "compound client secret", secret: "client-value", input: "CLIENT_SECRET=client-value"},
 		{name: "quoted JSON token", secret: "json-secret", input: `{"token":"json-secret"}`},
+		{name: "quoted JSON password with spaces", secret: "phrase", input: `{"password":"private phrase"}`},
 		{name: "openai", secret: "sk-abcdefghijklmnop", input: "use sk-abcdefghijklmnop now"},
 		{name: "github", secret: "ghp_abcdefghijklmnop", input: "use ghp_abcdefghijklmnop now"},
 		{name: "aws", secret: awsAccessKeyFixture, input: "use " + awsAccessKeyFixture + " now"},
@@ -152,6 +153,15 @@ func TestDefaultRedactorCoversFullCaptureCredentialFamilies(t *testing.T) {
 				t.Fatalf("DefaultRedactor(%q)=%q", test.input, got)
 			}
 		})
+	}
+}
+
+func TestDefaultRedactorIsIdempotent(t *testing.T) {
+	for _, input := range []string{"token=private-value", `{"token":"private-value"}`} {
+		redacted := DefaultRedactor(input)
+		if got := DefaultRedactor(redacted); got != redacted {
+			t.Fatalf("redaction is not idempotent: first=%q second=%q", redacted, got)
+		}
 	}
 }
 

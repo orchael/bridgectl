@@ -26,7 +26,6 @@ type SessionContext struct {
 	MachineID          string `json:"machine_id,omitempty"`
 	WorkingDirectoryID string `json:"working_directory_id,omitempty"`
 	RepositoryID       string `json:"repository_id,omitempty"`
-	RemoteHost         string `json:"remote_host,omitempty"`
 	Branch             string `json:"branch,omitempty"`
 	CommitSHA          string `json:"commit_sha,omitempty"`
 }
@@ -123,16 +122,43 @@ func DiscoverSessionContext(repoPath, actorID, sourceLabel string, key []byte) S
 	if gitDir == "" {
 		return context
 	}
-	remote := readOriginRemote(filepath.Join(gitDir, "config"))
-	canonical, host := canonicalRemote(remote)
-	context.RemoteHost = host
+	commonDir := gitCommonDirectory(gitDir)
+	remote := readOriginRemote(filepath.Join(commonDir, "config"))
+	canonical := canonicalRemote(remote)
 	if canonical != "" {
 		context.RepositoryID = keyedID(key, canonical)
 	} else {
+		if commonDir != gitDir {
+			repoRoot = commonDir
+			if filepath.Base(commonDir) == ".git" {
+				repoRoot = filepath.Dir(commonDir)
+			}
+		}
 		context.RepositoryID = keyedID(key, repoRoot)
 	}
-	context.Branch, context.CommitSHA = readGitHead(gitDir)
+	context.Branch, context.CommitSHA = readGitHead(gitDir, commonDir)
 	return context
+}
+
+// Git keeps shared config and refs in commondir, but HEAD is worktree-local.
+// Missing or unusable metadata leaves discovery best-effort and local.
+func gitCommonDirectory(gitDir string) string {
+	data, err := os.ReadFile(filepath.Join(gitDir, "commondir"))
+	if err != nil {
+		return gitDir
+	}
+	commonDir := strings.TrimSpace(string(data))
+	if commonDir == "" || strings.ContainsAny(commonDir, "\r\n\x00") {
+		return gitDir
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(gitDir, commonDir)
+	}
+	commonDir = filepath.Clean(commonDir)
+	if info, err := os.Stat(commonDir); err != nil || !info.IsDir() {
+		return gitDir
+	}
+	return commonDir
 }
 
 func keyedID(key []byte, value string) string {
@@ -190,15 +216,15 @@ func readOriginRemote(path string) string {
 	return ""
 }
 
-func canonicalRemote(remote string) (string, string) {
+func canonicalRemote(remote string) string {
 	remote = strings.TrimSpace(remote)
 	if remote == "" {
-		return "", ""
+		return ""
 	}
 	if parsed, err := url.Parse(remote); err == nil && parsed.Scheme != "" && parsed.Hostname() != "" {
 		host := strings.ToLower(parsed.Hostname())
 		path := strings.TrimSuffix(strings.TrimSuffix(parsed.EscapedPath(), "/"), ".git")
-		return strings.ToLower(parsed.Scheme) + "://" + host + path, host
+		return strings.ToLower(parsed.Scheme) + "://" + host + path
 	}
 	colon := strings.IndexByte(remote, ':')
 	if colon > 0 && !strings.Contains(remote[:colon], "/") {
@@ -208,12 +234,12 @@ func canonicalRemote(remote string) (string, string) {
 		}
 		host = strings.ToLower(host)
 		path := strings.TrimSuffix(strings.TrimSuffix(remote[colon+1:], "/"), ".git")
-		return "ssh://" + host + "/" + path, host
+		return "ssh://" + host + "/" + path
 	}
-	return "", ""
+	return ""
 }
 
-func readGitHead(gitDir string) (string, string) {
+func readGitHead(gitDir, commonDir string) (string, string) {
 	data, err := os.ReadFile(filepath.Join(gitDir, "HEAD"))
 	if err != nil {
 		return "", ""
@@ -224,6 +250,9 @@ func readGitHead(gitDir string) (string, string) {
 	}
 	ref := strings.TrimSpace(strings.TrimPrefix(head, "ref:"))
 	branch := strings.TrimPrefix(ref, "refs/heads/")
-	commit, _ := os.ReadFile(filepath.Join(gitDir, filepath.FromSlash(ref)))
+	commit, err := os.ReadFile(filepath.Join(gitDir, filepath.FromSlash(ref)))
+	if err != nil && commonDir != gitDir {
+		commit, _ = os.ReadFile(filepath.Join(commonDir, filepath.FromSlash(ref)))
+	}
 	return branch, strings.TrimSpace(string(commit))
 }

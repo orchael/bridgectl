@@ -183,6 +183,71 @@ func TestLiveCollectorReassemblesSplitUTF8AndSecrets(t *testing.T) {
 	}
 }
 
+func TestLiveCollectorKeepsMultilineTerminalControlsPrivate(t *testing.T) {
+	sink := &memorySink{}
+	collector := NewLiveCollector(sink, 8, true, nil, EventProviderOutput, EventQuestion)
+	session := Session{SessionID: "terminal-string"}
+	collector.ObserveOutputChunk(session, []byte("before\x1b]0;private?\n"))
+	collector.ObserveOutputChunk(session, []byte("payload\x07after\n"))
+	collector.SessionEnded(session)
+	if err := collector.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	events := sink.snapshot()
+	if len(events) != 1 || events[0].Kind != EventProviderOutput || events[0].Text != "beforeafter\n" {
+		t.Fatalf("terminal payload leaked or split a question: %+v", events)
+	}
+}
+
+func TestLiveCollectorPreservesRecordsAfterInvalidUTF8(t *testing.T) {
+	sink := &memorySink{}
+	collector := NewLiveCollector(sink, 8, true, nil, EventProviderOutput)
+	session := Session{SessionID: "invalid-then-valid"}
+	collector.ObserveOutputChunk(session, append([]byte{0xff, '\n'}, []byte("recoverable output\n")...))
+	collector.SessionEnded(session)
+	if err := collector.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	events := sink.snapshot()
+	if len(events) != 2 || events[0].OmittedReason != OmittedInvalidUTF8 || events[0].ByteCount != 2 || events[1].Text != "recoverable output\n" {
+		t.Fatalf("invalid record discarded a recoverable valid record: %+v", events)
+	}
+}
+
+// TestLiveCollectorRetainsLongValidInteraction proves TEL-114: the semantic
+// question framer's 16 KiB bound must not discard a valid full-capture record.
+func TestLiveCollectorRetainsLongValidInteraction(t *testing.T) {
+	sink := &memorySink{}
+	collector := NewLiveCollector(sink, 8, true, nil, EventProviderOutput)
+	session := Session{SessionID: "long-interaction", Provider: "codex"}
+	content := strings.Repeat("x", defaultFrameBufferSize+1)
+	collector.ObserveOutputChunk(session, []byte(content))
+	collector.SessionEnded(session)
+	if err := collector.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	events := sink.snapshot()
+	if len(events) != 1 || events[0].Text != content || events[0].OmittedReason != "" {
+		t.Fatalf("long interaction was not retained: %+v", events)
+	}
+}
+
+func TestLiveCollectorBoundsOversizedUnterminatedInteraction(t *testing.T) {
+	sink := &memorySink{}
+	collector := NewLiveCollector(sink, 8, true, nil, EventProviderOutput)
+	session := Session{SessionID: "oversized-interaction", Provider: "codex"}
+	content := strings.Repeat("x", maxInteractionBufferSize+1)
+	collector.ObserveOutputChunk(session, []byte(content))
+	collector.SessionEnded(session)
+	if err := collector.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	events := sink.snapshot()
+	if len(events) != 1 || events[0].Text != "" || events[0].OmittedReason != OmittedBufferLimit || events[0].ByteCount != len(content) || events[0].ContentHash == "" {
+		t.Fatalf("oversized interaction was not bounded with explicit metadata: %+v", events)
+	}
+}
+
 func readFixture(t *testing.T, name string) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", name))
@@ -216,6 +281,48 @@ func TestLiveCollectorSinkFailureDoesNotDelayObservation(t *testing.T) {
 	_ = collector.Close(ctx)
 }
 
+func TestLiveCollectorContextDiscoveryDoesNotBlockSessionIO(t *testing.T) {
+	sink := &memorySink{}
+	collector := NewLiveCollector(sink, 8, true, nil, EventSessionStarted, EventSessionContext, EventProviderOutput, EventSessionEnded)
+	discoveryStarted := make(chan struct{})
+	releaseDiscovery := make(chan struct{})
+	collector.contextSink.discover = func(string, string, string, []byte) SessionContext {
+		close(discoveryStarted)
+		<-releaseDiscovery
+		return SessionContext{OS: "linux", Arch: "amd64"}
+	}
+	session := Session{SessionID: "slow-context", RepoPath: "/private/repo"}
+	startDone := make(chan struct{})
+	go func() {
+		collector.SessionStarted(session)
+		close(startDone)
+	}()
+	<-discoveryStarted
+	select {
+	case <-startDone:
+	case <-time.After(100 * time.Millisecond):
+		close(releaseDiscovery)
+		<-startDone
+		_ = collector.Close(context.Background())
+		t.Fatal("context filesystem discovery blocked session startup")
+	}
+	collector.ObserveOutputChunk(session, []byte("output\n"))
+	close(releaseDiscovery)
+	collector.SessionEnded(session)
+	if err := collector.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	events := sink.snapshot()
+	if len(events) != 4 || events[0].Kind != EventSessionStarted || events[1].Kind != EventSessionContext || events[2].Kind != EventProviderOutput || events[3].Kind != EventSessionEnded || events[1].Context == nil {
+		t.Fatalf("discovery changed lifecycle/event order: %+v", events)
+	}
+	for _, event := range events {
+		if event.contextDiscovery != nil {
+			t.Fatal("private filesystem discovery request reached persistence sink")
+		}
+	}
+}
+
 func TestFramerBoundsIncompleteData(t *testing.T) {
 	framer := NewFramer(32)
 	frames := framer.FeedOutput("s", []byte(strings.Repeat("x", 128)))
@@ -224,6 +331,21 @@ func TestFramerBoundsIncompleteData(t *testing.T) {
 	}
 	if got := framer.BufferedOutput("s"); len(got) > 32 {
 		t.Fatalf("buffer length=%d, want <=32", len(got))
+	}
+}
+
+func TestFramerKeepsTerminalStringControlsWhole(t *testing.T) {
+	for _, control := range []string{"\x1b]0;private?\x07", "\x1b]0;private?\x1b\\", "\x1bPprivate?\x1b\\"} {
+		framer := NewFramer(1024)
+		input := "before" + control + "after\n"
+		cut := strings.IndexByte(input, '?') + 1
+		if frames := framer.FeedOutput("session", []byte(input[:cut])); len(frames) != 0 {
+			t.Fatalf("incomplete control produced frames: %q", frames)
+		}
+		frames := framer.FeedOutput("session", []byte(input[cut:]))
+		if len(frames) != 1 || normalize(frames[0]) != "beforeafter" {
+			t.Fatalf("control payload split logical output: %q", frames)
+		}
 	}
 }
 

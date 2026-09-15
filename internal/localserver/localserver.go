@@ -715,7 +715,7 @@ func Start(cfg Config) (*Server, error) {
 			}
 			return nil, fmt.Errorf("configure telemetry spool: %w", err)
 		}
-		var eventSink telemetry.Sink = segmentSpool
+		var eventSink telemetry.Sink
 		destination := "local"
 		if telemetryCfg.CollectorTarget != "" {
 			var transportCredentials credentials.TransportCredentials
@@ -766,6 +766,11 @@ func Start(cfg Config) (*Server, error) {
 				func(err error) { logger.Warn("telemetry delivery", "error", err) },
 			)
 			destination = "grpc_collector"
+		} else {
+			eventSink = telemetry.NewLocalSpoolingSink(segmentSpool,
+				config.ParseDuration(telemetryCfg.FlushInterval, 10*time.Second),
+				func(err error) { logger.Warn("telemetry local flush", "error", err) },
+			)
 		}
 		kinds := make([]telemetry.EventKind, 0, len(telemetryCfg.Kinds))
 		for _, kind := range telemetryCfg.Kinds {

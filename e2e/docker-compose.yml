@@ -28,13 +28,17 @@ services:
       start_period: 30s
 
   telemetry-collector:
-    image: bridgectl-e2e
-    entrypoint: ["/usr/local/bin/bridgectl", "telemetry", "collect"]
+    # Exercise the production collector image and its non-root USER. Docker
+    # initializes a new named volume from the image's collector-owned /data.
+    image: bridgectl-telemetry-e2e
+    build:
+      context: ..
+      dockerfile: telemetry/Dockerfile
     command:
       - "--listen"
       - "0.0.0.0:9464"
       - "--spool-dir"
-      - "/telemetry/segments"
+      - "/data/segments"
       - "--kinds"
       - "all"
       - "--max-segment-bytes"
@@ -42,7 +46,7 @@ services:
       - "--max-disk-space"
       - "3MiB"
     volumes:
-      - telemetry:/telemetry
+      - telemetry:/data
     read_only: true
     tmpfs:
       - /tmp

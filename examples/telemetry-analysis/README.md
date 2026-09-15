@@ -10,6 +10,13 @@ This bounded example demonstrates three extension points without turning
 It does not call a model, authenticate users, persist derived analytics, or
 provide a UI. Those belong in an orchestrator or analytics application.
 
+Reconstructed turns use UTF-8-safe chunks of at most 64 KiB. `chunk_index` is
+zero for the first chunk of a logical turn, and `continues` marks a size-sealed
+chunk; chunks may share an event sequence. Metrics count logical turns, not
+continuation chunks. Sequence gaps end a turn rather than presenting missing
+evidence as continuous text. The LLM packet is limited to 4,000 Unicode
+characters and 20 evidence entries, and excludes thinking streams.
+
 Run it against an immutable collector segment directory:
 
 ```sh

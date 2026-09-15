@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -64,6 +65,8 @@ func TestGRPCCollectorRejectsInvalidOrFilteredSegments(t *testing.T) {
 	}{
 		{name: "unsafe ID", segment: &bridgev1.TelemetrySegment{Id: "../bad", Jsonl: eventJSONL(t, validCollectorEvent(EventQuestion))}, code: codes.InvalidArgument},
 		{name: "invalid JSONL", segment: &bridgev1.TelemetrySegment{Id: "bad-json", Jsonl: []byte("not-json\n")}, code: codes.InvalidArgument},
+		{name: "unterminated JSONL", segment: &bridgev1.TelemetrySegment{Id: "unterminated", Jsonl: bytes.TrimSuffix(eventJSONL(t, validCollectorEvent(EventQuestion)), []byte{'\n'})}, code: codes.InvalidArgument},
+		{name: "blank JSONL record", segment: &bridgev1.TelemetrySegment{Id: "blank-record", Jsonl: append(eventJSONL(t, validCollectorEvent(EventQuestion)), '\n')}, code: codes.InvalidArgument},
 		{name: "filtered kind", segment: &bridgev1.TelemetrySegment{Id: "wrong-kind", Jsonl: eventJSONL(t, validCollectorEvent(EventSessionStarted))}, code: codes.InvalidArgument},
 		{name: "too large", segment: &bridgev1.TelemetrySegment{Id: "too-large", Jsonl: eventJSONL(t, validCollectorEvent(EventQuestion))}, code: codes.ResourceExhausted},
 	}
@@ -158,6 +161,8 @@ func TestValidateCollectorEventRequiresCommonEnvelope(t *testing.T) {
 	badDirectory := *contextEvent.Context
 	badDirectory.WorkingDirectoryID = "raw/path"
 	badDirectoryContext.Context = &badDirectory
+	contextOnLifecycle := v2
+	contextOnLifecycle.Context = &SessionContext{OS: "linux", Arch: "amd64"}
 	invalid := []Event{
 		withEvent(valid, func(e *Event) { e.SchemaVersion = 0 }),
 		withEvent(valid, func(e *Event) { e.Timestamp = time.Time{} }),
@@ -168,6 +173,7 @@ func TestValidateCollectorEventRequiresCommonEnvelope(t *testing.T) {
 		withEvent(v2, func(e *Event) { e.ActorID = "user@example.com" }),
 		badLabelContext,
 		badDirectoryContext,
+		contextOnLifecycle,
 	}
 	for _, event := range invalid {
 		if err := validateCollectorEvent(event); err == nil {

@@ -229,3 +229,11 @@
   least two separately sealed batches.
 - Validation added: Quoted-JSON secret, OSC/DCS, concurrent correlation, and
   two-batch one-stream regressions plus the live bridge-to-volume Docker E2E.
+- Collector defense-in-depth reapplies redaction, so redaction must be
+  idempotent and quoted values must be consumed through their closing quote.
+  Add second-pass equality assertions and a real collector proof with a
+  whitespace-containing JSON secret.
+- Keep semantic-framer bounds separate from corpus-record bounds, expose any
+  exceptional omission explicitly, and exclude nested generated dependencies
+  from Docker contexts. On constrained hosts, build independent Go images
+  sequentially to reduce transient disk demand.

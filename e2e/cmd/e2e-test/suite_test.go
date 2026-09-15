@@ -189,6 +189,7 @@ func (s *BridgeSuite) TestTelemetry() {
 		Data:      []byte("yes\n"),
 	})
 	s.Require().NoError(err, "answer telemetry fixture")
+	s.Require().NoError(waitForLiteral(&log, `{"token":"telemetry private value"}`, 10*time.Second), "provider output should remain unchanged for the user")
 	s.Require().NoError(waitForLiteral(&log, "TELEMETRY_FIXTURE_ANSWER=yes", 10*time.Second), "fixture answer not received")
 
 	_, err = s.client.StopSession(ctx, &bridgev1.StopSessionRequest{SessionId: sessionID, Force: true})
@@ -196,9 +197,13 @@ func (s *BridgeSuite) TestTelemetry() {
 	time.Sleep(250 * time.Millisecond)
 	events, err := waitForTelemetryEvents(*suiteEvents, sessionID, 10*time.Second)
 	s.Require().NoError(err, "persist correlated telemetry events")
+	redactions := 0
 	for _, event := range events {
+		s.Require().NotContains(event.Text, "telemetry private value", "collector must not retain the raw JSON secret")
+		redactions += event.Redactions
 		s.T().Logf("telemetry event: kind=%s stream=%s sequence=%d class=%s decision=%s fingerprint=%s bytes=%d redactions=%d", event.Kind, event.Stream, event.Sequence, event.Class, event.Decision, event.Fingerprint, event.ByteCount, event.Redactions)
 	}
+	s.Require().Greater(redactions, 0, "collector should persist evidence of JSON secret redaction")
 
 	cancel()
 	select {

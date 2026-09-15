@@ -7,16 +7,23 @@ import (
 	"unicode/utf8"
 )
 
+// maxInteractionBufferSize is deliberately larger than the semantic framer's
+// bound so long valid full-capture records are retained. Exceptionally large
+// unterminated records become explicit omission events rather than unbounded
+// process memory.
+const maxInteractionBufferSize = 1 << 20
+
 // LiveCollector combines framing, analysis, and bounded asynchronous delivery.
 type LiveCollector struct {
-	analyzer *Analyzer
-	async    *AsyncSink
-	framer   *Framer
-	onError  func(error)
-	sourceID string
-	identity LiveIdentity
-	mu       sync.Mutex
-	pending  map[sessionIdentity]*interactionBuffer
+	analyzer    *Analyzer
+	async       *AsyncSink
+	framer      *Framer
+	onError     func(error)
+	sourceID    string
+	identity    LiveIdentity
+	mu          sync.Mutex
+	pending     map[sessionIdentity]*interactionBuffer
+	contextSink *sessionContextSink
 }
 
 type interactionBuffer struct {
@@ -41,16 +48,18 @@ func NewLiveCollectorForSource(sink Sink, queueSize int, includeRedactedText boo
 }
 
 func NewLiveCollectorWithIdentity(sink Sink, queueSize int, includeRedactedText bool, identity LiveIdentity, onError func(error), kinds ...EventKind) *LiveCollector {
-	async := NewAsyncSink(sink, queueSize, onError)
+	contextSink := &sessionContextSink{sink: sink, discover: DiscoverSessionContext}
+	async := NewAsyncSink(contextSink, queueSize, onError)
 	filtered := NewFilteredSink(async, kinds...)
 	return &LiveCollector{
-		analyzer: NewAnalyzer(filtered, nil, WithIncludeRedactedText(includeRedactedText)),
-		async:    async,
-		framer:   NewFramer(defaultFrameBufferSize),
-		onError:  onError,
-		sourceID: identity.SourceID,
-		identity: identity,
-		pending:  make(map[sessionIdentity]*interactionBuffer),
+		analyzer:    NewAnalyzer(filtered, nil, WithIncludeRedactedText(includeRedactedText)),
+		async:       async,
+		framer:      NewFramer(defaultFrameBufferSize),
+		onError:     onError,
+		sourceID:    identity.SourceID,
+		identity:    identity,
+		pending:     make(map[sessionIdentity]*interactionBuffer),
+		contextSink: contextSink,
 	}
 }
 
@@ -73,8 +82,14 @@ func (c *LiveCollector) SessionStarted(session Session) {
 	delete(c.pending, sessionKey(session))
 	c.framer.Reset(frameKey(session))
 	c.analyzer.ObserveSessionStart(session)
-	context := DiscoverSessionContext(session.RepoPath, session.ActorID, c.identity.SourceLabel, c.identity.ContextKey)
-	c.analyzer.ObserveSessionContext(session, context)
+	c.analyzer.record(Event{
+		Timestamp: c.analyzer.now().UTC(), SourceID: session.SourceID, ActorID: session.ActorID,
+		SessionID: session.SessionID, ProjectID: session.ProjectID, Provider: session.Provider,
+		Kind: EventSessionContext, contextDiscovery: &sessionContextDiscovery{
+			repoPath: session.RepoPath, actorID: session.ActorID,
+			sourceLabel: c.identity.SourceLabel, key: c.identity.ContextKey,
+		},
+	})
 }
 
 func (c *LiveCollector) ObserveOutputChunk(session Session, data []byte) {
@@ -142,20 +157,44 @@ func (c *LiveCollector) observeInteraction(session Session, direction Direction,
 		combined = append(combined[:0], data...)
 	}
 	pending.data = combined
-	if !validOrIncompleteUTF8(pending.data) {
-		c.flushInteraction(session, pending)
-		delete(c.pending, key)
-		return
+	for {
+		boundary := nextInteractionBoundary(pending.data)
+		if boundary == 0 {
+			break
+		}
+		if boundary > maxInteractionBufferSize {
+			c.analyzer.ObserveOmittedInteraction(session, direction, interactionKind(direction), stream, pending.data[:boundary], OmittedBufferLimit)
+		} else {
+			c.emitInteraction(session, direction, stream, pending.data[:boundary])
+		}
+		pending.data = append([]byte(nil), pending.data[boundary:]...)
 	}
-	if len(pending.data) > defaultFrameBufferSize {
+	if len(pending.data) > maxInteractionBufferSize {
 		c.analyzer.ObserveOmittedInteraction(session, direction, interactionKind(direction), stream, pending.data, OmittedBufferLimit)
 		pending.data = nil
 		delete(c.pending, key)
 		return
 	}
-	if utf8.Valid(pending.data) && isRecordBoundary(pending.data[len(pending.data)-1]) {
-		c.flushInteraction(session, pending)
+}
+
+// A malformed record is omitted as one privacy unit, but later valid records
+// remain recoverable. Newlines inside OSC/DCS payloads are not record boundaries.
+func nextInteractionBoundary(data []byte) int {
+	buffer := string(data)
+	for i := 0; i < len(buffer); i++ {
+		if buffer[i] == '\x1b' {
+			end, complete := ansiSequenceEnd(buffer, i)
+			if !complete {
+				return 0
+			}
+			i = end - 1
+			continue
+		}
+		if isRecordBoundary(buffer[i]) {
+			return i + 1
+		}
 	}
+	return 0
 }
 
 func (c *LiveCollector) flushInteraction(session Session, pending *interactionBuffer) {

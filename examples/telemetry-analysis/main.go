@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/orchael/bridgectl/internal/telemetry"
 )
@@ -93,7 +94,7 @@ func analyze(path string) (Dataset, error) {
 	for _, key := range keys {
 		view := sessions[key]
 		for _, turn := range view.Turns {
-			if turn.Stream == telemetry.StreamThinking {
+			if turn.Stream == telemetry.StreamThinking || turn.ChunkIndex > 0 {
 				continue
 			}
 			if turn.Direction == telemetry.DirectionAgent {
@@ -119,7 +120,7 @@ func deterministicFindings(dataset Dataset) []Finding {
 	for _, session := range dataset.Sessions {
 		humanTurns := 0
 		for _, turn := range session.Turns {
-			if turn.Direction == telemetry.DirectionHuman {
+			if turn.Direction == telemetry.DirectionHuman && turn.ChunkIndex == 0 {
 				humanTurns++
 			}
 		}
@@ -143,11 +144,13 @@ func buildLLMPacket(session SessionView) LLMPacket {
 			packet.Truncated = true
 			break
 		}
-		if len(turn.Text) > remaining {
-			turn.Text = turn.Text[:remaining]
+		turnChars := utf8.RuneCountInString(turn.Text)
+		if turnChars > remaining {
+			turn.Text = string([]rune(turn.Text)[:remaining])
+			turnChars = remaining
 			packet.Truncated = true
 		}
-		chars += len(turn.Text)
+		chars += turnChars
 		packet.Turns = append(packet.Turns, turn)
 		if packet.Truncated {
 			break

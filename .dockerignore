@@ -5,5 +5,8 @@ certs
 coverage.out
 coverage.html
 node_modules
+**/node_modules
+docs/build
+docs/.docusaurus
 e2e/.env
 .env

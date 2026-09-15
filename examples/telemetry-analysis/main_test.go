@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/orchael/bridgectl/internal/telemetry"
 )
@@ -54,5 +55,33 @@ func TestAnalysisExampleMetricsAPIAndBoundedLLMPacket(t *testing.T) {
 	routes(dataset).ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"sessions":1`) {
 		t.Fatalf("summary response=%d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestBuildLLMPacketTruncatesByUnicodeCharacters(t *testing.T) {
+	packet := buildLLMPacket(SessionView{Turns: []telemetry.Turn{{Text: strings.Repeat("🙂", maxPacketChars+10)}}})
+	if len(packet.Turns) != 1 || !packet.Truncated || !utf8.ValidString(packet.Turns[0].Text) || utf8.RuneCountInString(packet.Turns[0].Text) != maxPacketChars {
+		t.Fatalf("packet did not preserve a %d-character UTF-8 boundary: %+v", maxPacketChars, packet)
+	}
+}
+
+func TestAnalysisExampleCountsContinuationChunksAsOneTurn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "segment.jsonl")
+	event := telemetry.Event{SchemaVersion: 2, Timestamp: time.Now(), SourceID: "bridge-a", SessionID: "large", Sequence: 1,
+		Kind: telemetry.EventProviderOutput, Direction: telemetry.DirectionAgent, Stream: telemetry.StreamOutput,
+		Text: strings.Repeat("x", telemetry.MaxTurnTextBytes+1), ByteCount: telemetry.MaxTurnTextBytes + 1}
+	data, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataset, err := analyze(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dataset.Summary.AgentTurns != 1 || len(dataset.Sessions[0].Turns) != 2 {
+		t.Fatalf("continuation chunks inflated logical turns: %+v", dataset.Summary)
 	}
 }
