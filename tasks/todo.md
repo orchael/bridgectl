@@ -857,7 +857,7 @@ TEL-102, and TEL-111 contracts. No new public schema or operator choice.
   across successful delivery passes and reset it on transport/protocol errors.
 - [x] Run focused race tests, full tests, maintained coverage, lint, build, and
   diff checks.
-- [ ] Push the review fixes, reply to and resolve every Copilot thread, and
+- [x] Push the review fixes, reply to and resolve every Copilot thread, and
   monitor the current-head CI and bounded third review cycle.
 - [x] Add failing current-head review regressions for misplaced context,
   unterminated JSONL, 16-KiB-plus interaction capture, Unicode packet bounds,
@@ -869,7 +869,7 @@ TEL-102, and TEL-111 contracts. No new public schema or operator choice.
   strengthen the live fixture to verify unchanged user-visible output and
   redacted collector-volume text. Exclude generated nested dependencies/docs
   output from Docker build contexts.
-- [ ] Re-run all gates after the current-head fixes and push them without
+- [x] Re-run all gates after the current-head fixes and push them without
   requesting a fourth Copilot cycle.
 - [x] Triage third-cycle suppressed findings: fix local timed sealing, valid S3
   envelopes/non-root E2E, lifecycle/gap/bounded analysis, linked-worktree Git
@@ -904,5 +904,13 @@ Evidence:
   unbounded turn text, linked-worktree identity, S3 envelope validation, slow
   context discovery, terminal-string framing, and malformed/valid record
   recovery. The consolidated telemetry/example/S3-fixture race suites pass.
+- Final strengthened live E2E passed on commit `366028e`: the production
+  non-root collector persisted 14 ordered events, including session context,
+  both interaction directions, one quoted-JSON secret redaction, and final
+  `session_ended`. The user transcript retained the original JSON output.
+  The harness removed only disposable `e2e` containers and volumes.
+- Current-head CI for `366028e` passed all eight checks. All 17 published
+  Copilot threads are resolved; third-cycle suppressed findings are audited
+  on the PR. No fourth review cycle was requested.
 
 ---
