@@ -3,6 +3,7 @@ set -euo pipefail
 
 export GOCACHE="${GOCACHE:-/tmp/go-build}"
 export GOMODCACHE="${GOMODCACHE:-/tmp/go-mod}"
+export GOFLAGS="${GOFLAGS:-} -buildvcs=false"
 
 mapfile -t packages < <(go list ./... | grep -v '/node_modules/')
 

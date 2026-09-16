@@ -1,5 +1,6 @@
 services:
   bridge:
+    image: bridgectl-e2e
     build:
       context: ..
       dockerfile: Dockerfile
@@ -14,13 +15,50 @@ services:
     volumes:
       - certs:/app/certs
       - repos:/tmp/bridgectl
+      - bridge-state:/home/bridge/.config/bridgectl
       - ./bridge-e2e.yaml:/app/config/bridge-e2e.yaml:ro
+    depends_on:
+      telemetry-collector:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/9445'"]
       interval: 3s
       timeout: 2s
       retries: 30
       start_period: 30s
+
+  telemetry-collector:
+    # Exercise the production collector image and its non-root USER. Docker
+    # initializes a new named volume from the image's collector-owned /data.
+    image: bridgectl-telemetry-e2e
+    build:
+      context: ..
+      dockerfile: telemetry/Dockerfile
+    command:
+      - "--listen"
+      - "0.0.0.0:9464"
+      - "--spool-dir"
+      - "/data/segments"
+      - "--kinds"
+      - "all"
+      - "--max-segment-bytes"
+      - "1048576"
+      - "--max-disk-space"
+      - "3MiB"
+    volumes:
+      - telemetry:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/bridgectl", "telemetry", "health", "--target", "127.0.0.1:9464", "--insecure"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
 
   test-client:
     build:
@@ -38,9 +76,12 @@ services:
     volumes:
       - certs:/certs:ro
       - repos:/tmp/bridgectl
+      - telemetry:/telemetry:ro
       - test-results:/results
 
 volumes:
+  bridge-state:
   certs:
   repos:
+  telemetry:
   test-results:

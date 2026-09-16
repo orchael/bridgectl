@@ -34,17 +34,21 @@ E2E_TEST_TIMEOUT="${E2E_TEST_TIMEOUT:-300s}"
 # E2E_ONLY=claude  → -test.run TestBridgeSuite/TestClaude
 # E2E_ONLY=all / unset → run all suite tests
 run_filter=""
+gotestsum_format="short-verbose"
 if [ -n "${E2E_ONLY:-}" ] && [ "${E2E_ONLY}" != "all" ]; then
   # Capitalise first letter to match Go test method names (claude → Claude, echo → Echo)
   provider="$(echo "${E2E_ONLY}" | sed 's/\(.\)/\u\1/')"
   run_filter="-test.run TestBridgeSuite/Test${provider}"
+fi
+if [ "${E2E_ONLY:-}" = "telemetry" ]; then
+  gotestsum_format="standard-verbose"
 fi
 
 RESULTS_DIR="/results"
 mkdir -p "$RESULTS_DIR"
 
 gotestsum \
-  --format short-verbose \
+  --format "$gotestsum_format" \
   --junitfile "$RESULTS_DIR/e2e-tests.xml" \
   --raw-command -- test2json -t -p e2e e2e-suite \
   -test.v \
@@ -57,6 +61,7 @@ gotestsum \
   -bridge.jwt-key "$CERT_DIR/jwt-signing.key" \
   -bridge.jwt-issuer e2e \
   -bridge.repo /tmp/bridgectl \
+	-bridge.telemetry-events /telemetry/segments \
   -bridge.timeout "$E2E_TEST_TIMEOUT"
 
 exit_code=$?

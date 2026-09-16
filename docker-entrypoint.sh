@@ -41,7 +41,7 @@ mkdir -p /run/bridge
 chown bridge:bridge /run/bridge
 
 # Ensure bridge user can read/write mounted workspace volumes such as /repos.
-for _vol in /repos /workspace; do
+for _vol in /repos /workspace /telemetry; do
   if [ -d "$_vol" ]; then
     chown bridge:bridge "$_vol"
   fi

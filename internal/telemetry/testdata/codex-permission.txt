@@ -1,0 +1,1 @@
+\x1b[1mDo you want me to run /tmp/build-42?\x1b[0m

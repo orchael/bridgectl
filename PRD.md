@@ -883,3 +883,157 @@ Changes required:
 - CRL/OCSP for real-time certificate revocation
 - Multi-bridge clustering and session migration
 - Policy-as-code (OPA/Rego) for authorization decisions
+
+---
+
+## 17. Agent Telemetry Foundation
+
+bridgectl owns a provider-neutral telemetry foundation for measuring questions
+that interrupt agent sessions. Live session wiring, operator reporting, shared
+aggregation, and remote storage are separate follow-up work tracked by issues
+#231 and #232.
+
+### 17.1 Acceptance Criteria
+
+- **TEL-001 — Correlation:** A complete agent question observation is classified
+  as permission, confirmation, choice, clarification, or unknown and is
+  correlated only with the next complete human response for the same session.
+- **TEL-002 — Stable aggregation:** Equivalent questions from the same provider
+  have a stable fingerprint after ANSI removal, redaction, and canonicalization;
+  volatile path and numeric values do not split aggregate statistics.
+- **TEL-003 — Privacy:** Event text is redacted before it reaches any sink or is
+  retained as an aggregate example. Common credential assignments and bearer
+  authorization values must not remain in persisted JSON or feedback output.
+- **TEL-004 — Local persistence:** The local JSONL sink writes one valid event
+  per line, creates parent directories with mode `0700`, and enforces mode
+  `0600` on both new and existing event files.
+- **TEL-005 — Export contract:** Feedback uses schema version 1, contains only
+  aggregate question statistics, and is deterministically ordered by frequency
+  and fingerprint.
+- **TEL-006 — Failure isolation:** Analyzer callers do not receive sink errors.
+  The live integration in #231 must additionally move sink I/O off the provider
+  I/O path and define flush/shutdown behavior before telemetry is enabled.
+
+The analyzer API consumes complete logical observations. Provider-specific PTY
+stream framing and redraw deduplication belong to the live integration in #231;
+raw PTY chunks must not be passed through as if they were complete questions or
+answers.
+
+### 17.2 Live Question Telemetry (#231)
+
+- **TEL-101 — Configuration:** Telemetry is disabled by default. When enabled,
+  configuration controls the local spool directory, per-segment and total-disk bounds,
+  queue size, inclusion of redacted example text, and default rolling report
+  window. Paths support normal environment/home expansion. An optional gRPC
+  collector target selects acknowledged remote delivery; plaintext transport
+  requires an explicit private-network opt-in and TLS supports a custom CA and
+  server name.
+- **TEL-102 — Live capture:** Every provider session records lifecycle events,
+  frames arbitrary output/input chunks into logical observations, deduplicates
+  terminal redraws, and correlates only writer-authorized human input.
+- **TEL-103 — Session isolation:** Telemetry errors and a full/slow sink cannot
+  fail or delay provider output, input, session creation, or session shutdown.
+  Queued events are flushed inside a bounded shutdown deadline.
+- **TEL-104 — Reporting:** `bridgectl telemetry report` reads local JSONL and
+  reports the selected rolling window, session and agent-hour question rates,
+  accepted/rejected/changed/unknown rates, median answer latency, and top stable
+  fingerprints.
+- **TEL-105 — Export:** `bridgectl telemetry export --format json` emits the
+  schema-version-1 aggregate defined by the telemetry foundation. It contains
+  no unredacted transcript or credential values.
+- **TEL-106 — Provider evidence:** Claude and Codex prompt fixtures cover
+  provider-shaped permission/question output, including fragmented ANSI output.
+- **TEL-107 — Docker proof:** A Docker Compose e2e starts the real bridge and a
+  separate collector, runs a deterministic provider question/answer session,
+  and verifies the collector-owned volume from a client container.
+- **TEL-108 — Event filtering:** Operators may configure an allow-list of
+  telemetry event kinds. Supported values are `session_started`, `question`,
+  `answer`, and `session_ended`; unknown, duplicate, or blank entries fail fast.
+  Filtering happens before persistence or network delivery.
+- **TEL-109 — Collector:** An optional gRPC collector accepts bounded JSONL
+  segments, exposes standard gRPC health, and durably writes private segments
+  to a mounted volume before acknowledging them. The bridge delivers through
+  its bounded asynchronous capture queue and durable spool, so collector
+  latency or failure cannot block session I/O. The standalone Compose
+  deployment publishes the collector only on loopback.
+- **TEL-110 — Bounded storage:** The shared JSONL spool seals immutable segments
+  before a configured per-segment byte limit and evicts the oldest immutable
+  segments when total spool usage exceeds a configured disk-byte budget.
+  Reports and exports read retained segments oldest-first. Both bridge-local
+  and collector-local spools default to a 1 GB disk budget without requiring
+  an external log-management service. The bridge defaults to a 10-second flush
+  interval. Configuration uses the human-readable `max_disk_space` setting and
+  never derives capacity from a segment-count limit.
+- **TEL-111 — Durable streaming:** Remote delivery uses a long-lived
+  bidirectional gRPC stream. The bridge first stores redacted events in a
+  bounded segmented JSONL outbox, retries unacknowledged segments with stable
+  identifiers, and removes a segment only after the collector acknowledges a
+  durable write. Collector outages never block provider session I/O; when the
+  outbox limit is exhausted, the oldest segment is evicted with an observable
+  warning.
+- **TEL-112 — Shared collector spool:** The collector durably accepts each
+  segment into the same bounded segmented JSONL store used for volume
+  retention. Duplicate segment identifiers are idempotently acknowledged. In
+  S3 mode, completed segments remain in the collector spool until an immutable
+  object upload succeeds; S3 outages therefore do not move backpressure onto
+  bridge sessions.
+- **TEL-113 — S3 proof:** The collector can upload bounded JSONL segments to an
+  operator-created S3 bucket using the standard AWS credential chain, region,
+  and an optional key prefix. An opt-in end-to-end test creates a unique prefix,
+  streams question and answer events through the real gRPC collector, verifies
+  the resulting object through S3, and deletes only objects created under that
+  prefix. The test never creates or deletes the bucket.
+- **TEL-114 — Full interaction corpus:** Operators may explicitly retain the
+  complete bidirectional interaction stream with `provider_output` and
+  `user_input`, or select every supported kind with `all`. The default remains
+  lifecycle plus derived question/answer events so upgrades do not silently
+  begin retaining transcripts. Full-stream events preserve source chunk order,
+  direction, provider stream type, byte counts, and per-session monotonic
+  sequence numbers. Provider output includes both normal and thinking streams;
+  human input is observed only after active-writer authorization. Content is
+  stripped of terminal controls and redacted before it reaches the async queue,
+  durable bridge spool, gRPC transport, collector volume, or S3. Invalid UTF-8
+  is represented only by metadata rather than forwarded as opaque content.
+  Full-capture interaction records have a separate 1-MiB safety bound from the
+  semantic question framer; oversized records carry explicit omission metadata.
+  Malformed records do not cause later valid records to be discarded.
+  Derived question/answer events remain available alongside the stream so
+  analytics and corpus reconstruction do not compete for one representation.
+- **TEL-115 — Composite session identity:** Every newly captured event carries
+  a stable bridge `source_id` in addition to its existing `session_id`.
+  Correlation, framing, sequencing, and reporting key sessions by the composite
+  `(source_id, session_id)` identity so independent bridge instances cannot
+  conflate equal session IDs. An explicit `telemetry.source_id` is supported;
+  when omitted, bridgectl generates a UUID once and persists it with mode
+  `0600` under the bridge telemetry state directory. Existing schema-version-1
+  events without `source_id` remain readable as legacy-source events.
+- **TEL-116 — Versioned session context:** Newly captured telemetry uses schema
+  version 2 and emits one `session_context` record per session. The record may
+  include an explicit opaque actor ID and source label, OS/architecture, a
+  stable private machine ID, privacy-safe working-directory ID, and best-effort
+  Git branch, commit, and keyed repository metadata.
+  Raw absolute paths, repository URLs, remote hosts, credentials, hostnames,
+  Git author identities, and environment values are never persisted as context. Version-1
+  records remain readable and valid only under their legacy contract.
+- **TEL-117 — Private longitudinal identifiers:** Repository and working
+  directory identifiers are HMAC-SHA256 values generated with a private
+  32-byte identity key. The key is loaded from an operator-selected file or
+  generated once beneath the telemetry state directory with mode `0600`.
+  Canonical Git remotes have credentials, query strings, and fragments removed
+  before hashing. Explicit actor IDs and source labels use the bounded source-ID
+  character contract and remain optional pending authenticated attribution.
+- **TEL-118 — Incremental interaction analysis:** A provider-neutral analyzer
+  consumes events incrementally, deduplicates and orders them by composite
+  session identity and sequence, coalesces adjacent compatible stream events
+  into turns, and reports duplicates, gaps, out-of-order data, legacy records,
+  omitted content, and redactions. Thinking streams remain distinct from normal
+  output and are excluded from example LLM evidence by default. Sequence gaps
+  end contiguous turns; new lifecycle starts reset sequence tracking for reused
+  identities. Turn text is emitted in UTF-8-safe chunks of at most 64 KiB with
+  explicit continuation metadata, while metrics count logical turns.
+- **TEL-119 — Analysis integration examples:** The repository contains a
+  non-production example that derives deterministic collaboration metrics and
+  evidence-backed findings, exposes read-only HTTP endpoints, and constructs a
+  bounded redacted packet for an optional external model without making a model
+  API call. Production authentication, analysis orchestration, UI, and warehouse
+  storage remain outside bridgectl.

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/orchael/bridgectl/internal/telemetry"
 )
 
 // ansiEscape matches ANSI/VT100 escape sequences (CSI sequences and 2-char
@@ -62,6 +63,18 @@ type observerEntry struct {
 // SupervisorOption configures optional Supervisor behaviour.
 type SupervisorOption func(*Supervisor)
 
+type TelemetryObserver interface {
+	SessionStarted(telemetry.Session)
+	ObserveProviderChunk(telemetry.Session, telemetry.StreamType, []byte)
+	ObserveInputChunk(telemetry.Session, []byte)
+	SessionEnded(telemetry.Session)
+	Close(context.Context) error
+}
+
+func WithTelemetry(observer TelemetryObserver) SupervisorOption {
+	return func(s *Supervisor) { s.telemetry = observer }
+}
+
 // WithStore attaches a SessionStore so that session metadata is persisted on
 // every terminal state transition and reloaded at startup via LoadHistory.
 func WithStore(store SessionStore) SupervisorOption {
@@ -84,20 +97,23 @@ type Supervisor struct {
 	idleTimeout     time.Duration
 	cleanupInterval time.Duration
 
-	mu           sync.RWMutex
-	sessions     map[string]*managedSession
-	done         chan struct{}
-	closeOnce    sync.Once
-	shuttingDown bool
+	mu                 sync.RWMutex
+	sessions           map[string]*managedSession
+	done               chan struct{}
+	closeOnce          sync.Once
+	telemetryCloseOnce sync.Once
+	shuttingDown       bool
 
 	store     SessionStore
 	repoSetup RepoSetupRunner
 	histMu    sync.RWMutex
 	history   map[string]SessionInfo
+	telemetry TelemetryObserver
 }
 
 type managedSession struct {
 	mu           sync.Mutex
+	telemetryMu  sync.Mutex
 	info         SessionInfo
 	provider     Provider
 	cmd          *exec.Cmd
@@ -110,6 +126,7 @@ type managedSession struct {
 	lastActivity time.Time
 	forceStop    bool
 	recovered    bool
+	readerDone   chan struct{}
 
 	stripANSI bool // strip ANSI escape codes from PTY output before forwarding
 
@@ -483,6 +500,7 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 		cancel:       cancel,
 		stopGrace:    provider.StopGrace(),
 		lastActivity: time.Now(),
+		readerDone:   make(chan struct{}),
 	}
 
 	if useStreamJSON {
@@ -535,6 +553,7 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 		}
 		s.sessions[cfg.SessionID] = ms
 		s.mu.Unlock()
+		s.observeSessionStarted(ms)
 		go s.readLoopStreamJSON(ms, stdoutPipe)
 		go s.waitLoop(ms)
 	} else {
@@ -564,6 +583,7 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 		}
 		s.sessions[cfg.SessionID] = ms
 		s.mu.Unlock()
+		s.observeSessionStarted(ms)
 		go s.readLoop(ms)
 		go s.waitLoop(ms)
 	}
@@ -574,15 +594,13 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 }
 
 func (s *Supervisor) readLoop(ms *managedSession) {
+	defer signalReaderDone(ms)
 	defer s.closeLive(ms)
 	buf := make([]byte, 8192)
 	for {
 		n, err := ms.ptmx.Read(buf)
 		if n > 0 {
 			chunk := buf[:n]
-			if ms.stripANSI {
-				chunk = ansiEscape.ReplaceAll(chunk, nil)
-			}
 			slog.Debug("provider output", "session_id", ms.info.SessionID, "provider", ms.info.Provider, "bytes", len(chunk))
 			s.appendChunk(ms, chunk, ChunkTypeOutput)
 		}
@@ -629,6 +647,7 @@ type claudeStreamEvent struct {
 // readLoopStreamJSON reads newline-delimited JSON from a stream-JSON provider's
 // stdout, parses thinking and text deltas, and appends typed OutputChunks.
 func (s *Supervisor) readLoopStreamJSON(ms *managedSession, r io.ReadCloser) {
+	defer signalReaderDone(ms)
 	defer func() { _ = r.Close() }()
 	defer s.closeLive(ms)
 	reader := bufio.NewReader(r)
@@ -682,6 +701,12 @@ func (s *Supervisor) readLoopStreamJSON(ms *managedSession, r io.ReadCloser) {
 	}
 }
 
+func signalReaderDone(ms *managedSession) {
+	if ms.readerDone != nil {
+		close(ms.readerDone)
+	}
+}
+
 // closeLive marks the session output as exhausted and closes every observer
 // channel. Must only be called from readLoop or readLoopStreamJSON — after all
 // sends to observer channels are complete.
@@ -705,7 +730,19 @@ func (s *Supervisor) closeLive(ms *managedSession) {
 // Sends are done under ms.mu with a non-blocking select so that closeLive
 // (which also holds ms.mu when closing channels) cannot race.
 func (s *Supervisor) appendChunk(ms *managedSession, payload []byte, ctype ChunkType) {
-	chunk := ms.buf.AppendTyped(payload, ctype)
+	if s.telemetry != nil {
+		switch ctype {
+		case ChunkTypeOutput:
+			s.telemetry.ObserveProviderChunk(telemetrySession(ms), telemetry.StreamOutput, bytes.Clone(payload))
+		case ChunkTypeThinking:
+			s.telemetry.ObserveProviderChunk(telemetrySession(ms), telemetry.StreamThinking, bytes.Clone(payload))
+		}
+	}
+	displayPayload := payload
+	if ctype == ChunkTypeOutput && ms.stripANSI {
+		displayPayload = ansiEscape.ReplaceAll(payload, nil)
+	}
+	chunk := ms.buf.AppendTyped(displayPayload, ctype)
 	s.persistChunk(ms.info.SessionID, chunk)
 	ms.mu.Lock()
 	ms.info.OldestSeq = ms.buf.OldestSeq()
@@ -770,6 +807,9 @@ func (s *Supervisor) NotifyWriterReleased(sessionID, releasingClientID string) {
 
 func (s *Supervisor) waitLoop(ms *managedSession) {
 	err := ms.cmd.Wait()
+	if ms.readerDone != nil {
+		<-ms.readerDone
+	}
 
 	exitCode := 0
 	if err != nil {
@@ -797,8 +837,14 @@ func (s *Supervisor) waitLoop(ms *managedSession) {
 		ms.info.State = SessionStateStopped
 		slog.Info("session process exited", "session_id", ms.info.SessionID, "provider", ms.info.Provider, "exit_code", exitCode)
 	}
+	tsession := telemetry.Session{SessionID: ms.info.SessionID, ProjectID: ms.info.ProjectID, Provider: ms.info.Provider, RepoPath: ms.info.RepoPath}
+	ms.telemetryMu.Lock()
 	ms.cancel()
 	ms.mu.Unlock()
+	if s.telemetry != nil {
+		s.telemetry.SessionEnded(tsession)
+	}
+	ms.telemetryMu.Unlock()
 
 	s.persistSession(ms.snapshotInfo())
 }
@@ -909,6 +955,10 @@ func (s *Supervisor) WriteInput(sessionID, clientID string, data []byte) (int, e
 		ms.mu.Unlock()
 		return 0, ErrSessionRecoveryUnavailable
 	}
+	if ms.info.State != SessionStateRunning && ms.info.State != SessionStateAttached {
+		ms.mu.Unlock()
+		return 0, ErrSessionNotRunning
+	}
 	if ms.info.ActiveWriterClientID == "" {
 		ms.mu.Unlock()
 		return 0, ErrClientNotAttached
@@ -921,8 +971,14 @@ func (s *Supervisor) WriteInput(sessionID, clientID string, data []byte) (int, e
 	streamJSON := ms.streamJSON
 	stdin := ms.stdin
 	ptmx := ms.ptmx
+	tsession := telemetry.Session{SessionID: ms.info.SessionID, ProjectID: ms.info.ProjectID, Provider: ms.info.Provider, RepoPath: ms.info.RepoPath}
+	ms.telemetryMu.Lock()
 	ms.mu.Unlock()
-	slog.Debug("provider input", "session_id", sessionID, "provider", ms.info.Provider, "bytes", len(data), "data", string(data))
+	if s.telemetry != nil {
+		s.telemetry.ObserveInputChunk(tsession, bytes.Clone(data))
+	}
+	ms.telemetryMu.Unlock()
+	slog.Debug("provider input", "session_id", sessionID, "provider", ms.info.Provider, "bytes", len(data))
 	if streamJSON {
 		n, err := stdin.Write(data)
 		return n, err
@@ -1176,8 +1232,12 @@ func (s *Supervisor) Shutdown(ctx context.Context) error {
 	if err := s.waitForAllSessions(ctx); err != nil {
 		s.stopSessions(s.nonTerminalSessionIDs(), true)
 		s.waitBestEffort(2 * time.Second)
+		s.closeTelemetryBestEffort()
 		return err
 	}
+	flushCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	s.closeTelemetry(flushCtx)
 	return nil
 }
 
@@ -1243,6 +1303,39 @@ func (s *Supervisor) Close() {
 	for _, id := range ids {
 		_ = s.Stop(id, true)
 	}
+	s.waitBestEffort(2 * time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	s.closeTelemetry(ctx)
+}
+
+func (s *Supervisor) observeSessionStarted(ms *managedSession) {
+	if s.telemetry != nil {
+		s.telemetry.SessionStarted(telemetrySession(ms))
+	}
+}
+
+func telemetrySession(ms *managedSession) telemetry.Session {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	return telemetry.Session{SessionID: ms.info.SessionID, ProjectID: ms.info.ProjectID, Provider: ms.info.Provider, RepoPath: ms.info.RepoPath}
+}
+
+func (s *Supervisor) closeTelemetry(ctx context.Context) {
+	if s.telemetry == nil {
+		return
+	}
+	s.telemetryCloseOnce.Do(func() {
+		if err := s.telemetry.Close(ctx); err != nil {
+			slog.Warn("telemetry flush failed", "error", err)
+		}
+	})
+}
+
+func (s *Supervisor) closeTelemetryBestEffort() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	s.closeTelemetry(ctx)
 }
 
 // ClaimWriterResult is returned by ClaimWriter.

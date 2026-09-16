@@ -41,6 +41,13 @@ service BridgeService {
   rpc EnrollClient(EnrollClientRequest) returns (EnrollClientResponse);
 }
 
+// TelemetryCollectorService durably transfers immutable, bounded JSONL
+// segments. It is intentionally separate from BridgeService so the collector
+// can run as an independently secured and scaled process.
+service TelemetryCollectorService {
+  rpc StreamSegments(stream TelemetrySegment) returns (stream TelemetryAck);
+}
+
 enum SessionStatus {
   SESSION_STATUS_UNSPECIFIED = 0;
   SESSION_STATUS_STARTING = 1;
@@ -287,4 +294,17 @@ message EnrollClientResponse {
   string identity = 4;
   // Certificate expiry.
   google.protobuf.Timestamp expires = 5;
+}
+
+message TelemetrySegment {
+  // id is stable across retries and becomes the collector/S3 object identity.
+  string id = 1;
+  // jsonl contains normalized, redacted schema-v1 or schema-v2 telemetry events.
+  bytes jsonl = 2;
+}
+
+message TelemetryAck {
+  string id = 1;
+  // stored is true for a new segment and false for an idempotent replay.
+  bool stored = 2;
 }

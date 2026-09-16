@@ -1,0 +1,44 @@
+services:
+  telemetry-collector:
+    build:
+      context: ..
+      dockerfile: telemetry/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9464:9464"
+    environment:
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+    command:
+      - "--listen"
+      - "0.0.0.0:9464"
+      - "--spool-dir"
+      - "/data/segments"
+      - "--max-segment-bytes"
+      - "${TELEMETRY_MAX_SEGMENT_BYTES:-10485760}"
+      - "--max-disk-space"
+      - "${TELEMETRY_MAX_DISK_SPACE:-1GB}"
+      - "--s3-bucket"
+      - "${TELEMETRY_S3_BUCKET:-}"
+      - "--s3-prefix"
+      - "${TELEMETRY_S3_PREFIX:-bridgectl/telemetry}"
+    volumes:
+      - telemetry-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/bridgectl", "telemetry", "health", "--target", "127.0.0.1:9464", "--insecure"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  telemetry-data:

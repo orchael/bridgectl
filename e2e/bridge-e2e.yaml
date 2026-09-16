@@ -31,6 +31,21 @@ rate_limits:
   send_input_per_session_rps: 20
   send_input_per_session_burst: 50
 
+telemetry:
+  enabled: true
+  source_id: "e2e-bridge"
+  collector_target: "telemetry-collector:9464"
+  collector_insecure: true
+  spool_dir: "/home/bridge/.config/bridgectl/telemetry/outbox"
+  kinds: ["all"]
+  queue_size: 128
+  rolling_window: "24h"
+  flush_interval: "100ms"
+  retry_interval: "100ms"
+  max_segment_bytes: 1048576
+  max_disk_space: 8MiB
+  include_redacted_text: true
+
 providers:
   claude:
     binary: "./node_modules/.bin/claude"
@@ -68,6 +83,12 @@ providers:
     binary: "cat"
     args: []
     startup_timeout: "5s"
+  telemetry-fixture:
+    binary: "/app/scripts/telemetry_fixture.sh"
+    args: []
+    startup_timeout: "5s"
+    startup_probe: "output"
+    validate_startup: false
 
 allowed_paths:
   - "/tmp"

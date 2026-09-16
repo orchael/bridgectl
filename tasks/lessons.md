@@ -1,5 +1,117 @@
 # Lessons
 
+## 2026-09-14 Secret Tests Must Not Embed Provider-Shaped Literals
+- Incident/bug: GitHub push protection rejected a telemetry test commit because
+  a synthetic AWS access-key fixture matched the real credential shape.
+- Root cause pattern: A redaction test needs the runtime value to match, but a
+  source-code literal is also scanned as though it could be a live secret.
+- Preventative rule: Assemble provider-shaped redaction fixtures from benign
+  source fragments at test runtime, and never bypass push protection for a test
+  value.
+- Validation added: The same AWS redaction branch remains covered while no
+  AWS-shaped access-key literal exists in the committed source.
+
+## 2026-09-14 Telemetry Reliability Requires Coupled Completion Boundaries
+- Incident/bug: Process exit could precede the output reader's final chunk,
+  flushing and delivery used independent timers, and a connected collector
+  could withhold acknowledgements indefinitely.
+- Root cause pattern: Related lifecycle signals were treated as independent
+  events even though ordering between them defines completeness and latency.
+- Preventative rule: End sessions only after readers drain, trigger delivery as
+  part of successful sealing, and put a deadline around every remote delivery
+  batch. Stream reports directly from retained JSONL so the disk budget does not
+  become an equivalent heap-memory requirement.
+- Validation added: Race tests cover reader/end ordering, post-flush delivery,
+  missing acknowledgements, and streamed composite reports; the real Docker E2E
+  verifies final provider output precedes the session-ended event.
+
+## 2026-09-14 Distributed Session IDs Need a Producer Namespace
+- Incident/bug: Telemetry correlation, sequence state, and reports keyed only by
+  `session_id`, so independent bridges producing the same ID could combine
+  unrelated conversations.
+- Root cause pattern: An identifier unique inside one process is not globally
+  unique after streams from multiple producers share a collector and storage
+  boundary.
+- Preventative rule: Give each producer a stable identity and key all in-memory
+  and analytical session state by `(source_id, session_id)`. Persist generated
+  identities atomically with private permissions, reject symlink identity files,
+  and retain an explicit legacy namespace for old records.
+- Validation added: Race tests cover cross-source correlation and sequences,
+  report counts, persistent and concurrent UUID creation, invalid IDs, and
+  symlink rejection; the live Docker E2E filters collector-volume events by the
+  full composite identity.
+
+## 2026-09-14 Full-Stream Telemetry Needs Valid Outer Test Fixtures
+- Incident/bug: The first malformed-interaction collector test passed even
+  though interaction metadata validation was absent because the test used
+  segment IDs containing spaces and failed earlier at segment-ID validation.
+- Root cause pattern: A negative test can produce the expected status through
+  an unintended outer validation layer, leaving the target validation untested.
+- Preventative rule: Keep envelopes valid when testing payload validation and
+  assert the narrowest practical failure behavior. For full-stream telemetry,
+  remove secrets before the async boundary, omit opaque invalid UTF-8, and never
+  include raw input content in diagnostic logs.
+- Validation added: Corrected segment IDs first reproduce acceptance of invalid
+  stream metadata; focused tests now cover direction, stream, sequence, opaque
+  content, collector-side secret defense, and bridge-side redaction.
+
+## 2026-09-14 Durable Telemetry Needs Writable State at Both Boundaries
+- Incident/bug: The first gRPC telemetry Docker E2E could start the collector
+  but the non-root bridge failed before startup because its durable outbox was
+  configured under a root-owned shared repository volume.
+- Root cause pattern: Adding a durable delivery guarantee creates a new storage
+  boundary on the producer as well as the collector; validating only the
+  collector volume misses producer-side ownership and restart behavior.
+- Preventative rule: Give durable outboxes a dedicated state volume, prepare
+  mount ownership before dropping privileges, acknowledge only after collector
+  fsync, and retain unacknowledged segments across transport failures.
+- Validation added: Unit tests cover restart recovery, oldest-first eviction,
+  idempotent replay, total collector outage, and S3 failure retention; the live
+  Docker E2E runs the bridge and collector as non-root processes across separate
+  state volumes.
+
+## 2026-09-13 Go VCS Stamping in Temporary Worktrees
+- Incident/bug: `make build` failed in the handed-off `/tmp` worktree because a
+  non-repository `/tmp/.git` sandbox marker made Go run `git status` from
+  `/tmp`, even though Git itself correctly resolved the linked worktree.
+- Root cause pattern: Automatic Go VCS stamping can discover a misleading
+  ancestor marker in temporary/sandboxed worktree layouts.
+- Preventative rule: Repository builds that already inject an explicit version
+  through `-ldflags` should disable implicit VCS stamping so supported worktree
+  paths build reproducibly.
+- Validation added: `make build` now disables implicit VCS stamping and uses the
+  repository's writable `/tmp` Go-cache fallback, without requiring caller
+  environment workarounds.
+
+## 2026-09-13 Telemetry Privacy and Stream Boundaries
+- Incident/bug: The initial question telemetry redactor changed
+  `Authorization: Bearer secret` to `Authorization=[REDACTED] secret`, leaving
+  the credential in persisted JSONL, while fingerprints were calculated before
+  redaction and existing event files retained permissive modes.
+- Root cause pattern: A positive "text changed" assertion is weaker than proving
+  sensitive values are absent, and file creation modes do not harden an
+  existing path. Telemetry APIs can also appear chunk-safe even though PTY I/O
+  does not preserve logical prompt/answer boundaries.
+- Preventative rule: Assert known secrets are absent from every persisted and
+  exported representation, redact before fingerprinting, chmod an opened local
+  telemetry file before writing, and explicitly assign PTY framing/deduplication
+  to the live integration layer.
+- Validation added: A black-box e2e test covers question → answer → private
+  JSONL → aggregate feedback, while unit tests cover redaction, permissions,
+  classification, decisions, concurrency, errors, UTF-8 truncation, and 99.0%
+  package coverage.
+
+## 2026-09-13 Boundary-Tight E2E Timeouts
+- Incident/bug: The repo-setup environment propagation e2e intermittently timed
+  out under the parallel race suite while passing immediately in isolation.
+- Root cause pattern: A five-second operation timeout left no scheduling margin
+  under load, making a non-timing test depend on a boundary-tight deadline.
+- Preventative rule: Give process-based e2e setup a bounded but meaningful
+  margin below its parent context; do not set an incidental operation timeout
+  equal to the observed slow-path duration.
+- Validation added: The test-only setup/context budgets are now 10/20 seconds;
+  the focused race test and full parallel race suite cover the change.
+
 ## 2026-09-11 Remote Step CA E2E False Success
 - Incident/bug: Client enrollment requested `admin` although the test CA created `bridge-jwk`; the Make target still printed `PASSED` after the client exited 1.
 - Root cause pattern: `docker wait` prints the container status to stdout and can return success itself for a failed container. Detached setup errors were also overwritten, and default Compose `ps` can omit an already-exited client.
@@ -47,3 +159,81 @@
 - Early signal missed: Codex and Claude transcripts showed the prompt in the composer with zero tokens, but the test advanced because the completion marker was present in the echoed prompt.
 - Preventative rule: For live provider e2e tests, prove behavior through external state first, then use transcript markers only as secondary evidence; send provider-specific submit keys as separate PTY writes when needed.
 - Validation added (test/check/alert): `env-secrets aws -s /bridgectl/e2e -- make test-e2e-unprotected` passed with protected and unprotected Codex/Claude `.git` marker checks.
+
+## 2026-09-13 Live Telemetry Must Be Off the Session I/O Path
+- Incident/bug: Direct persistence from PTY callbacks would let a slow or full
+  telemetry sink delay the provider session, and naive `?` framing interpreted
+  ANSI private-mode sequences such as `ESC[?25h` as questions.
+- Root cause pattern: Observability code inherits production latency and stream
+  semantics unless queue bounds, drop behavior, framing, and shutdown ownership
+  are explicit.
+- Preventative rule: Copy authorized I/O into a bounded non-blocking collector,
+  treat telemetry failure as diagnostic-only, skip delimiters inside terminal
+  control sequences, and flush within a fixed shutdown deadline.
+- Validation added (test/check/alert): Race tests cover slow/full/failing sinks,
+  fragmented Claude/Codex fixtures, ANSI framing, authorized input, and bounded
+  close; a real Docker bridge e2e validates the persisted correlation.
+
+## 2026-09-13 Telemetry Retention Belongs at the Persistence Boundary
+- Incident/bug: A single append-only JSONL file had no upper bound, and a
+  question-specific filename made future filtered event types misleading.
+- Root cause pattern: A bounded in-memory queue protects session latency but
+  does not bound durable storage; retention and event selection are independent
+  controls.
+- Preventative rule: Filter normalized events before queueing or delivery,
+  rotate at the sink under its write lock, cap retained generations, and make
+  readers consume rotations oldest-first.
+- Validation added (test/check/alert): Unit tests force multiple rotations and
+  verify ordered reads and kind exclusion; the Docker e2e crosses a distinct
+  collector service and reads only `question` and `answer` from its volume.
+
+## 2026-09-14 Telemetry Retention Must Use a Disk Budget
+- Incident/bug: A one-second flush interval combined with a 128-segment limit
+  evicted collector-volume telemetry after roughly two minutes even though the
+  stored segments used only a few megabytes.
+- Root cause: Delivery cadence created many small immutable segments, while the
+  retention default was expressed only as a count and was not documented as a
+  disk-capacity budget.
+- Preventative rule: Bound local retention directly by aggregate bytes rather
+  than deriving capacity from a file count. Include active and immutable files,
+  enforce a smaller budget on restart, and expose human-readable SI/IEC sizes.
+- Validation added: Config tests assert the 10-second bridge flush default;
+  spool tests cover byte eviction and recovery, and the CLI/Compose tests assert
+  the default `1GB` disk budget.
+
+## 2026-09-14 Telemetry Boundaries Are Security and Consistency Boundaries
+
+- Incident/bug: Per-read redaction could miss credentials and UTF-8 code points
+  split across transport chunks, while reports could race a mutable active file.
+- Root cause pattern: Transport reads and filesystem writes are not semantic
+  record boundaries; treating them as complete records leaks implementation
+  timing into privacy and analysis correctness.
+- Preventative rule: Reassemble bounded interaction records before redaction,
+  sequence only retained events, and expose only newline-complete immutable
+  segments to report readers.
+- Validation added: Split UTF-8 and multi-chunk secret regressions, filtered
+  sequence assertions, active-segment exclusion, partial-write recovery, and a
+  live collector E2E ending with `session_ended`.
+
+## 2026-09-15 Telemetry Protocols Need Semantic Coverage
+
+- Incident/bug: Assignment redaction handled shell-style values but missed
+  quoted JSON, ANSI stripping handled CSI controls but exposed OSC/DCS payloads,
+  question state became visible before its event was persisted, and each
+  delivery pass recreated a stream despite the long-lived-stream contract.
+- Root cause pattern: Tests covered common representations and single-threaded
+  happy paths without asserting equivalent wire formats, persistence ordering,
+  or connection lifetime across batches.
+- Preventative rule: At privacy and transport boundaries, test multiple
+  encodings, state visibility versus durable event order, and reuse across at
+  least two separately sealed batches.
+- Validation added: Quoted-JSON secret, OSC/DCS, concurrent correlation, and
+  two-batch one-stream regressions plus the live bridge-to-volume Docker E2E.
+- Collector defense-in-depth reapplies redaction, so redaction must be
+  idempotent and quoted values must be consumed through their closing quote.
+  Add second-pass equality assertions and a real collector proof with a
+  whitespace-containing JSON secret.
+- Keep semantic-framer bounds separate from corpus-record bounds, expose any
+  exceptional omission explicitly, and exclude nested generated dependencies
+  from Docker contexts. On constrained hosts, build independent Go images
+  sequentially to reduce transient disk demand.

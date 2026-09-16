@@ -104,6 +104,189 @@ make up
 ```
 
 Mounts `~/repos` → `/repos` and `./certs` → `/app/certs`. The prebuilt image is available at `ghcr.io/orchael/bridgectl`.
+Use `make down` to stop the stack while preserving its volumes. The destructive
+`make reset` and `make reset-local` targets ask for confirmation before running
+Compose `down -v` and deleting their stack's volumes.
+
+### Telemetry
+
+Interaction telemetry is disabled by default. Enable the
+`telemetry` block in your bridge YAML, start the server with that config, then
+inspect the rolling report or provider-neutral export:
+
+```yaml
+telemetry:
+  enabled: true
+  # Empty generates and persists a stable UUID in the bridge state directory.
+  source_id: ""
+  # Empty retains segments locally; host:port enables gRPC delivery.
+  collector_target: "127.0.0.1:9464"
+  # Plaintext is only appropriate for loopback or a private Compose network.
+  collector_insecure: true
+  collector_ca: ""
+  collector_server_name: ""
+  spool_dir: "~/.config/bridgectl/telemetry/segments"
+  kinds: ["question", "answer"]
+  queue_size: 1024
+  rolling_window: "168h"
+  flush_interval: "10s"
+  retry_interval: "1s"
+  max_segment_bytes: 10485760
+  max_disk_space: 1GB
+  include_redacted_text: false
+```
+
+```bash
+bin/bridgectl server start --config config/bridge.yaml
+bin/bridgectl telemetry report --events ~/.config/bridgectl/telemetry/segments --since 24h
+bin/bridgectl telemetry export --events ~/.config/bridgectl/telemetry/segments --since 24h --format json
+```
+
+Select retained data with `kinds`; for example, `kinds: [question, answer]`
+excludes lifecycle records. `include_redacted_text: false` is the
+privacy-preserving default. Local files are mode `0600`, rotate at
+`max_segment_bytes`, and evict the oldest immutable segments when total active
+and immutable storage exceeds `max_disk_space`. Reports and exports read the
+retained immutable segments in order.
+
+Both the bridge-local outbox and collector-local volume default to a 1 GB
+(1,000,000,000-byte) disk budget. Decimal units such as `GB` and binary units
+such as `GiB` are accepted. Override the collector with
+`TELEMETRY_MAX_SEGMENT_BYTES` and `TELEMETRY_MAX_DISK_SPACE`; configure the
+bridge outbox independently with `max_segment_bytes` and `max_disk_space` in
+`bridge.yaml`.
+
+The supplied Compose service health check matches its plaintext private-network
+configuration. The collector image itself does not hard-code a transport mode;
+TLS deployments should configure a runtime health check with `telemetry health`
+and the appropriate `--ca` and `--server-name` options.
+
+Every new event uses schema v2 and includes a `source_id`; telemetry session
+identity is the composite `(source_id, session_id)`. Set `source_id` explicitly when an
+orchestrator owns bridge identity, or leave it empty to generate a UUID once at
+the bridge state directory (by default
+`~/.config/bridgectl/telemetry/source-id`). The generated file is mode `0600`.
+Legacy events without `source_id` remain readable in an empty legacy namespace.
+
+Schema v2 emits one `session_context` event after `session_started`. It includes
+OS/architecture, branch and commit, and stable HMAC IDs for
+the machine, working directory, and repository. It never stores the raw working
+directory, repository path, remote URL credentials, hostname, Git author, or
+environment variables. The private 32-byte HMAC key defaults to
+`~/.config/bridgectl/telemetry/identity-key` (mode `0600`) and can be relocated
+with `identity_key_file`. Optional `actor_id` and `source_label` values are
+operator-provided non-secret labels; they are not authenticated identities.
+
+Supported concrete kinds are `session_started`, `session_context`, `provider_output`,
+`user_input`, `question`, `answer`, and `session_ended`. To build a complete
+redacted interaction corpus, explicitly enable all kinds and retained text:
+
+```yaml
+telemetry:
+  enabled: true
+  kinds: [all]
+  include_redacted_text: true
+```
+
+`all` must be the only list entry and expands to every concrete kind. The safe
+default does not include `provider_output` or `user_input`, so upgrading does
+not silently start recording transcripts. `provider_output` records normal and
+thinking streams; `user_input` records only data submitted by the authorized
+active writer. Every event has a per-session sequence number, and stream events
+include their direction, stream type, and original byte count. Terminal
+controls and recognized secrets are removed before local spooling or gRPC
+delivery. Invalid UTF-8 content is omitted with its byte count, digest, and
+omission reason instead of being forwarded as opaque data. Chunk boundaries are
+reassembled before redaction, so split UTF-8 characters and split secret tokens
+cannot bypass those checks.
+An individual interaction record is buffered up to 1 MiB for this purpose. A
+larger record with no boundary is retained as byte count, digest, and the
+`buffer_limit` omission reason rather than unbounded raw text.
+
+For a small, non-production analysis reference covering deterministic findings,
+read-only HTTP APIs, and bounded LLM evidence packets, see
+[`examples/telemetry-analysis`](examples/telemetry-analysis/README.md).
+
+Full capture can contain personal or proprietary material even after
+best-effort redaction. Protect collector volumes and S3 access, use an explicit
+retention policy, and enable it only for users and projects that have agreed to
+the collection. Removing `provider_output` and `user_input` from `kinds`
+immediately returns collection to derived telemetry only.
+
+To run the collector with its own persistent Docker volume:
+
+```bash
+make up-collector
+make ps-collector
+make logs-collector
+```
+
+Point the bridge at `127.0.0.1:9464` using `collector_target`. The standalone
+Compose file publishes only to host loopback. Plaintext gRPC requires the
+explicit `collector_insecure: true` setting and must not be exposed to a public
+network. For a remote collector, start it with `--tls-cert` and `--tls-key`,
+then configure `collector_ca` and optionally `collector_server_name` on the
+bridge. These flags authenticate the collector to the bridge; they do not
+authenticate bridge clients. Keep the collector behind an operator-managed
+network ACL or authenticated proxy. Native tenant/actor authentication is
+tracked in [orchael/bridge#5](https://github.com/orchael/bridge/issues/5).
+
+The bridge always writes redacted events to its bounded local spool before
+streaming them. The collector acknowledges a segment only after it is durably
+synced to the collector-owned volume. If the collector is unavailable, the
+bridge retries unacknowledged segments without blocking agent sessions; if the
+configured spool fills, it evicts the oldest segment and logs a warning.
+
+Inspect the collector-owned volume without copying it to the host:
+
+```bash
+docker compose -f telemetry/docker-compose.yml exec telemetry-collector \
+  bridgectl telemetry report --events /data/segments
+```
+
+To upload the same bounded segments to an existing S3 bucket, supply standard
+AWS credentials (or use the container/instance role) and set:
+
+```bash
+export AWS_REGION=us-east-1
+export TELEMETRY_S3_BUCKET=your-existing-bucket
+export TELEMETRY_S3_PREFIX=bridgectl/telemetry
+make up-collector
+```
+
+Stop the collector with `make down-collector`. This removes the container and
+network but preserves the collector's named telemetry volume. Use
+`make reset-collector` only when you also want to delete that volume; it asks
+for confirmation first. The Step CA stack has the same destructive behavior in
+`make reset-step-ca`.
+
+The collector keeps each segment on its volume until `PutObject` succeeds. S3
+failures therefore retry from the collector spool. Object keys are partitioned
+by UTC date and use the stable segment ID, making retries idempotent.
+Set the collector's `--max-segment-bytes` to at least the bridge's
+`max_segment_bytes`; otherwise the collector rejects oversized segments and the
+bridge retains them for retry until its bounded spool evicts them.
+
+To exercise the full bridge → collector → volume path without provider
+credentials, run:
+
+```bash
+make test-e2e-live-telemetry
+```
+
+The test logs the filtered permission-question and accepted-answer events that
+it reads from the collector-owned Compose volume.
+
+After creating a test bucket, exercise the real gRPC → S3 path with credentials
+that can list, put, get, and delete objects under the configured test prefix:
+
+```bash
+BRIDGECTL_TELEMETRY_S3_BUCKET=your-existing-test-bucket \
+  make test-telemetry-s3-e2e
+```
+
+The test never creates or deletes the bucket. It uses a unique prefix and
+deletes only the objects it created there.
 
 ### Smoke Test
 

@@ -62,7 +62,16 @@ allowed_paths:
 | `providers.<name>.binary` | Provider executable. |
 | `providers.<name>.args` | Arguments prepended when starting the provider. |
 | `providers.<name>.required_env` | Environment variables required before the provider is considered healthy. |
+| `telemetry.source_id` | Stable bridge identity; generated privately when empty. |
+| `telemetry.actor_id`, `telemetry.source_label` | Optional descriptive labels, not authenticated identities. |
+| `telemetry.identity_key_file` | Private 32-byte HMAC key used for machine, directory, and repository pseudonyms. |
+| `telemetry.kinds` | Retained event kinds; `[all]` enables the full redacted interaction stream. |
+| `telemetry.flush_interval` | Maximum age of an active segment before sealing; defaults to `10s`. |
+| `telemetry.max_disk_space` | Bounded local spool budget; defaults to `1GB`. |
 | `allowed_paths` | Parent paths under which sessions may run. |
+
+See [Interaction Telemetry](../guides/telemetry.md) for collector operation,
+privacy behavior, and complete-capture configuration.
 
 ## Provider Fallbacks
 

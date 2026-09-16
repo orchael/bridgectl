@@ -607,3 +607,108 @@ var BridgeService_ServiceDesc = grpc.ServiceDesc{
 	},
 	Metadata: "bridge/v1/bridge.proto",
 }
+
+const (
+	TelemetryCollectorService_StreamSegments_FullMethodName = "/bridge.v1.TelemetryCollectorService/StreamSegments"
+)
+
+// TelemetryCollectorServiceClient is the client API for TelemetryCollectorService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// TelemetryCollectorService durably transfers immutable, bounded JSONL
+// segments. It is intentionally separate from BridgeService so the collector
+// can run as an independently secured and scaled process.
+type TelemetryCollectorServiceClient interface {
+	StreamSegments(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TelemetrySegment, TelemetryAck], error)
+}
+
+type telemetryCollectorServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewTelemetryCollectorServiceClient(cc grpc.ClientConnInterface) TelemetryCollectorServiceClient {
+	return &telemetryCollectorServiceClient{cc}
+}
+
+func (c *telemetryCollectorServiceClient) StreamSegments(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TelemetrySegment, TelemetryAck], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &TelemetryCollectorService_ServiceDesc.Streams[0], TelemetryCollectorService_StreamSegments_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[TelemetrySegment, TelemetryAck]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type TelemetryCollectorService_StreamSegmentsClient = grpc.BidiStreamingClient[TelemetrySegment, TelemetryAck]
+
+// TelemetryCollectorServiceServer is the server API for TelemetryCollectorService service.
+// All implementations must embed UnimplementedTelemetryCollectorServiceServer
+// for forward compatibility.
+//
+// TelemetryCollectorService durably transfers immutable, bounded JSONL
+// segments. It is intentionally separate from BridgeService so the collector
+// can run as an independently secured and scaled process.
+type TelemetryCollectorServiceServer interface {
+	StreamSegments(grpc.BidiStreamingServer[TelemetrySegment, TelemetryAck]) error
+	mustEmbedUnimplementedTelemetryCollectorServiceServer()
+}
+
+// UnimplementedTelemetryCollectorServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedTelemetryCollectorServiceServer struct{}
+
+func (UnimplementedTelemetryCollectorServiceServer) StreamSegments(grpc.BidiStreamingServer[TelemetrySegment, TelemetryAck]) error {
+	return status.Error(codes.Unimplemented, "method StreamSegments not implemented")
+}
+func (UnimplementedTelemetryCollectorServiceServer) mustEmbedUnimplementedTelemetryCollectorServiceServer() {
+}
+func (UnimplementedTelemetryCollectorServiceServer) testEmbeddedByValue() {}
+
+// UnsafeTelemetryCollectorServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to TelemetryCollectorServiceServer will
+// result in compilation errors.
+type UnsafeTelemetryCollectorServiceServer interface {
+	mustEmbedUnimplementedTelemetryCollectorServiceServer()
+}
+
+func RegisterTelemetryCollectorServiceServer(s grpc.ServiceRegistrar, srv TelemetryCollectorServiceServer) {
+	// If the following call panics, it indicates UnimplementedTelemetryCollectorServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&TelemetryCollectorService_ServiceDesc, srv)
+}
+
+func _TelemetryCollectorService_StreamSegments_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(TelemetryCollectorServiceServer).StreamSegments(&grpc.GenericServerStream[TelemetrySegment, TelemetryAck]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type TelemetryCollectorService_StreamSegmentsServer = grpc.BidiStreamingServer[TelemetrySegment, TelemetryAck]
+
+// TelemetryCollectorService_ServiceDesc is the grpc.ServiceDesc for TelemetryCollectorService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var TelemetryCollectorService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "bridge.v1.TelemetryCollectorService",
+	HandlerType: (*TelemetryCollectorServiceServer)(nil),
+	Methods:     []grpc.MethodDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "StreamSegments",
+			Handler:       _TelemetryCollectorService_StreamSegments_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
+	Metadata: "bridge/v1/bridge.proto",
+}
