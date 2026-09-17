@@ -75,7 +75,7 @@ func (s *HTTPForwardingSink) upload(ctx context.Context) error {
 			return err
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return fmt.Errorf("telemetry upload returned HTTP %d: %s", resp.StatusCode, string(body))
 		}

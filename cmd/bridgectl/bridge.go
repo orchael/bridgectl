@@ -84,10 +84,10 @@ func secureRead(path string) ([]byte, error) {
 		return nil, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("Bridge state file is not regular")
+		return nil, fmt.Errorf("bridge state file is not regular")
 	}
 	if info.Mode().Perm()&0077 != 0 {
-		return nil, fmt.Errorf("Bridge state file %q has insecure permissions", path)
+		return nil, fmt.Errorf("bridge state file %q has insecure permissions", path)
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -109,7 +109,7 @@ func atomicJSON(path string, v any) error {
 		return err
 	}
 	name := tmp.Name()
-	defer os.Remove(name)
+	defer func() { _ = os.Remove(name) }()
 	if err = tmp.Chmod(0600); err == nil {
 		_, err = tmp.Write(append(b, '\n'))
 	}
@@ -144,7 +144,7 @@ func httpJSON(ctx context.Context, client *http.Client, method, endpoint string,
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return resp.StatusCode, err
@@ -186,8 +186,8 @@ func newBridgeLoginCmd() *cobra.Command {
 }
 func runBridgeLogin(cmd *cobra.Command, bridge string, force bool) error {
 	if _, _, err := readEnrollment(); err == nil && !force {
-		fmt.Fprintln(cmd.OutOrStdout(), "Already logged into Bridge.")
-		fmt.Fprintln(cmd.OutOrStdout(), "Use --force to re-enroll.")
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Already logged into Bridge.")
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Use --force to re-enroll.")
 		return nil
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) && !force {
 		return fmt.Errorf("read existing enrollment: %w", err)
@@ -207,14 +207,14 @@ func runBridgeLogin(cmd *cobra.Command, bridge string, force bool) error {
 		return fmt.Errorf("invalid Bridge authorization response")
 	}
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "Opening %s\n\nAuthorization code:\n\n    %s\n\n", auth.VerificationURI, auth.UserCode)
+	_, _ = fmt.Fprintf(out, "Opening %s\n\nAuthorization code:\n\n    %s\n\n", auth.VerificationURI, auth.UserCode)
 	if auth.VerificationURIComplete == "" {
 		auth.VerificationURIComplete = auth.VerificationURI + "?user_code=" + url.QueryEscape(auth.UserCode)
 	}
 	if err := openBrowser(auth.VerificationURIComplete); err != nil {
-		fmt.Fprintf(out, "Open this URL in your browser: %s\n\n", auth.VerificationURIComplete)
+		_, _ = fmt.Fprintf(out, "Open this URL in your browser: %s\n\n", auth.VerificationURIComplete)
 	}
-	fmt.Fprintln(out, "Waiting for authorization...")
+	_, _ = fmt.Fprintln(out, "Waiting for authorization...")
 	deadline := time.NewTimer(time.Duration(auth.ExpiresIn) * time.Second)
 	defer deadline.Stop()
 	interval := time.Duration(auth.Interval) * time.Second
@@ -223,7 +223,7 @@ func runBridgeLogin(cmd *cobra.Command, bridge string, force bool) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return fmt.Errorf("Bridge authorization expired")
+			return fmt.Errorf("bridge authorization expired")
 		case <-time.After(interval):
 		}
 		var tok deviceToken
@@ -232,7 +232,7 @@ func runBridgeLogin(cmd *cobra.Command, bridge string, force bool) error {
 			if err := persistBridgeEnrollment(tok, installationName()); err != nil {
 				return err
 			}
-			fmt.Fprintln(out, "✓ Bridge authorization complete\n✓ Installation registered\n✓ Organization selected\n✓ Telemetry configured")
+			_, _ = fmt.Fprintln(out, "✓ Bridge authorization complete\n✓ Installation registered\n✓ Organization selected\n✓ Telemetry configured")
 			return nil
 		}
 		if status == 429 {
@@ -245,7 +245,7 @@ func runBridgeLogin(cmd *cobra.Command, bridge string, force bool) error {
 		if status == 400 && strings.Contains(pollErr.Error(), "authorization_pending") {
 			continue
 		}
-		return fmt.Errorf("Bridge authorization: %w", pollErr)
+		return fmt.Errorf("bridge authorization: %w", pollErr)
 	}
 }
 func signalContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -268,7 +268,7 @@ func openBrowser(target string) error {
 }
 func persistBridgeEnrollment(tok deviceToken, name string) error {
 	if tok.BridgeURL == "" || tok.OrganizationID == "" || tok.InstallationID == "" || tok.TelemetryEndpoint == "" || tok.CollectorCredential == "" {
-		return errors.New("Bridge returned incomplete enrollment")
+		return errors.New("bridge returned incomplete enrollment")
 	}
 	e := bridgeEnrollment{BridgeURL: tok.BridgeURL, OrganizationID: tok.OrganizationID, InstallationID: tok.InstallationID, InstallationName: name, TelemetryEndpoint: tok.TelemetryEndpoint}
 	mp, sp := bridgeStatePaths()
@@ -314,13 +314,13 @@ func newBridgeWhoamiCmd() *cobra.Command {
 	return &cobra.Command{Use: "whoami", Short: "Show Bridge enrollment status", RunE: func(cmd *cobra.Command, _ []string) error {
 		e, _, err := readEnrollment()
 		if errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintln(cmd.OutOrStdout(), "Not logged into Bridge.")
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Not logged into Bridge.")
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Bridge          %s\nOrganization    %s\nInstallation    %s\nStatus          logged in\n", e.BridgeURL, display(e.OrganizationName, e.OrganizationID), display(e.InstallationName, e.InstallationID))
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Bridge          %s\nOrganization    %s\nInstallation    %s\nStatus          logged in\n", e.BridgeURL, display(e.OrganizationName, e.OrganizationID), display(e.InstallationName, e.InstallationID))
 		return nil
 	}}
 }
@@ -334,7 +334,7 @@ func newBridgeLogoutCmd() *cobra.Command {
 	return &cobra.Command{Use: "logout", Short: "Log out of Bridge", RunE: func(cmd *cobra.Command, _ []string) error {
 		mp, sp := bridgeStatePaths()
 		if _, err := os.Stat(mp); errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintln(cmd.OutOrStdout(), "Not logged into Bridge.")
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Not logged into Bridge.")
 			return nil
 		}
 		if err := os.Remove(mp); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -343,8 +343,8 @@ func newBridgeLogoutCmd() *cobra.Command {
 		if err := os.Remove(sp); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		fmt.Fprintln(cmd.OutOrStdout(), "Bridge enrollment removed locally.")
-		fmt.Fprintln(cmd.OutOrStdout(), "Remote revocation is not exposed by this Bridge protocol.")
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Bridge enrollment removed locally.")
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Remote revocation is not exposed by this Bridge protocol.")
 		return nil
 	}}
 }
