@@ -1,6 +1,8 @@
 .PHONY: build proto tools test test-telemetry-e2e test-telemetry-s3-e2e test-e2e test-e2e-live-telemetry test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down reset logs up-local down-local reset-local logs-local up-collector down-collector reset-collector ps-collector logs-collector up-step-ca down-step-ca reset-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
 
 BIN_DIR := bin
+GOIMPORTS_VERSION ?= v0.44.0
+GOLANGCI_LINT_VERSION ?= v2.12.0
 BRIDGE_CA := $(BIN_DIR)/bridge-ca
 BRIDGE_CLI := $(BIN_DIR)/bridgectl
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -23,11 +25,39 @@ build-cli:
 	@mkdir -p $(BIN_DIR)
 	$(GO_BUILD_ENV) go build $(GO_BUILD_FLAGS) $(LDFLAGS) -o $(BRIDGE_CLI) ./cmd/bridgectl
 
+.PHONY: deps setup
+setup:
+	bash ./scripts/setup-go-path.sh
+
+deps:
+	$(MAKE) setup-node
+	@command -v go >/dev/null 2>&1 || { echo "Install Go (see go.mod for the required version) before running make deps." >&2; exit 1; }
+	@if ! command -v protoc >/dev/null 2>&1; then \
+		if command -v brew >/dev/null 2>&1; then \
+			HOMEBREW_NO_ASK=1 brew install protobuf; \
+		elif command -v apt-get >/dev/null 2>&1; then \
+			if [ "$$(id -u)" -eq 0 ]; then \
+				apt-get update && apt-get install -y protobuf-compiler; \
+			else \
+				sudo apt-get update && sudo apt-get install -y protobuf-compiler; \
+			fi; \
+		else \
+			echo "Install protoc using your system package manager, then rerun make deps." >&2; exit 1; \
+		fi; \
+	fi
+	$(MAKE) tools
+	go install golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION)
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	$(GO_BUILD_ENV) go mod download
+	@tool_bin=$$(go env GOBIN); \
+	if [ -z "$$tool_bin" ]; then tool_bin=$$(go env GOPATH | cut -d: -f1)/bin; fi; \
+	printf 'Development tools installed in %s. Run make setup to add it to your PATH.\n' "$$tool_bin"
+
 tools:
 	go install google.golang.org/protobuf/cmd/protoc-gen-go@$(shell go list -m -f '{{.Version}}' google.golang.org/protobuf)
 	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(shell go list -m -f '{{.Version}}' google.golang.org/grpc/cmd/protoc-gen-go-grpc)
 
-PROTOC_INCLUDE := $(shell brew --prefix 2>/dev/null)/include
+PROTOC_INCLUDE ?= $(shell if command -v brew >/dev/null 2>&1; then brew --prefix; else printf /usr; fi)/include
 proto:
 	protoc \
 		--proto_path=proto \
