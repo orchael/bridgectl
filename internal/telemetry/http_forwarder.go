@@ -28,7 +28,7 @@ func NewHTTPForwardingSink(spool *SegmentSpool, endpoint, credential string, int
 	if interval <= 0 {
 		interval = time.Second
 	}
-	s := &HTTPForwardingSink{spool: spool, endpoint: endpoint, credential: credential, interval: interval, client: &http.Client{Timeout: 15 * time.Second}, stop: make(chan struct{}), done: make(chan struct{})}
+	s := &HTTPForwardingSink{spool: spool, endpoint: endpoint, credential: credential, interval: interval, client: &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}, stop: make(chan struct{}), done: make(chan struct{})}
 	go func() {
 		defer close(s.done)
 		s.deliver(onError)
@@ -51,6 +51,9 @@ func (s *HTTPForwardingSink) deliver(onError func(error)) {
 	}
 }
 func (s *HTTPForwardingSink) upload(ctx context.Context) error {
+	if _, err := s.spool.Seal(); err != nil {
+		return err
+	}
 	segs, err := s.spool.Pending()
 	if err != nil {
 		return err
@@ -77,7 +80,8 @@ func (s *HTTPForwardingSink) upload(ctx context.Context) error {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		_ = resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("telemetry upload returned HTTP %d: %s", resp.StatusCode, string(body))
+			_ = body
+			return fmt.Errorf("telemetry upload returned HTTP %d", resp.StatusCode)
 		}
 		if err := s.spool.Remove(seg.ID); err != nil {
 			return err
@@ -118,7 +122,13 @@ func bridgeEnvelope(id string, jsonl []byte) ([]byte, error) {
 			return "unknown"
 		}(), "event_type": string(e.Kind), "payload": payload})
 	}
-	segment := map[string]any{"created_at": time.Now().UTC().Format(time.RFC3339Nano), "collector": map[string]string{"name": "bridgectl", "version": "dev"}, "events": events}
+	created := time.Unix(0, 0).UTC()
+	if len(id) >= len("20060102T150405.000000000Z") {
+		if parsed, parseErr := time.Parse("20060102T150405.000000000Z", id[:len("20060102T150405.000000000Z")]); parseErr == nil {
+			created = parsed
+		}
+	}
+	segment := map[string]any{"created_at": created.Format(time.RFC3339Nano), "collector": map[string]string{"name": "bridgectl", "version": "dev"}, "events": events}
 	raw, err := json.Marshal(segment)
 	if err != nil {
 		return nil, err

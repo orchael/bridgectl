@@ -135,6 +135,7 @@ type TelemetryConfig struct {
 	CollectorServerName     string             `yaml:"collector_server_name"`
 	CollectorURL            string             `yaml:"collector_url"`
 	CollectorCredentialFile string             `yaml:"collector_credential_file"`
+	CollectorManaged        bool               `yaml:"managed_by_bridge"`
 	Kinds                   []string           `yaml:"kinds"`
 	QueueSize               int                `yaml:"queue_size"`
 	RollingWindow           string             `yaml:"rolling_window"`
@@ -615,7 +616,7 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Telemetry.CollectorURL != "" {
 		u, parseErr := url.Parse(cfg.Telemetry.CollectorURL)
-		if parseErr != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		if parseErr != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 			return fmt.Errorf("config: telemetry.collector_url must be an HTTPS URL")
 		}
 	}

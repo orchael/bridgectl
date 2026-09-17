@@ -53,30 +53,45 @@ func bridgeURL(flag string) (string, error) {
 		raw = productionBridgeURL
 	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return "", fmt.Errorf("bridge URL must be an HTTPS origin")
 	}
 	return strings.TrimRight(raw, "/"), nil
 }
 func readEnrollment() (*bridgeEnrollment, *bridgeSecret, error) {
-	mp, sp := bridgeStatePaths()
-	var e bridgeEnrollment
-	var s bridgeSecret
+	e, err := readEnrollmentMetadata()
+	if err != nil {
+		return nil, nil, err
+	}
+	s, err := readBridgeSecret()
+	if err != nil {
+		return e, nil, err
+	}
+	return e, s, nil
+}
+func readEnrollmentMetadata() (*bridgeEnrollment, error) {
+	mp, _ := bridgeStatePaths()
 	b, err := secureRead(mp)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	if err = json.Unmarshal(b, &e); err != nil {
-		return nil, nil, err
+	var e bridgeEnrollment
+	if err := json.Unmarshal(b, &e); err != nil {
+		return nil, err
 	}
-	b, err = secureRead(sp)
+	return &e, nil
+}
+func readBridgeSecret() (*bridgeSecret, error) {
+	_, sp := bridgeStatePaths()
+	b, err := secureRead(sp)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	if err = json.Unmarshal(b, &s); err != nil {
-		return nil, nil, err
+	var s bridgeSecret
+	if err := json.Unmarshal(b, &s); err != nil {
+		return nil, err
 	}
-	return &e, &s, nil
+	return &s, nil
 }
 func secureRead(path string) ([]byte, error) {
 	info, err := os.Lstat(path)
@@ -267,10 +282,17 @@ func openBrowser(target string) error {
 	return errors.New("no browser opener found")
 }
 func persistBridgeEnrollment(tok deviceToken, name string) error {
-	if tok.BridgeURL == "" || tok.OrganizationID == "" || tok.InstallationID == "" || tok.TelemetryEndpoint == "" || tok.CollectorCredential == "" {
+	validatedBridge, err := bridgeURL(tok.BridgeURL)
+	if err != nil {
+		return fmt.Errorf("invalid Bridge URL: %w", err)
+	}
+	if err := validateHTTPSURL(tok.TelemetryEndpoint); err != nil {
+		return fmt.Errorf("invalid telemetry endpoint: %w", err)
+	}
+	if tok.OrganizationID == "" || tok.InstallationID == "" || tok.CollectorCredential == "" {
 		return errors.New("bridge returned incomplete enrollment")
 	}
-	e := bridgeEnrollment{BridgeURL: tok.BridgeURL, OrganizationID: tok.OrganizationID, InstallationID: tok.InstallationID, InstallationName: name, TelemetryEndpoint: tok.TelemetryEndpoint}
+	e := bridgeEnrollment{BridgeURL: validatedBridge, OrganizationID: tok.OrganizationID, InstallationID: tok.InstallationID, InstallationName: name, TelemetryEndpoint: tok.TelemetryEndpoint}
 	mp, sp := bridgeStatePaths()
 	if err := atomicJSON(mp, e); err != nil {
 		return fmt.Errorf("save Bridge enrollment: %w", err)
@@ -282,6 +304,13 @@ func persistBridgeEnrollment(tok deviceToken, name string) error {
 		_ = os.Remove(mp)
 		_ = os.Remove(sp)
 		return fmt.Errorf("configure Bridge telemetry: %w", err)
+	}
+	return nil
+}
+func validateHTTPSURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return errors.New("must be an HTTPS URL without credentials, query, or fragment")
 	}
 	return nil
 }
@@ -297,10 +326,12 @@ func configureBridgeTelemetry(e bridgeEnrollment, metadataPath string) error {
 	if !ok {
 		t = map[string]any{}
 	}
-	if _, exists := t["collector_url"]; !exists {
+	managed, _ := t["managed_by_bridge"].(bool)
+	if _, exists := t["collector_url"]; !exists || managed {
 		t["collector_url"] = e.TelemetryEndpoint
 		t["collector_credential_file"] = filepath.Join(localserver.StateDir(), "bridge-credentials.json")
 		t["enabled"] = true
+		t["managed_by_bridge"] = true
 		m["telemetry"] = t
 	}
 	b, err := yaml.Marshal(m)
@@ -312,7 +343,7 @@ func configureBridgeTelemetry(e bridgeEnrollment, metadataPath string) error {
 
 func newBridgeWhoamiCmd() *cobra.Command {
 	return &cobra.Command{Use: "whoami", Short: "Show Bridge enrollment status", RunE: func(cmd *cobra.Command, _ []string) error {
-		e, _, err := readEnrollment()
+		e, err := readEnrollmentMetadata()
 		if errors.Is(err, os.ErrNotExist) {
 			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Not logged into Bridge.")
 			return nil
@@ -320,7 +351,11 @@ func newBridgeWhoamiCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Bridge          %s\nOrganization    %s\nInstallation    %s\nStatus          logged in\n", e.BridgeURL, display(e.OrganizationName, e.OrganizationID), display(e.InstallationName, e.InstallationID))
+		status := "logged in"
+		if _, secretErr := readBridgeSecret(); secretErr != nil {
+			status = "credential missing"
+		}
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Bridge          %s\nOrganization    %s\nInstallation    %s\nStatus          %s\n", e.BridgeURL, display(e.OrganizationName, e.OrganizationID), display(e.InstallationName, e.InstallationID), status)
 		return nil
 	}}
 }
@@ -343,8 +378,50 @@ func newBridgeLogoutCmd() *cobra.Command {
 		if err := os.Remove(sp); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
+		_ = removeManagedTelemetry()
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Bridge enrollment removed locally.")
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Remote revocation is not exposed by this Bridge protocol.")
 		return nil
 	}}
+}
+
+func removeManagedTelemetry() error {
+	path := filepath.Join(localserver.StateDir(), "bridge.yaml")
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	m := map[string]any{}
+	if err := yaml.Unmarshal(b, &m); err != nil {
+		return err
+	}
+	t, ok := m["telemetry"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	managed, _ := t["managed_by_bridge"].(bool)
+	if !managed {
+		return nil
+	}
+	delete(t, "collector_url")
+	delete(t, "collector_credential_file")
+	delete(t, "managed_by_bridge")
+	if len(t) == 1 {
+		if enabled, ok := t["enabled"].(bool); ok && enabled {
+			delete(t, "enabled")
+		}
+	}
+	if len(t) == 0 {
+		delete(m, "telemetry")
+	} else {
+		m["telemetry"] = t
+	}
+	out, err := yaml.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0600)
 }

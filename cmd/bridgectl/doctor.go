@@ -10,7 +10,7 @@ import (
 
 func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{Use: "doctor", Short: "Check local bridgectl health", RunE: func(cmd *cobra.Command, _ []string) error {
-		e, s, err := readEnrollment()
+		e, err := readEnrollmentMetadata()
 		out := cmd.OutOrStdout()
 		_, _ = fmt.Fprintln(out, "Bridge")
 		if errors.Is(err, os.ErrNotExist) {
@@ -26,7 +26,7 @@ func newDoctorCmd() *cobra.Command {
 		_, _ = fmt.Fprintf(out, "  enrollment    ✓ logged in\n")
 		_, _ = fmt.Fprintf(out, "  organization  ✓ %s\n", display(e.OrganizationName, e.OrganizationID))
 		_, _ = fmt.Fprintf(out, "  installation  ✓ %s\n", display(e.InstallationName, e.InstallationID))
-		if s == nil || s.CollectorCredential == "" {
+		if s, secretErr := readBridgeSecret(); secretErr != nil || s == nil || s.CollectorCredential == "" {
 			_, _ = fmt.Fprintln(out, "  telemetry     ! credential missing")
 		} else {
 			_, _ = fmt.Fprintln(out, "  telemetry     ✓ configured")
