@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -717,7 +718,24 @@ func Start(cfg Config) (*Server, error) {
 		}
 		var eventSink telemetry.Sink
 		destination := "local"
-		if telemetryCfg.CollectorTarget != "" {
+		if telemetryCfg.CollectorURL != "" && telemetryCfg.CollectorTarget == "" {
+			credentialPath := telemetryCfg.CollectorCredentialFile
+			if credentialPath == "" {
+				credentialPath = filepath.Join(stateDir, "bridge-credentials.json")
+			}
+			credentialData, readErr := os.ReadFile(expandTelemetryPath(credentialPath))
+			if readErr != nil {
+				return nil, fmt.Errorf("read telemetry collector credential: %w", readErr)
+			}
+			var credential struct {
+				CollectorCredential string `json:"collector_credential"`
+			}
+			if readErr = json.Unmarshal(credentialData, &credential); readErr != nil || credential.CollectorCredential == "" {
+				return nil, fmt.Errorf("invalid telemetry collector credential")
+			}
+			eventSink = telemetry.NewHTTPForwardingSink(segmentSpool, telemetryCfg.CollectorURL, credential.CollectorCredential, config.ParseDuration(telemetryCfg.FlushInterval, time.Second), func(err error) { logger.Warn("telemetry delivery", "error", err) })
+			destination = "https_collector"
+		} else if telemetryCfg.CollectorTarget != "" {
 			var transportCredentials credentials.TransportCredentials
 			if telemetryCfg.CollectorInsecure {
 				transportCredentials = insecure.NewCredentials()

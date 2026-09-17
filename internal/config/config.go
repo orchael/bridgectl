@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -122,25 +123,27 @@ type RepoSetupConfig struct {
 }
 
 type TelemetryConfig struct {
-	Enabled               bool               `yaml:"enabled"`
-	SourceID              string             `yaml:"source_id"`
-	ActorID               string             `yaml:"actor_id"`
-	SourceLabel           string             `yaml:"source_label"`
-	IdentityKeyFile       string             `yaml:"identity_key_file"`
-	SpoolDir              string             `yaml:"spool_dir"`
-	CollectorTarget       string             `yaml:"collector_target"`
-	CollectorInsecure     bool               `yaml:"collector_insecure"`
-	CollectorCA           string             `yaml:"collector_ca"`
-	CollectorServerName   string             `yaml:"collector_server_name"`
-	Kinds                 []string           `yaml:"kinds"`
-	QueueSize             int                `yaml:"queue_size"`
-	RollingWindow         string             `yaml:"rolling_window"`
-	FlushInterval         string             `yaml:"flush_interval"`
-	RetryInterval         string             `yaml:"retry_interval"`
-	MaxSegmentBytes       int64              `yaml:"max_segment_bytes"`
-	MaxDiskSpace          string             `yaml:"max_disk_space"`
-	DeprecatedMaxSegments removedConfigField `yaml:"-"`
-	IncludeRedactedText   bool               `yaml:"include_redacted_text"`
+	Enabled                 bool               `yaml:"enabled"`
+	SourceID                string             `yaml:"source_id"`
+	ActorID                 string             `yaml:"actor_id"`
+	SourceLabel             string             `yaml:"source_label"`
+	IdentityKeyFile         string             `yaml:"identity_key_file"`
+	SpoolDir                string             `yaml:"spool_dir"`
+	CollectorTarget         string             `yaml:"collector_target"`
+	CollectorInsecure       bool               `yaml:"collector_insecure"`
+	CollectorCA             string             `yaml:"collector_ca"`
+	CollectorServerName     string             `yaml:"collector_server_name"`
+	CollectorURL            string             `yaml:"collector_url"`
+	CollectorCredentialFile string             `yaml:"collector_credential_file"`
+	Kinds                   []string           `yaml:"kinds"`
+	QueueSize               int                `yaml:"queue_size"`
+	RollingWindow           string             `yaml:"rolling_window"`
+	FlushInterval           string             `yaml:"flush_interval"`
+	RetryInterval           string             `yaml:"retry_interval"`
+	MaxSegmentBytes         int64              `yaml:"max_segment_bytes"`
+	MaxDiskSpace            string             `yaml:"max_disk_space"`
+	DeprecatedMaxSegments   removedConfigField `yaml:"-"`
+	IncludeRedactedText     bool               `yaml:"include_redacted_text"`
 }
 
 // removedConfigField records the presence of a retired YAML key, including
@@ -608,6 +611,12 @@ func validate(cfg *Config) error {
 		host, port, splitErr := net.SplitHostPort(cfg.Telemetry.CollectorTarget)
 		if splitErr != nil || strings.TrimSpace(host) == "" || strings.TrimSpace(port) == "" {
 			return fmt.Errorf("config: telemetry.collector_target must be a host:port address")
+		}
+	}
+	if cfg.Telemetry.CollectorURL != "" {
+		u, parseErr := url.Parse(cfg.Telemetry.CollectorURL)
+		if parseErr != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("config: telemetry.collector_url must be an HTTPS URL")
 		}
 	}
 	if cfg.Telemetry.CollectorInsecure && (cfg.Telemetry.CollectorCA != "" || cfg.Telemetry.CollectorServerName != "") {
