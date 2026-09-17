@@ -39,7 +39,7 @@ See the Docusaurus documentation under [docs/](docs/) for architecture details.
   - **Windows Chocolatey**: `choco install nodejs --version=24`
   - **Ubuntu/Debian**: use [NodeSource](https://github.com/nodesource/distributions): `curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash - && sudo apt-get install -y nodejs`
   - **Direct download**: [nodejs.org/en/download](https://nodejs.org/en/download/)
-- (optional) `protoc` + `protoc-gen-go` + `protoc-gen-go-grpc` -- only if modifying `.proto` files
+- `protoc` + `protoc-gen-go` + `protoc-gen-go-grpc` for `make build` and regenerating `.proto` files (installed by `make deps`)
 
 Run `scripts/setup-node.sh` to verify your Node.js installation meets the project requirements, or `scripts/setup-node.sh --install` to attempt automatic installation via Homebrew on macOS.
 
@@ -52,6 +52,13 @@ cd bridgectl
 # Set up Node.js (pick one):
 nvm install           # if using nvm (recommended)
 # Or verify your system Node: scripts/setup-node.sh
+
+# Verify Node.js, install Go development tools, and download Go dependencies:
+make deps
+# Persist the Go tools directory on PATH for Bash or Zsh:
+make setup
+# Run the export printed by make setup to update this terminal too.
+
 ```
 
 Set up `env-secrets` once for this repo. `env-secrets` in this environment uses AWS Secrets Manager:
@@ -520,10 +527,30 @@ Providers are configured in `config/bridge-dev.yaml`. See [docs/docs/reference/c
 
 ---
 
+`make deps` first runs `setup-node` to verify the Node.js version in `.nvmrc`
+(it reports installation instructions if Node is missing or incompatible).
+It requires Go and runs `tools` to install the protobuf Go plugins, plus `goimports` and
+`golangci-lint` with pinned versions. It installs missing `protoc` through Homebrew (with confirmation prompts disabled)
+or apt (using sudo when needed); on other systems, install `protoc` first with your
+package manager. Set `PROTOC_INCLUDE` when protobuf headers are outside the
+Homebrew prefix or `/usr/include`. Installing Node.js, provider CLIs, Docker, and Git hooks
+are separate setup steps. Use `make web-install` or `make docs-install` for the
+corresponding frontend dependencies.
+
 ## Makefile Targets
+
+`make setup` adds `go env GOBIN` (or the first GOPATH entry's `bin` directory)
+to `~/.bashrc` and the active Bash login profile, or `${ZDOTDIR:-$HOME}/.zshrc`,
+for future interactive shells. Bash uses the first existing file among
+`~/.bash_profile`, `~/.bash_login`, and `~/.profile`; setup creates `.bash_profile`
+if none exists. Repeated runs and sourcing do not duplicate the new PATH entry. Set `SETUP_SHELL_RC` to use a custom
+Bash/Zsh startup file. Make cannot change the calling shell's environment, so
+run the printed export command to update your current terminal immediately.
 
 | Target | Description |
 |--------|-------------|
+| `make setup` | Persist the Go tools directory on PATH for Bash/Zsh |
+| `make deps` | Verify Node.js and install Go development tools, protoc, and Go module dependencies |
 | `make build` | Build `bin/bridgectl` and `bin/bridge-ca` |
 | `make test` | Run unit tests with race detection |
 | `make test-e2e` | Run the Dockerized end-to-end test suite |
