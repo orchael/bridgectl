@@ -46,10 +46,27 @@ nvm use
 corepack enable
 corepack prepare pnpm@11.22.0 --activate
 
+make deps
+make setup
+# Run the PATH command printed by make setup in this terminal.
+
 make build-cli
 ```
 
-The build writes `bin/bridgectl`. Use `make build` instead if you want to regenerate the gRPC stubs — this requires `protoc` and the Go generators (install them with `make tools`).
+The build writes `bin/bridgectl`. Use `make build` instead to regenerate the gRPC stubs and also build `bin/bridge-ca`.
+
+`make deps` checks your Node.js version, installs the protobuf Go generators,
+`goimports`, and `golangci-lint`, and downloads Go modules. It installs missing
+`protoc` through Homebrew (without confirmation prompts) or apt (using sudo when
+needed). On other systems, install `protoc` with your package manager first.
+Set `PROTOC_INCLUDE` if your protobuf headers are outside the Homebrew prefix or
+`/usr/include`.
+
+`make setup` persists the Go tools directory from `GOBIN` or `GOPATH` in Bash's
+`.bashrc` and active login profile, or Zsh's `.zshrc`. It prints a command to update
+the current terminal because Make cannot change its parent shell's environment.
+`make tools` and `make setup-node` remain available separately; `make dev-setup`
+is a separate workflow for development certificates, provider CLIs, and host setup.
 
 ## Install Provider CLIs
 

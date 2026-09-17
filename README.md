@@ -540,8 +540,10 @@ corresponding frontend dependencies.
 ## Makefile Targets
 
 `make setup` adds `go env GOBIN` (or the first GOPATH entry's `bin` directory)
-to `~/.bashrc` or `${ZDOTDIR:-$HOME}/.zshrc` for future interactive shells.
-Repeated runs do not duplicate the entry. Set `SETUP_SHELL_RC` to use a custom
+to `~/.bashrc` and the active Bash login profile, or `${ZDOTDIR:-$HOME}/.zshrc`,
+for future interactive shells. Bash uses the first existing file among
+`~/.bash_profile`, `~/.bash_login`, and `~/.profile`; setup creates `.bash_profile`
+if none exists. Repeated runs and sourcing do not duplicate the new PATH entry. Set `SETUP_SHELL_RC` to use a custom
 Bash/Zsh startup file. Make cannot change the calling shell's environment, so
 run the printed export command to update your current terminal immediately.
 
