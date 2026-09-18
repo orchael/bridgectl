@@ -97,6 +97,14 @@ func readBridgeSecret() (*bridgeSecret, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, err
 	}
+	// A malformed credential must report the same "missing" status
+	// everywhere (whoami/doctor/readEnrollment here, and server start's
+	// stricter localserver.CollectorCredentialPattern check), or a
+	// corrupted file reads as a healthy enrollment that then fails to
+	// start telemetry with no recovery path short of --force.
+	if !collectorCredentialPattern.MatchString(s.CollectorCredential) {
+		return nil, fmt.Errorf("bridge credential file %q is malformed", sp)
+	}
 	return &s, nil
 }
 func secureRead(path string) ([]byte, error) {
@@ -313,6 +321,17 @@ func nextSlowDownInterval(current, granted, retryAfter time.Duration) time.Durat
 	return next
 }
 
+// validateDeviceAuthorization rejects an incomplete /v1/device/authorize
+// response outright. Without this, an empty device_code or user_code would
+// print a blank code and poll /v1/device/token with an empty device_code
+// until the authorization expires, instead of failing immediately.
+func validateDeviceAuthorization(auth deviceAuthorization) error {
+	if auth.DeviceCode == "" || auth.UserCode == "" || auth.ExpiresIn <= 0 || auth.ExpiresIn > 900 || auth.Interval <= 0 || auth.Interval > 60 {
+		return fmt.Errorf("invalid Bridge authorization response")
+	}
+	return nil
+}
+
 func newBridgeLoginCmd() *cobra.Command {
 	var bridge string
 	var organization string
@@ -355,8 +374,8 @@ func runBridgeLogin(cmd *cobra.Command, bridge, organization string, force bool)
 	if _, err = httpJSON(ctx, client, "POST", base+"/v1/device/authorize", authorizeRequestBody(organization), &auth); err != nil {
 		return fmt.Errorf("request Bridge authorization: %w", err)
 	}
-	if auth.ExpiresIn <= 0 || auth.ExpiresIn > 900 || auth.Interval <= 0 || auth.Interval > 60 {
-		return fmt.Errorf("invalid Bridge authorization response")
+	if err := validateDeviceAuthorization(auth); err != nil {
+		return err
 	}
 	// A compromised or misconfigured Bridge response could point the browser
 	// at an attacker-controlled origin, tricking the user into entering their
@@ -396,7 +415,7 @@ func runBridgeLogin(cmd *cobra.Command, bridge, organization string, force bool)
 			return fmt.Errorf("bridge authorization: %w", err)
 		}
 		if tok != nil {
-			if err := persistBridgeEnrollment(*tok, installationName()); err != nil {
+			if err := persistBridgeEnrollment(*tok, installationName(), base); err != nil {
 				return err
 			}
 			_, _ = fmt.Fprintln(out, "✓ Bridge authorization complete\n✓ Installation registered\n✓ Organization selected\n✓ Telemetry configured")
@@ -431,14 +450,21 @@ func openBrowser(target string) error {
 	}
 	return errors.New("no browser opener found")
 }
-func persistBridgeEnrollment(tok deviceToken, name string) error {
+func persistBridgeEnrollment(tok deviceToken, name, expectedOrigin string) error {
 	if !supportedDeviceAPIVersions[tok.APIVersion] {
 		return fmt.Errorf("unsupported Bridge device-enrollment api_version %q", tok.APIVersion)
 	}
-	validatedBridge, err := bridgeURL(tok.BridgeURL)
-	if err != nil {
-		return fmt.Errorf("invalid Bridge URL: %w", err)
+	// bridge_url is required, verbatim data about which Bridge issued this
+	// token, not a value to resolve via bridgeURL's CLI/env/saved/default
+	// precedence chain (that chain picks where to send the *request*): an
+	// empty or malformed bridge_url must fail outright instead of silently
+	// substituting a fallback origin, and a value that differs from the
+	// origin this login actually talked to must be rejected rather than
+	// persisted, so a later doctor/telemetry run can't be pointed elsewhere.
+	if err := validateHTTPSURL(tok.BridgeURL); err != nil || tok.BridgeURL != expectedOrigin {
+		return fmt.Errorf("invalid Bridge URL: bridge_url %q does not match the requested origin %q", tok.BridgeURL, expectedOrigin)
 	}
+	validatedBridge := tok.BridgeURL
 	if err := validateHTTPSURL(tok.TelemetryEndpoint); err != nil {
 		return fmt.Errorf("invalid telemetry endpoint: %w", err)
 	}

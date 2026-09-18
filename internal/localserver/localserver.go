@@ -246,6 +246,11 @@ func serverNameFromCert(certPath string) string {
 type Config struct {
 	// StateDir overrides the default ~/.config/bridgectl directory.
 	StateDir string
+	// Version is the running bridgectl build version, reported as the
+	// collector version in telemetry segments sent to Bridge. Empty means
+	// unknown ("dev"), which is expected for local builds but should never
+	// appear in released binaries' delivered telemetry.
+	Version string
 	// Logger overrides the default logger. Nil uses a default logger at
 	// Warn level; set Verbose to lower it to Info.
 	Logger *slog.Logger
@@ -770,7 +775,7 @@ func Start(cfg Config) (*Server, error) {
 				}
 				return nil, fmt.Errorf("invalid telemetry collector credential")
 			}
-			eventSink = telemetry.NewHTTPForwardingSink(segmentSpool, telemetryCfg.CollectorURL, credential.CollectorCredential, config.ParseDuration(telemetryCfg.FlushInterval, time.Second), config.ParseDuration(telemetryCfg.RetryInterval, time.Second), func(err error) { logger.Warn("telemetry delivery", "error", err) })
+			eventSink = telemetry.NewHTTPForwardingSink(segmentSpool, telemetryCfg.CollectorURL, credential.CollectorCredential, cfg.Version, config.ParseDuration(telemetryCfg.FlushInterval, time.Second), config.ParseDuration(telemetryCfg.RetryInterval, time.Second), func(err error) { logger.Warn("telemetry delivery", "error", err) })
 			destination = "https_collector"
 		} else if telemetryCfg.CollectorTarget != "" {
 			var transportCredentials credentials.TransportCredentials

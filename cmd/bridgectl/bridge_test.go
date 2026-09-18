@@ -62,7 +62,7 @@ func TestPersistBridgeEnrollmentDoesNotOverwriteExplicitTelemetry(t *testing.T) 
 		t.Fatal(err)
 	}
 	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
-	if err := persistBridgeEnrollment(tok, "laptop"); err != nil {
+	if err := persistBridgeEnrollment(tok, "laptop", "https://bridge.example"); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(filepath.Join(dir, "bridge.yaml"))
@@ -94,7 +94,7 @@ func TestPersistBridgeEnrollmentStoresOrganizationNameAndURL(t *testing.T) {
 		TelemetryEndpoint:   "https://bridge.example/v1/telemetry/segments",
 		CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v",
 	}
-	if err := persistBridgeEnrollment(tok, "laptop"); err != nil {
+	if err := persistBridgeEnrollment(tok, "laptop", "https://bridge.example"); err != nil {
 		t.Fatal(err)
 	}
 	e, err := readEnrollmentMetadata()
@@ -119,14 +119,14 @@ func TestPersistBridgeEnrollmentRejectsUnsupportedAPIVersion(t *testing.T) {
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v2", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
-	if err := persistBridgeEnrollment(tok, "laptop"); err == nil {
+	if err := persistBridgeEnrollment(tok, "laptop", "https://bridge.example"); err == nil {
 		t.Fatal("expected unsupported api_version to be rejected")
 	}
 	if _, err := readEnrollmentMetadata(); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected no enrollment to be persisted, got err=%v", err)
 	}
 	tok.APIVersion = ""
-	if err := persistBridgeEnrollment(tok, "laptop"); err == nil {
+	if err := persistBridgeEnrollment(tok, "laptop", "https://bridge.example"); err == nil {
 		t.Fatal("expected missing api_version to be rejected")
 	}
 }
@@ -140,7 +140,7 @@ func TestPersistBridgeEnrollmentRejectsMalformedCredential(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	for _, bad := range []string{"not-a-credential", "brc_tooshort", "brc_" + strings.Repeat("a", 44), ""} {
 		tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: bad}
-		if err := persistBridgeEnrollment(tok, "laptop"); err == nil {
+		if err := persistBridgeEnrollment(tok, "laptop", "https://bridge.example"); err == nil {
 			t.Fatalf("expected credential %q to be rejected", bad)
 		}
 	}
@@ -155,7 +155,7 @@ func TestPersistBridgeEnrollmentRestoresPreviousEnrollmentOnForceFailure(t *test
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	original := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "old-org", InstallationID: "old-install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
-	if err := persistBridgeEnrollment(original, "laptop"); err != nil {
+	if err := persistBridgeEnrollment(original, "laptop", "https://bridge.example"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -171,7 +171,7 @@ func TestPersistBridgeEnrollmentRestoresPreviousEnrollmentOnForceFailure(t *test
 	}
 
 	replacement := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "new-org", InstallationID: "new-install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2H1g0F9e"}
-	if err := persistBridgeEnrollment(replacement, "laptop"); err == nil {
+	if err := persistBridgeEnrollment(replacement, "laptop", "https://bridge.example"); err == nil {
 		t.Fatal("expected the forced re-enrollment to fail")
 	}
 
@@ -204,8 +204,37 @@ func TestPersistBridgeEnrollmentRejectsInvalidOrganizationURL(t *testing.T) {
 		TelemetryEndpoint:   "https://bridge.example/v1/telemetry/segments",
 		CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v",
 	}
-	if err := persistBridgeEnrollment(tok, "laptop"); err == nil {
+	if err := persistBridgeEnrollment(tok, "laptop", "https://bridge.example"); err == nil {
 		t.Fatal("expected invalid organization URL to be rejected")
+	}
+}
+
+// TestPersistBridgeEnrollmentRejectsMismatchedBridgeURL guards against
+// treating bridge_url as optional, fallback-resolvable data: an empty value
+// or one that differs from the origin this login actually talked to must be
+// rejected outright, not silently replaced via the CLI/env/saved/default
+// precedence chain (which exists to pick where to send the *request*, not
+// to validate the *response*).
+func TestPersistBridgeEnrollmentRejectsMismatchedBridgeURL(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	base := deviceToken{APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
+
+	mismatched := base
+	mismatched.BridgeURL = "https://attacker.example"
+	if err := persistBridgeEnrollment(mismatched, "laptop", "https://bridge.example"); err == nil {
+		t.Fatal("expected a bridge_url that differs from the requested origin to be rejected")
+	}
+
+	empty := base
+	empty.BridgeURL = ""
+	if err := persistBridgeEnrollment(empty, "laptop", "https://bridge.example"); err == nil {
+		t.Fatal("expected an empty bridge_url to be rejected instead of falling back to the requested origin")
+	}
+
+	if _, err := readEnrollmentMetadata(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no enrollment to be persisted, got err=%v", err)
 	}
 }
 
@@ -222,7 +251,7 @@ func TestPersistBridgeEnrollmentRollsBackMetadataWhenCredentialWriteFails(t *tes
 		t.Fatal(err)
 	}
 	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
-	if err := persistBridgeEnrollment(tok, "laptop"); err == nil {
+	if err := persistBridgeEnrollment(tok, "laptop", "https://bridge.example"); err == nil {
 		t.Fatal("expected credential write failure to be reported")
 	}
 	if _, err := os.Stat(mp); !errors.Is(err, os.ErrNotExist) {
@@ -273,7 +302,7 @@ func TestWhoamiShowsOrganizationNameAndURL(t *testing.T) {
 		TelemetryEndpoint:   "https://bridge.example/v1/telemetry/segments",
 		CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v",
 	}
-	if err := persistBridgeEnrollment(tok, "laptop"); err != nil {
+	if err := persistBridgeEnrollment(tok, "laptop", "https://bridge.example"); err != nil {
 		t.Fatal(err)
 	}
 	cmd := newBridgeWhoamiCmd()
@@ -297,6 +326,46 @@ func mustMode(t *testing.T, path string) os.FileMode {
 		t.Fatal(err)
 	}
 	return info.Mode().Perm()
+}
+
+// TestReadBridgeSecretRejectsMalformedCredential guards against a corrupted
+// or hand-edited credential file reading as a healthy enrollment: whoami,
+// doctor, and readEnrollment must all report the same "missing" status that
+// server start's stricter localserver.CollectorCredentialPattern check
+// would, or a corrupted file looks fine here while telemetry silently fails
+// to start, with no recovery path short of --force.
+func TestReadBridgeSecretRejectsMalformedCredential(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	_, sp := bridgeStatePaths()
+	if err := atomicJSON(sp, bridgeSecret{CollectorCredential: "not-a-valid-credential"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readBridgeSecret(); err == nil {
+		t.Fatal("expected a malformed collector_credential to be rejected")
+	}
+}
+
+// TestValidateDeviceAuthorizationRejectsIncompleteResponse guards against
+// printing a blank code and polling forever: an authorize response missing
+// device_code or user_code must be rejected outright.
+func TestValidateDeviceAuthorizationRejectsIncompleteResponse(t *testing.T) {
+	valid := deviceAuthorization{DeviceCode: "secret", UserCode: "ABCD-EFGH-JKLM", ExpiresIn: 600, Interval: 5}
+	if err := validateDeviceAuthorization(valid); err != nil {
+		t.Fatalf("expected a complete authorization response to be accepted, got %v", err)
+	}
+	for name, mutate := range map[string]func(*deviceAuthorization){
+		"empty device_code": func(a *deviceAuthorization) { a.DeviceCode = "" },
+		"empty user_code":   func(a *deviceAuthorization) { a.UserCode = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			auth := valid
+			mutate(&auth)
+			if err := validateDeviceAuthorization(auth); err == nil {
+				t.Fatal("expected the incomplete response to be rejected")
+			}
+		})
+	}
 }
 
 func TestDefaultOrganizationPrecedence(t *testing.T) {
@@ -359,7 +428,7 @@ func TestLogoutRemovesManagedTelemetryAndState(t *testing.T) {
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
-	if err := persistBridgeEnrollment(tok, "laptop"); err != nil {
+	if err := persistBridgeEnrollment(tok, "laptop", "https://bridge.example"); err != nil {
 		t.Fatal(err)
 	}
 	cmd := newBridgeLogoutCmd()
@@ -397,7 +466,7 @@ func TestLogoutPreservesStandaloneConfigAlongsideManagedTelemetry(t *testing.T) 
 		t.Fatal(err)
 	}
 	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
-	if err := persistBridgeEnrollment(tok, "laptop"); err != nil {
+	if err := persistBridgeEnrollment(tok, "laptop", "https://bridge.example"); err != nil {
 		t.Fatal(err)
 	}
 	cmd := newBridgeLogoutCmd()
@@ -429,7 +498,7 @@ func TestLogoutPreservesStateWhenTelemetryCleanupFails(t *testing.T) {
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
-	if err := persistBridgeEnrollment(tok, "laptop"); err != nil {
+	if err := persistBridgeEnrollment(tok, "laptop", "https://bridge.example"); err != nil {
 		t.Fatal(err)
 	}
 	yamlPath := filepath.Join(dir, "bridge.yaml")

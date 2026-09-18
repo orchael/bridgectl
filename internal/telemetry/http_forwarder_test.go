@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ func TestBridgeEnvelopePropagatesEventSchemaVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	raw, err := bridgeEnvelope("20260918T000000.000000000Z-test", line)
+	raw, err := bridgeEnvelope("20260918T000000.000000000Z-test", line, "dev")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +90,7 @@ func TestBridgeEnvelopeForwardsFullEventData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := bridgeEnvelope("20260918T000000.000000000Z-test", line)
+	raw, err := bridgeEnvelope("20260918T000000.000000000Z-test", line, "dev")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +167,7 @@ func TestHTTPForwardingSinkRecordFailsAfterClose(t *testing.T) {
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(202) }))
 	defer server.Close()
-	sink := NewHTTPForwardingSink(spool, server.URL, "brc_test-credential", time.Hour, time.Hour, func(error) {})
+	sink := NewHTTPForwardingSink(spool, server.URL, "brc_test-credential", "1.2.3", time.Hour, time.Hour, func(error) {})
 	if err := sink.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +182,7 @@ func newTestSink(t *testing.T, endpoint string, onError func(error)) *HTTPForwar
 	if err != nil {
 		t.Fatal(err)
 	}
-	sink := NewHTTPForwardingSink(spool, endpoint, "brc_test-credential", 50*time.Millisecond, 10*time.Millisecond, onError)
+	sink := NewHTTPForwardingSink(spool, endpoint, "brc_test-credential", "1.2.3", 50*time.Millisecond, 10*time.Millisecond, onError)
 	t.Cleanup(func() { _ = sink.Close(context.Background()) })
 	return sink
 }
@@ -194,7 +195,7 @@ func TestNewHTTPForwardingSinkCapsInitialRetryInterval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sink := NewHTTPForwardingSink(spool, "https://example.invalid", "brc_test-credential", time.Second, time.Hour, func(error) {})
+	sink := NewHTTPForwardingSink(spool, "https://example.invalid", "brc_test-credential", "", time.Second, time.Hour, func(error) {})
 	defer func() { _ = sink.Close(context.Background()) }()
 	if sink.retryInterval != httpForwarderMaxBackoff {
 		t.Fatalf("expected initial retryInterval capped at %v, got %v", httpForwarderMaxBackoff, sink.retryInterval)
@@ -285,7 +286,7 @@ func TestHTTPForwardingSinkCloseCancelsInFlightUpload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sink := NewHTTPForwardingSink(spool, server.URL, "brc_test-credential", 50*time.Millisecond, 10*time.Millisecond, func(error) {})
+	sink := NewHTTPForwardingSink(spool, server.URL, "brc_test-credential", "1.2.3", 50*time.Millisecond, 10*time.Millisecond, func(error) {})
 	if err := sink.Record(Event{SchemaVersion: 2, Timestamp: time.Now().UTC(), SessionID: "s1", Provider: "claude", Kind: EventSessionStarted, Sequence: 1}); err != nil {
 		t.Fatal(err)
 	}
@@ -301,4 +302,82 @@ func TestHTTPForwardingSinkCloseCancelsInFlightUpload(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected Close to report the expired context")
 	}
+}
+
+// TestBridgeEnvelopeUsesCollectorVersion guards against every uploaded
+// segment reporting the hardcoded "dev" placeholder even from release
+// binaries, which the Makefile/release build injects a real version into.
+func TestBridgeEnvelopeUsesCollectorVersion(t *testing.T) {
+	event := Event{SchemaVersion: 2, Timestamp: time.Now().UTC(), SessionID: "s1", Kind: EventSessionStarted}
+	line, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := bridgeEnvelope("20260918T000000.000000000Z-test", line, "1.4.2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Segment struct {
+			Collector struct {
+				Version string `json:"version"`
+			} `json:"collector"`
+		} `json:"segment"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Segment.Collector.Version != "1.4.2" {
+		t.Fatalf("collector.version = %q, want 1.4.2", envelope.Segment.Collector.Version)
+	}
+}
+
+// TestHTTPForwardingSinkErrorIncludesBridgeErrorCodeNotRawBody guards two
+// things at once: a non-2xx response's structured Bridge error code (e.g.
+// unsupported_event_schema) must reach the returned error so persistent
+// failures are diagnosable, but the raw response body must never be
+// included, since a malicious or misconfigured endpoint's response could
+// otherwise get logged verbatim (and could in principle reflect the brc_
+// Authorization header back).
+func TestHTTPForwardingSinkErrorIncludesBridgeErrorCodeNotRawBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(422)
+		_, _ = w.Write([]byte(`{"error":"unsupported_event_schema","authorization_echo":"Bearer brc_should-not-be-logged"}`))
+	}))
+	defer server.Close()
+
+	var gotErr error
+	errCh := make(chan struct{}, 1)
+	sink := NewHTTPForwardingSink(newTestSpool(t), server.URL, "brc_test-credential", "1.2.3", time.Hour, time.Hour, func(err error) {
+		gotErr = err
+		select {
+		case errCh <- struct{}{}:
+		default:
+		}
+	})
+	defer func() { _ = sink.Close(context.Background()) }()
+	if err := sink.Record(Event{SchemaVersion: 2, Timestamp: time.Now().UTC(), SessionID: "s1", Kind: EventSessionStarted}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a delivery error callback")
+	}
+	if gotErr == nil || !strings.Contains(gotErr.Error(), "unsupported_event_schema") {
+		t.Fatalf("expected the error to include Bridge's error code, got %v", gotErr)
+	}
+	if strings.Contains(gotErr.Error(), "brc_should-not-be-logged") {
+		t.Fatalf("error must not include the raw response body: %v", gotErr)
+	}
+}
+
+func newTestSpool(t *testing.T) *SegmentSpool {
+	t.Helper()
+	spool, err := NewSegmentSpool(t.TempDir(), 1<<20, 10<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return spool
 }

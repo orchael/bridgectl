@@ -18,15 +18,15 @@ const httpForwarderMaxBackoff = 30 * time.Second
 // HTTPForwardingSink delivers the existing normalized JSONL spool to Bridge's
 // HTTPS collector. The credential is held only in memory and is never logged.
 type HTTPForwardingSink struct {
-	spool                *SegmentSpool
-	endpoint, credential string
-	flushInterval        time.Duration
-	retryInterval        time.Duration
-	client               *http.Client
-	stop                 chan struct{}
-	done                 chan struct{}
-	ctx                  context.Context
-	cancel               context.CancelFunc
+	spool                         *SegmentSpool
+	endpoint, credential, version string
+	flushInterval                 time.Duration
+	retryInterval                 time.Duration
+	client                        *http.Client
+	stop                          chan struct{}
+	done                          chan struct{}
+	ctx                           context.Context
+	cancel                        context.CancelFunc
 
 	mu     sync.Mutex
 	closed bool
@@ -51,16 +51,19 @@ func (s *HTTPForwardingSink) Record(event Event) error {
 // timer schedules every attempt so a pending backoff is never raced by an
 // independent flush tick, which would otherwise retry an unavailable
 // collector more often than the backoff intends.
-func NewHTTPForwardingSink(spool *SegmentSpool, endpoint, credential string, flushInterval, retryInterval time.Duration, onError func(error)) *HTTPForwardingSink {
+func NewHTTPForwardingSink(spool *SegmentSpool, endpoint, credential, collectorVersion string, flushInterval, retryInterval time.Duration, onError func(error)) *HTTPForwardingSink {
 	if flushInterval <= 0 {
 		flushInterval = 10 * time.Second
 	}
 	if retryInterval <= 0 {
 		retryInterval = time.Second
 	}
+	if collectorVersion == "" {
+		collectorVersion = "dev"
+	}
 	retryInterval = min(retryInterval, httpForwarderMaxBackoff)
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &HTTPForwardingSink{spool: spool, endpoint: endpoint, credential: credential, flushInterval: flushInterval, retryInterval: retryInterval, client: &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}, stop: make(chan struct{}), done: make(chan struct{}), ctx: ctx, cancel: cancel}
+	s := &HTTPForwardingSink{spool: spool, endpoint: endpoint, credential: credential, version: collectorVersion, flushInterval: flushInterval, retryInterval: retryInterval, client: &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}, stop: make(chan struct{}), done: make(chan struct{}), ctx: ctx, cancel: cancel}
 	go func() {
 		defer close(s.done)
 		timer := time.NewTimer(0)
@@ -99,7 +102,7 @@ func (s *HTTPForwardingSink) upload(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		payload, err := bridgeEnvelope(seg.ID, data)
+		payload, err := bridgeEnvelope(seg.ID, data, s.version)
 		if err != nil {
 			return err
 		}
@@ -116,7 +119,20 @@ func (s *HTTPForwardingSink) upload(ctx context.Context) error {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		_ = resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			_ = body
+			// Extract only Bridge's well-known structured error code, never
+			// the raw response body: a malicious or misconfigured endpoint
+			// could otherwise get its response (which might reflect request
+			// headers, including the brc_ credential) written into local
+			// delivery logs. Bridge's own error responses are always
+			// {"error":"<code>"}, so this still makes persistent failures
+			// like unsupported_event_schema diagnosable.
+			var parsed struct {
+				Error string `json:"error"`
+			}
+			_ = json.Unmarshal(body, &parsed)
+			if parsed.Error != "" {
+				return fmt.Errorf("telemetry upload returned HTTP %d: %s", resp.StatusCode, parsed.Error)
+			}
 			return fmt.Errorf("telemetry upload returned HTTP %d", resp.StatusCode)
 		}
 		if err := s.spool.Remove(seg.ID); err != nil {
@@ -143,7 +159,7 @@ func (s *HTTPForwardingSink) Close(ctx context.Context) error {
 		return ctx.Err()
 	}
 }
-func bridgeEnvelope(id string, jsonl []byte) ([]byte, error) {
+func bridgeEnvelope(id string, jsonl []byte, collectorVersion string) ([]byte, error) {
 	events := make([]map[string]any, 0)
 	for _, line := range bytes.Split(bytes.TrimSpace(jsonl), []byte("\n")) {
 		var e Event
@@ -234,7 +250,7 @@ func bridgeEnvelope(id string, jsonl []byte) ([]byte, error) {
 			created = parsed
 		}
 	}
-	segment := map[string]any{"created_at": created.Format(time.RFC3339Nano), "collector": map[string]string{"name": "bridgectl", "version": "dev"}, "events": events}
+	segment := map[string]any{"created_at": created.Format(time.RFC3339Nano), "collector": map[string]string{"name": "bridgectl", "version": collectorVersion}, "events": events}
 	raw, err := json.Marshal(segment)
 	if err != nil {
 		return nil, err
