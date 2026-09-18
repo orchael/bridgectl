@@ -31,8 +31,11 @@ type HTTPForwardingSink struct {
 func (s *HTTPForwardingSink) Record(event Event) error { return s.spool.Record(event) }
 
 // NewHTTPForwardingSink starts delivery on flushInterval, retrying sooner
-// (with exponential backoff up to 30s) on failure using retryInterval as the
-// starting delay, matching GRPCForwardingSink's retry behavior.
+// (with exponential backoff starting at retryInterval, capped at 30s) after
+// a failed delivery, matching GRPCForwardingSink's retry behavior. A single
+// timer schedules every attempt so a pending backoff is never raced by an
+// independent flush tick, which would otherwise retry an unavailable
+// collector more often than the backoff intends.
 func NewHTTPForwardingSink(spool *SegmentSpool, endpoint, credential string, flushInterval, retryInterval time.Duration, onError func(error)) *HTTPForwardingSink {
 	if flushInterval <= 0 {
 		flushInterval = 10 * time.Second
@@ -40,36 +43,29 @@ func NewHTTPForwardingSink(spool *SegmentSpool, endpoint, credential string, flu
 	if retryInterval <= 0 {
 		retryInterval = time.Second
 	}
+	retryInterval = min(retryInterval, httpForwarderMaxBackoff)
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &HTTPForwardingSink{spool: spool, endpoint: endpoint, credential: credential, flushInterval: flushInterval, retryInterval: retryInterval, client: &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}, stop: make(chan struct{}), done: make(chan struct{}), ctx: ctx, cancel: cancel}
 	go func() {
 		defer close(s.done)
-		flushTicker := time.NewTicker(flushInterval)
-		defer flushTicker.Stop()
-		retryTimer := time.NewTimer(0)
-		defer retryTimer.Stop()
+		timer := time.NewTimer(0)
+		defer timer.Stop()
 		backoff := retryInterval
-		deliver := func() {
-			if err := s.upload(s.ctx); err != nil {
-				if onError != nil {
-					onError(err)
-				}
-				resetTimer(retryTimer, backoff)
-				backoff = min(backoff*2, httpForwarderMaxBackoff)
-			} else {
-				backoff = retryInterval
-				resetTimer(retryTimer, flushInterval)
-			}
-		}
-		deliver()
 		for {
 			select {
 			case <-s.stop:
 				return
-			case <-flushTicker.C:
-				deliver()
-			case <-retryTimer.C:
-				deliver()
+			case <-timer.C:
+				if err := s.upload(s.ctx); err != nil {
+					if onError != nil {
+						onError(err)
+					}
+					resetTimer(timer, backoff)
+					backoff = min(backoff*2, httpForwarderMaxBackoff)
+				} else {
+					backoff = retryInterval
+					resetTimer(timer, flushInterval)
+				}
 			}
 		}
 	}()

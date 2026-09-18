@@ -29,13 +29,36 @@ func TestBridgeURLPrecedenceAndHTTPS(t *testing.T) {
 	}
 }
 
+// TestBridgeURLFallsBackToSavedOriginWithoutCredential guards the documented
+// URL precedence (flag > env > saved enrollment URL > default): a missing or
+// unreadable credential file must not hide the saved origin, since only the
+// enrollment metadata is needed to know which Bridge was previously used.
+func TestBridgeURLFallsBackToSavedOriginWithoutCredential(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	mp, _ := bridgeStatePaths()
+	if err := atomicJSON(mp, bridgeEnrollment{BridgeURL: "https://saved.example", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://saved.example/v1/telemetry/segments"}); err != nil {
+		t.Fatal(err)
+	}
+	// No bridge-credentials.json was ever written: readEnrollment() (which
+	// requires both files) would fail here, but bridgeURL must still resolve
+	// the saved origin from metadata alone.
+	got, err := bridgeURL("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://saved.example" {
+		t.Fatalf("expected saved origin despite missing credential, got %q", got)
+	}
+}
+
 func TestPersistBridgeEnrollmentDoesNotOverwriteExplicitTelemetry(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
 	if err := os.WriteFile(filepath.Join(dir, "bridge.yaml"), []byte("telemetry:\n  collector_url: https://explicit.example/v1/telemetry/segments\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_secret"}
+	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
 	if err := persistBridgeEnrollment(tok, "laptop"); err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +72,7 @@ func TestPersistBridgeEnrollmentDoesNotOverwriteExplicitTelemetry(t *testing.T) 
 	if mode := mustMode(t, filepath.Join(dir, "bridge-credentials.json")); mode != 0600 {
 		t.Fatalf("credential mode %o", mode)
 	}
-	if strings.Contains(string(b), "brc_secret") {
+	if strings.Contains(string(b), "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v") {
 		t.Fatal("credential leaked into config")
 	}
 }
@@ -65,7 +88,7 @@ func TestPersistBridgeEnrollmentStoresOrganizationNameAndURL(t *testing.T) {
 		OrganizationURL:     "https://bridge.example/organizations/org-123",
 		InstallationID:      "install",
 		TelemetryEndpoint:   "https://bridge.example/v1/telemetry/segments",
-		CollectorCredential: "brc_secret",
+		CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v",
 	}
 	if err := persistBridgeEnrollment(tok, "laptop"); err != nil {
 		t.Fatal(err)
@@ -90,7 +113,7 @@ func TestPersistBridgeEnrollmentStoresOrganizationNameAndURL(t *testing.T) {
 func TestPersistBridgeEnrollmentRejectsUnsupportedAPIVersion(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
-	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v2", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_secret"}
+	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v2", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
 	if err := persistBridgeEnrollment(tok, "laptop"); err == nil {
 		t.Fatal("expected unsupported api_version to be rejected")
 	}
@@ -100,6 +123,64 @@ func TestPersistBridgeEnrollmentRejectsUnsupportedAPIVersion(t *testing.T) {
 	tok.APIVersion = ""
 	if err := persistBridgeEnrollment(tok, "laptop"); err == nil {
 		t.Fatal("expected missing api_version to be rejected")
+	}
+}
+
+// TestPersistBridgeEnrollmentRejectsMalformedCredential guards against
+// persisting and sending an arbitrary bearer token to the collector: the
+// protocol documents brc_<opaque secret> as the only valid credential shape.
+func TestPersistBridgeEnrollmentRejectsMalformedCredential(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	for _, bad := range []string{"not-a-credential", "brc_tooshort", "brc_" + strings.Repeat("a", 44), ""} {
+		tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: bad}
+		if err := persistBridgeEnrollment(tok, "laptop"); err == nil {
+			t.Fatalf("expected credential %q to be rejected", bad)
+		}
+	}
+}
+
+// TestPersistBridgeEnrollmentRestoresPreviousEnrollmentOnForceFailure guards
+// against a --force re-enrollment silently logging the user out: if a step
+// after overwriting mp/sp fails, the enrollment that existed before this
+// login attempt must be restored, not deleted.
+func TestPersistBridgeEnrollmentRestoresPreviousEnrollmentOnForceFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	original := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "old-org", InstallationID: "old-install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
+	if err := persistBridgeEnrollment(original, "laptop"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make configureBridgeTelemetry fail by replacing bridge.yaml (already
+	// created by the first login) with a directory, simulating a failure
+	// after mp/sp are overwritten.
+	yamlPath := filepath.Join(dir, "bridge.yaml")
+	if err := os.Remove(yamlPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(yamlPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	replacement := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "new-org", InstallationID: "new-install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2H1g0F9e"}
+	if err := persistBridgeEnrollment(replacement, "laptop"); err == nil {
+		t.Fatal("expected the forced re-enrollment to fail")
+	}
+
+	e, err := readEnrollmentMetadata()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.OrganizationID != "old-org" {
+		t.Fatalf("expected the previous enrollment to be restored, got organization_id=%q", e.OrganizationID)
+	}
+	s, err := readBridgeSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.CollectorCredential != original.CollectorCredential {
+		t.Fatal("expected the previous credential to be restored")
 	}
 }
 
@@ -113,7 +194,7 @@ func TestPersistBridgeEnrollmentRejectsInvalidOrganizationURL(t *testing.T) {
 		OrganizationURL:     "not-a-url",
 		InstallationID:      "install",
 		TelemetryEndpoint:   "https://bridge.example/v1/telemetry/segments",
-		CollectorCredential: "brc_secret",
+		CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v",
 	}
 	if err := persistBridgeEnrollment(tok, "laptop"); err == nil {
 		t.Fatal("expected invalid organization URL to be rejected")
@@ -131,7 +212,7 @@ func TestPersistBridgeEnrollmentRollsBackMetadataWhenCredentialWriteFails(t *tes
 	if err := os.MkdirAll(sp, 0700); err != nil { // occupy the credential path with a directory so the write fails
 		t.Fatal(err)
 	}
-	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_secret"}
+	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
 	if err := persistBridgeEnrollment(tok, "laptop"); err == nil {
 		t.Fatal("expected credential write failure to be reported")
 	}
@@ -180,7 +261,7 @@ func TestWhoamiShowsOrganizationNameAndURL(t *testing.T) {
 		OrganizationURL:     "https://bridge.example/organizations/org-123",
 		InstallationID:      "install",
 		TelemetryEndpoint:   "https://bridge.example/v1/telemetry/segments",
-		CollectorCredential: "brc_secret",
+		CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v",
 	}
 	if err := persistBridgeEnrollment(tok, "laptop"); err != nil {
 		t.Fatal(err)
@@ -245,7 +326,7 @@ func TestLogoutRemovesCredentialWhenMetadataAlreadyMissing(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
 	_, sp := bridgeStatePaths()
-	if err := atomicJSON(sp, bridgeSecret{CollectorCredential: "brc_secret"}); err != nil {
+	if err := atomicJSON(sp, bridgeSecret{CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}); err != nil {
 		t.Fatal(err)
 	}
 	cmd := newBridgeLogoutCmd()
@@ -265,7 +346,7 @@ func TestLogoutRemovesCredentialWhenMetadataAlreadyMissing(t *testing.T) {
 func TestLogoutRemovesManagedTelemetryAndState(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
-	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_secret"}
+	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
 	if err := persistBridgeEnrollment(tok, "laptop"); err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +381,7 @@ func TestLogoutRemovesManagedTelemetryAndState(t *testing.T) {
 func TestLogoutPreservesStateWhenTelemetryCleanupFails(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
-	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_secret"}
+	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
 	if err := persistBridgeEnrollment(tok, "laptop"); err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +422,7 @@ func TestHTTPJSONRejectsRedirect(t *testing.T) {
 func TestPollDeviceTokenParsesSuccess(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
-		_, _ = w.Write([]byte(`{"bridge_url":"https://bridge.example","api_version":"v1","organization_id":"org","installation_id":"install","telemetry_endpoint":"https://bridge.example/v1/telemetry/segments","collector_credential":"brc_secret"}`))
+		_, _ = w.Write([]byte(`{"bridge_url":"https://bridge.example","api_version":"v1","organization_id":"org","installation_id":"install","telemetry_endpoint":"https://bridge.example/v1/telemetry/segments","collector_credential":"brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}`))
 	}))
 	defer target.Close()
 	client := &http.Client{}
@@ -349,7 +430,7 @@ func TestPollDeviceTokenParsesSuccess(t *testing.T) {
 	if err != nil || derr != nil {
 		t.Fatalf("tok=%v derr=%v err=%v", tok, derr, err)
 	}
-	if tok == nil || tok.APIVersion != "v1" || tok.CollectorCredential != "brc_secret" {
+	if tok == nil || tok.APIVersion != "v1" || tok.CollectorCredential != "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v" {
 		t.Fatalf("unexpected token: %+v", tok)
 	}
 }
@@ -390,15 +471,25 @@ func TestPollDeviceTokenSlowDownHonorsGreatestInterval(t *testing.T) {
 	if retryAfter != 45*time.Second {
 		t.Fatalf("expected Retry-After=45s, got %v", retryAfter)
 	}
-	interval := 5 * time.Second
-	if granted := time.Duration(derr.Interval) * time.Second; granted > interval {
-		interval = granted
+	if got := nextSlowDownInterval(5*time.Second, time.Duration(derr.Interval)*time.Second, retryAfter); got != 45*time.Second {
+		t.Fatalf("expected the greatest of current/granted/Retry-After (45s), got %v", got)
 	}
-	if retryAfter > interval {
-		interval = retryAfter
+}
+
+// TestNextSlowDownIntervalHasNoUpperClamp guards the documented contract of
+// never reducing below what the server granted: a self-imposed ceiling
+// (the old exponential-backoff design used one) would violate that when
+// Bridge legitimately asks for a wait longer than 60s under abuse
+// mitigation.
+func TestNextSlowDownIntervalHasNoUpperClamp(t *testing.T) {
+	if got := nextSlowDownInterval(5*time.Second, 300*time.Second, 0); got != 300*time.Second {
+		t.Fatalf("expected the server-granted interval (300s) to be honored uncapped, got %v", got)
 	}
-	if interval != 45*time.Second {
-		t.Fatalf("expected the greatest of current/granted/Retry-After (45s), got %v", interval)
+	if got := nextSlowDownInterval(5*time.Second, 0, 400*time.Second); got != 400*time.Second {
+		t.Fatalf("expected Retry-After (400s) to be honored uncapped, got %v", got)
+	}
+	if got := nextSlowDownInterval(90*time.Second, 10*time.Second, 20*time.Second); got != 90*time.Second {
+		t.Fatalf("expected the current interval to never be reduced, got %v", got)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -47,7 +48,11 @@ func bridgeURL(flag string) (string, error) {
 		raw = strings.TrimSpace(os.Getenv("BRIDGECTL_BRIDGE_URL"))
 	}
 	if raw == "" {
-		if enrollment, _, err := readEnrollment(); err == nil {
+		// A missing/unreadable credential file must not hide the saved
+		// origin: the documented precedence only needs the enrollment
+		// metadata to pick the previously enrolled Bridge, not a working
+		// credential.
+		if enrollment, err := readEnrollmentMetadata(); err == nil {
 			raw = strings.TrimSpace(enrollment.BridgeURL)
 		}
 	}
@@ -118,7 +123,41 @@ func atomicJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	return atomicWriteFile(path, append(b, '\n'), 0600)
+}
+
+// snapshotForRestore captures the current contents of mp and sp (if any) and
+// returns a function that restores exactly that prior state: the original
+// bytes for a file that existed, or removal for one that did not. Used to
+// undo a failed --force re-enrollment without destroying a still-valid
+// enrollment that existed before this login attempt.
+func snapshotForRestore(mp, sp string) func() {
+	readOrNil := func(path string) []byte {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		return b
+	}
+	oldMP, oldSP := readOrNil(mp), readOrNil(sp)
+	restoreOne := func(path string, old []byte) {
+		if old == nil {
+			_ = os.Remove(path)
+			return
+		}
+		_ = atomicWriteFile(path, old, 0600)
+	}
+	return func() {
+		restoreOne(mp, oldMP)
+		restoreOne(sp, oldSP)
+	}
+}
+
+// atomicWriteFile writes data to path via a temp file + rename in the same
+// directory, so a process interruption or concurrent reader can never
+// observe a truncated or partially written file.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".bridge-*")
@@ -127,8 +166,8 @@ func atomicJSON(path string, v any) error {
 	}
 	name := tmp.Name()
 	defer func() { _ = os.Remove(name) }()
-	if err = tmp.Chmod(0600); err == nil {
-		_, err = tmp.Write(append(b, '\n'))
+	if err = tmp.Chmod(perm); err == nil {
+		_, err = tmp.Write(data)
 	}
 	if err == nil {
 		err = tmp.Sync()
@@ -203,6 +242,12 @@ type deviceToken struct {
 // persisting a credential issued under a protocol this build cannot honor.
 var supportedDeviceAPIVersions = map[string]bool{"v1": true}
 
+// collectorCredentialPattern matches Bridge's documented brc_ telemetry-only
+// credential format (brc_ followed by base64url(32 random bytes), 43
+// characters). A malformed or incompatible response must not be accepted as
+// an opaque bearer token and sent to the collector.
+var collectorCredentialPattern = regexp.MustCompile(`^brc_[A-Za-z0-9_-]{43}$`)
+
 type deviceTokenError struct {
 	Error    string `json:"error"`
 	Interval int    `json:"interval"`
@@ -251,6 +296,23 @@ func pollDeviceToken(ctx context.Context, client *http.Client, endpoint, deviceC
 		return nil, nil, retryAfter, fmt.Errorf("bridge returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	return nil, &derr, retryAfter, nil
+}
+
+// nextSlowDownInterval implements the documented slow_down contract: the
+// client must keep the greatest of its current interval, the server-granted
+// interval, and Retry-After, and must never reduce it. There is deliberately
+// no upper clamp — the outer authorization deadline already bounds
+// worst-case wait time, and capping here would violate "never reduce" if
+// Bridge legitimately asks for a longer wait under abuse mitigation.
+func nextSlowDownInterval(current, granted, retryAfter time.Duration) time.Duration {
+	next := current
+	if granted > next {
+		next = granted
+	}
+	if retryAfter > next {
+		next = retryAfter
+	}
+	return next
 }
 
 func newBridgeLoginCmd() *cobra.Command {
@@ -346,20 +408,7 @@ func runBridgeLogin(cmd *cobra.Command, bridge, organization string, force bool)
 		case "authorization_pending":
 			continue
 		case "slow_down":
-			// The client must keep the greatest interval it has received:
-			// take the current interval, the server-granted interval, and
-			// Retry-After, and never go below any of them.
-			next := interval
-			if granted := time.Duration(derr.Interval) * time.Second; granted > next {
-				next = granted
-			}
-			if retryAfter > next {
-				next = retryAfter
-			}
-			if next > 60*time.Second {
-				next = 60 * time.Second
-			}
-			interval = next
+			interval = nextSlowDownInterval(interval, time.Duration(derr.Interval)*time.Second, retryAfter)
 			continue
 		default:
 			return fmt.Errorf("bridge authorization: %s", derr.Error)
@@ -398,6 +447,9 @@ func persistBridgeEnrollment(tok deviceToken, name string) error {
 	if tok.OrganizationID == "" || tok.InstallationID == "" || tok.CollectorCredential == "" {
 		return errors.New("bridge returned incomplete enrollment")
 	}
+	if !collectorCredentialPattern.MatchString(tok.CollectorCredential) {
+		return errors.New("bridge returned a malformed collector credential")
+	}
 	orgURL := strings.TrimSpace(tok.OrganizationURL)
 	if orgURL != "" {
 		if err := validateHTTPSURL(orgURL); err != nil {
@@ -406,19 +458,20 @@ func persistBridgeEnrollment(tok deviceToken, name string) error {
 	}
 	e := bridgeEnrollment{BridgeURL: validatedBridge, OrganizationID: tok.OrganizationID, OrganizationName: strings.TrimSpace(tok.OrganizationName), OrganizationURL: orgURL, InstallationID: tok.InstallationID, InstallationName: name, TelemetryEndpoint: tok.TelemetryEndpoint}
 	mp, sp := bridgeStatePaths()
+	// With --force, mp/sp may already hold a working enrollment. Capture it
+	// before overwriting so a later failure restores it instead of just
+	// deleting the files (which would silently log a still-valid enrollment
+	// out on a transient write/config error).
+	restore := snapshotForRestore(mp, sp)
 	if err := atomicJSON(mp, e); err != nil {
 		return fmt.Errorf("save Bridge enrollment: %w", err)
 	}
 	if err := atomicJSON(sp, bridgeSecret{CollectorCredential: tok.CollectorCredential}); err != nil {
-		// Roll back the metadata file too: leaving it behind makes the next
-		// login see a partially readable enrollment and refuse to re-enroll
-		// without --force, stranding recovery in a credential-missing state.
-		_ = os.Remove(mp)
+		restore()
 		return fmt.Errorf("save Bridge credential: %w", err)
 	}
 	if err := configureBridgeTelemetry(e, mp); err != nil {
-		_ = os.Remove(mp)
-		_ = os.Remove(sp)
+		restore()
 		return fmt.Errorf("configure Bridge telemetry: %w", err)
 	}
 	return nil
@@ -469,7 +522,7 @@ func configureBridgeTelemetry(e bridgeEnrollment, metadataPath string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0600)
+	return atomicWriteFile(path, b, 0600)
 }
 
 func newBridgeWhoamiCmd() *cobra.Command {
@@ -563,5 +616,5 @@ func removeManagedTelemetry() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, out, 0600)
+	return atomicWriteFile(path, out, 0600)
 }

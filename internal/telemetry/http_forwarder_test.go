@@ -64,6 +64,21 @@ func newTestSink(t *testing.T, endpoint string, onError func(error)) *HTTPForwar
 	return sink
 }
 
+// TestNewHTTPForwardingSinkCapsInitialRetryInterval guards against a valid
+// but large telemetry.retry_interval configuration waiting longer than the
+// documented 30s maximum backoff on its very first failed retry.
+func TestNewHTTPForwardingSinkCapsInitialRetryInterval(t *testing.T) {
+	spool, err := NewSegmentSpool(t.TempDir(), 1<<20, 10<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := NewHTTPForwardingSink(spool, "https://example.invalid", "brc_test-credential", time.Second, time.Hour, func(error) {})
+	defer func() { _ = sink.Close(context.Background()) }()
+	if sink.retryInterval != httpForwarderMaxBackoff {
+		t.Fatalf("expected initial retryInterval capped at %v, got %v", httpForwarderMaxBackoff, sink.retryInterval)
+	}
+}
+
 func TestHTTPForwardingSinkDeliversWithAuthorizationHeader(t *testing.T) {
 	var gotAuth atomic.Value
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
