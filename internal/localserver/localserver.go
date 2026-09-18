@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -51,6 +52,36 @@ func StateDir() string {
 		home = os.TempDir()
 	}
 	return filepath.Join(home, ".config/bridgectl")
+}
+
+// CollectorCredentialPattern matches Bridge's documented brc_ telemetry-only
+// credential format (brc_ followed by base64url(32 random bytes), 43
+// characters). Shared between the enrollment write path (cmd/bridgectl) and
+// the server-start read path here so a malformed credential file is
+// rejected the same way regardless of how it got there.
+var CollectorCredentialPattern = regexp.MustCompile(`^brc_[A-Za-z0-9_-]{43}$`)
+
+// SecureReadFile reads path only if it is a regular, non-symlink file with
+// no group/world permission bits set, restoring 0600 afterward. A permissive
+// or replaced credential file (e.g. bridge-credentials.json) must not be
+// silently trusted just because it happens to exist at the expected path.
+func SecureReadFile(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("file %q is not regular", path)
+	}
+	if info.Mode().Perm()&0077 != 0 {
+		return nil, fmt.Errorf("file %q has insecure permissions", path)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	_ = os.Chmod(path, 0600)
+	return b, nil
 }
 
 // TelemetrySpoolDir resolves a configured segmented telemetry spool directory.
@@ -723,7 +754,7 @@ func Start(cfg Config) (*Server, error) {
 			if credentialPath == "" {
 				credentialPath = filepath.Join(stateDir, "bridge-credentials.json")
 			}
-			credentialData, readErr := os.ReadFile(expandTelemetryPath(credentialPath))
+			credentialData, readErr := SecureReadFile(expandTelemetryPath(credentialPath))
 			if readErr != nil {
 				if store != nil {
 					_ = store.Close()
@@ -733,7 +764,7 @@ func Start(cfg Config) (*Server, error) {
 			var credential struct {
 				CollectorCredential string `json:"collector_credential"`
 			}
-			if readErr = json.Unmarshal(credentialData, &credential); readErr != nil || credential.CollectorCredential == "" {
+			if readErr = json.Unmarshal(credentialData, &credential); readErr != nil || !CollectorCredentialPattern.MatchString(credential.CollectorCredential) {
 				if store != nil {
 					_ = store.Close()
 				}

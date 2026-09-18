@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -242,11 +241,10 @@ type deviceToken struct {
 // persisting a credential issued under a protocol this build cannot honor.
 var supportedDeviceAPIVersions = map[string]bool{"v1": true}
 
-// collectorCredentialPattern matches Bridge's documented brc_ telemetry-only
-// credential format (brc_ followed by base64url(32 random bytes), 43
-// characters). A malformed or incompatible response must not be accepted as
-// an opaque bearer token and sent to the collector.
-var collectorCredentialPattern = regexp.MustCompile(`^brc_[A-Za-z0-9_-]{43}$`)
+// collectorCredentialPattern is shared with the server-start read path
+// (internal/localserver.CollectorCredentialPattern) so a malformed
+// credential is rejected the same way on write and on read.
+var collectorCredentialPattern = localserver.CollectorCredentialPattern
 
 type deviceTokenError struct {
 	Error    string `json:"error"`

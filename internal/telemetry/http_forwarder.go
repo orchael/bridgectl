@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -26,9 +27,23 @@ type HTTPForwardingSink struct {
 	done                 chan struct{}
 	ctx                  context.Context
 	cancel               context.CancelFunc
+
+	mu     sync.Mutex
+	closed bool
 }
 
-func (s *HTTPForwardingSink) Record(event Event) error { return s.spool.Record(event) }
+// Record fails with ErrSinkClosed once Close has been called, matching
+// GRPCForwardingSink and LocalSpoolingSink: without this guard, a late or
+// direct Record call after Close returns would still append to the spool
+// with no worker left running to ever deliver it.
+func (s *HTTPForwardingSink) Record(event Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrSinkClosed
+	}
+	return s.spool.Record(event)
+}
 
 // NewHTTPForwardingSink starts delivery on flushInterval, retrying sooner
 // (with exponential backoff starting at retryInterval, capped at 30s) after
@@ -111,7 +126,12 @@ func (s *HTTPForwardingSink) upload(ctx context.Context) error {
 	return nil
 }
 func (s *HTTPForwardingSink) Close(ctx context.Context) error {
-	close(s.stop)
+	s.mu.Lock()
+	if !s.closed {
+		s.closed = true
+		close(s.stop)
+	}
+	s.mu.Unlock()
 	select {
 	case <-s.done:
 		return s.upload(ctx)
@@ -140,12 +160,73 @@ func bridgeEnvelope(id string, jsonl []byte) ([]byte, error) {
 		if e.ByteCount > 0 {
 			payload["byte_count"] = e.ByteCount
 		}
-		events = append(events, map[string]any{"event_id": fmt.Sprintf("%s-%d", id, len(events)+1), "schema_version": e.SchemaVersion, "occurred_at": e.Timestamp.UTC().Format(time.RFC3339Nano), "session_id": e.SessionID, "provider": func() string {
+		if e.ProjectID != "" {
+			payload["project_id"] = e.ProjectID
+		}
+		if e.Direction != "" {
+			payload["direction"] = e.Direction
+		}
+		if e.Stream != "" {
+			payload["stream"] = e.Stream
+		}
+		if e.Fingerprint != "" {
+			payload["fingerprint"] = e.Fingerprint
+		}
+		if e.Text != "" {
+			payload["text"] = e.Text
+		}
+		if e.Redactions > 0 {
+			payload["redactions"] = e.Redactions
+		}
+		if e.ContentHash != "" {
+			payload["content_sha256"] = e.ContentHash
+		}
+		if e.OmittedReason != "" {
+			payload["omitted_reason"] = e.OmittedReason
+		}
+		if e.LatencyMS != 0 {
+			payload["latency_ms"] = e.LatencyMS
+		}
+		var actorRef, repositoryRef string
+		if e.Context != nil {
+			// actor_id and source_label are Bridge's forbidden_field keys
+			// (checkTelemetryJSON matches them anywhere in the body, case-
+			// and separator-insensitive); actor identity travels only in the
+			// dedicated actor_ref field below, and source_label is a purely
+			// local descriptive tag Bridge does not accept at all.
+			context := map[string]any{"os": e.Context.OS, "arch": e.Context.Arch}
+			for k, v := range map[string]string{
+				"machine_id": e.Context.MachineID, "working_directory_id": e.Context.WorkingDirectoryID,
+				"repository_id": e.Context.RepositoryID, "branch": e.Context.Branch, "commit_sha": e.Context.CommitSHA,
+			} {
+				if v != "" {
+					context[k] = v
+				}
+			}
+			payload["context"] = context
+			actorRef = e.Context.ActorID
+			repositoryRef = e.Context.RepositoryID
+		}
+		if e.ActorID != "" {
+			actorRef = e.ActorID
+		}
+		event := map[string]any{"event_id": fmt.Sprintf("%s-%d", id, len(events)+1), "schema_version": e.SchemaVersion, "occurred_at": e.Timestamp.UTC().Format(time.RFC3339Nano), "session_id": e.SessionID, "provider": func() string {
 			if e.Provider != "" {
 				return e.Provider
 			}
 			return "unknown"
-		}(), "event_type": string(e.Kind), "payload": payload})
+		}(), "event_type": string(e.Kind), "payload": payload}
+		// actor_ref/repository_ref are Bridge's sanctioned, validated slots
+		// for this data (see docs/bridgectl-device-enrollment equivalent:
+		// telemetry-ingestion-v1.md); never duplicate raw identity into the
+		// free-form payload beyond the sanitized context above.
+		if actorRef != "" {
+			event["actor_ref"] = actorRef
+		}
+		if repositoryRef != "" {
+			event["repository_ref"] = repositoryRef
+		}
+		events = append(events, event)
 	}
 	created := time.Unix(0, 0).UTC()
 	if len(id) >= len("20060102T150405.000000000Z") {
