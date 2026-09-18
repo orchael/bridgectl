@@ -60,6 +60,35 @@ func mustMode(t *testing.T, path string) os.FileMode {
 	return info.Mode().Perm()
 }
 
+func TestDefaultOrganizationPrecedence(t *testing.T) {
+	t.Setenv("BRIDGECTL_ORGANIZATION", "Env Org")
+	if got := defaultOrganization("Flag Org"); got != "Flag Org" {
+		t.Fatalf("flag precedence: %q", got)
+	}
+	if got := defaultOrganization(""); got != "Env Org" {
+		t.Fatalf("env precedence: %q", got)
+	}
+	t.Setenv("BRIDGECTL_ORGANIZATION", "")
+	if got := defaultOrganization(""); got != "" {
+		t.Fatalf("expected empty default, got %q", got)
+	}
+}
+
+func TestAuthorizeRequestBodyIncludesRequestedOrganization(t *testing.T) {
+	t.Setenv("BRIDGECTL_ORGANIZATION", "")
+	body := authorizeRequestBody("")
+	if _, ok := body["requested_organization"]; ok {
+		t.Fatalf("expected requested_organization omitted when empty, got %v", body)
+	}
+	body = authorizeRequestBody("Acme Inc")
+	if body["requested_organization"] != "Acme Inc" {
+		t.Fatalf("expected requested_organization=Acme Inc, got %v", body)
+	}
+	if body["display_name"] == "" {
+		t.Fatalf("expected display_name to still be set, got %v", body)
+	}
+}
+
 func TestHTTPJSONRejectsRedirect(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "https://attacker.example", http.StatusFound)

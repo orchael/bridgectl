@@ -14,6 +14,16 @@ The equivalent flag is `bridgectl login --bridge https://bridge.orchael.dev`. Th
 
 Login uses Bridge's device authorization flow. bridgectl displays a short code, opens `/device` when a local browser opener is available, and polls until the browser approval succeeds. Google authentication and organization selection happen in Bridge; bridgectl never receives Google tokens, passwords, cookies, or Auth.js sessions.
 
+To skip Bridge's organization picker when the target organization is already known, pass its name (not an ID — bridgectl has no way to know Bridge's internal organization IDs):
+
+```sh
+bridgectl login --organization "Acme Inc"
+# or
+BRIDGECTL_ORGANIZATION="Acme Inc" bridgectl login
+```
+
+`--organization` takes precedence over `BRIDGECTL_ORGANIZATION`. Bridge only honors this hint when the signed-in user is a member of an organization with that exact (case-insensitive) name — it is never a substitute for real membership, and any other case (no hint, no match, or more than one membership and no hint) falls back to Bridge auto-creating a home organization for brand-new users or showing its own picker when there's a genuine choice to make.
+
 After approval, bridgectl stores enrollment metadata in `bridge-enrollment.json` and the telemetry-only `brc_` credential in `bridge-credentials.json` beneath the bridgectl state directory. Both files are restricted to the current user. The credential is never printed or included in `whoami` or `doctor` output.
 
 Login writes Bridge telemetry settings only when an explicit telemetry collector URL is not already configured. Existing standalone telemetry settings therefore remain authoritative.

@@ -193,13 +193,28 @@ type deviceToken struct {
 
 func newBridgeLoginCmd() *cobra.Command {
 	var bridge string
+	var organization string
 	var force bool
-	cmd := &cobra.Command{Use: "login", Short: "Log into Bridge and enroll this installation", RunE: func(cmd *cobra.Command, _ []string) error { return runBridgeLogin(cmd, bridge, force) }}
+	cmd := &cobra.Command{Use: "login", Short: "Log into Bridge and enroll this installation", RunE: func(cmd *cobra.Command, _ []string) error { return runBridgeLogin(cmd, bridge, organization, force) }}
 	cmd.Flags().StringVar(&bridge, "bridge", "", "Bridge HTTPS origin")
+	cmd.Flags().StringVar(&organization, "organization", "", "default organization name to request")
 	cmd.Flags().BoolVar(&force, "force", false, "replace an existing enrollment")
 	return cmd
 }
-func runBridgeLogin(cmd *cobra.Command, bridge string, force bool) error {
+func defaultOrganization(flag string) string {
+	if raw := strings.TrimSpace(flag); raw != "" {
+		return raw
+	}
+	return strings.TrimSpace(os.Getenv("BRIDGECTL_ORGANIZATION"))
+}
+func authorizeRequestBody(organization string) map[string]string {
+	body := map[string]string{"display_name": installationName()}
+	if org := defaultOrganization(organization); org != "" {
+		body["requested_organization"] = org
+	}
+	return body
+}
+func runBridgeLogin(cmd *cobra.Command, bridge, organization string, force bool) error {
 	if _, _, err := readEnrollment(); err == nil && !force {
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Already logged into Bridge.")
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Use --force to re-enroll.")
@@ -215,7 +230,7 @@ func runBridgeLogin(cmd *cobra.Command, bridge string, force bool) error {
 	ctx, cancel := signalContext(cmd.Context())
 	defer cancel()
 	var auth deviceAuthorization
-	if _, err = httpJSON(ctx, client, "POST", base+"/v1/device/authorize", map[string]string{"display_name": installationName()}, &auth); err != nil {
+	if _, err = httpJSON(ctx, client, "POST", base+"/v1/device/authorize", authorizeRequestBody(organization), &auth); err != nil {
 		return fmt.Errorf("request Bridge authorization: %w", err)
 	}
 	if auth.ExpiresIn <= 0 || auth.ExpiresIn > 900 || auth.Interval <= 0 || auth.Interval > 60 {
