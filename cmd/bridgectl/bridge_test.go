@@ -14,6 +14,7 @@ import (
 
 func TestBridgeURLPrecedenceAndHTTPS(t *testing.T) {
 	t.Setenv("BRIDGECTL_STATE_DIR", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("BRIDGECTL_BRIDGE_URL", "https://env.example")
 	if got, _ := bridgeURL("https://flag.example"); got != "https://flag.example" {
 		t.Fatalf("flag precedence: %q", got)
@@ -36,6 +37,7 @@ func TestBridgeURLPrecedenceAndHTTPS(t *testing.T) {
 func TestBridgeURLFallsBackToSavedOriginWithoutCredential(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	mp, _ := bridgeStatePaths()
 	if err := atomicJSON(mp, bridgeEnrollment{BridgeURL: "https://saved.example", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://saved.example/v1/telemetry/segments"}); err != nil {
 		t.Fatal(err)
@@ -55,6 +57,7 @@ func TestBridgeURLFallsBackToSavedOriginWithoutCredential(t *testing.T) {
 func TestPersistBridgeEnrollmentDoesNotOverwriteExplicitTelemetry(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	if err := os.WriteFile(filepath.Join(dir, "bridge.yaml"), []byte("telemetry:\n  collector_url: https://explicit.example/v1/telemetry/segments\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -80,6 +83,7 @@ func TestPersistBridgeEnrollmentDoesNotOverwriteExplicitTelemetry(t *testing.T) 
 func TestPersistBridgeEnrollmentStoresOrganizationNameAndURL(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	tok := deviceToken{
 		BridgeURL:           "https://bridge.example",
 		APIVersion:          "v1",
@@ -113,6 +117,7 @@ func TestPersistBridgeEnrollmentStoresOrganizationNameAndURL(t *testing.T) {
 func TestPersistBridgeEnrollmentRejectsUnsupportedAPIVersion(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v2", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
 	if err := persistBridgeEnrollment(tok, "laptop"); err == nil {
 		t.Fatal("expected unsupported api_version to be rejected")
@@ -132,6 +137,7 @@ func TestPersistBridgeEnrollmentRejectsUnsupportedAPIVersion(t *testing.T) {
 func TestPersistBridgeEnrollmentRejectsMalformedCredential(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	for _, bad := range []string{"not-a-credential", "brc_tooshort", "brc_" + strings.Repeat("a", 44), ""} {
 		tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: bad}
 		if err := persistBridgeEnrollment(tok, "laptop"); err == nil {
@@ -147,6 +153,7 @@ func TestPersistBridgeEnrollmentRejectsMalformedCredential(t *testing.T) {
 func TestPersistBridgeEnrollmentRestoresPreviousEnrollmentOnForceFailure(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	original := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "old-org", InstallationID: "old-install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
 	if err := persistBridgeEnrollment(original, "laptop"); err != nil {
 		t.Fatal(err)
@@ -187,6 +194,7 @@ func TestPersistBridgeEnrollmentRestoresPreviousEnrollmentOnForceFailure(t *test
 func TestPersistBridgeEnrollmentRejectsInvalidOrganizationURL(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	tok := deviceToken{
 		BridgeURL:           "https://bridge.example",
 		APIVersion:          "v1",
@@ -208,6 +216,7 @@ func TestPersistBridgeEnrollmentRejectsInvalidOrganizationURL(t *testing.T) {
 func TestPersistBridgeEnrollmentRollsBackMetadataWhenCredentialWriteFails(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	mp, sp := bridgeStatePaths()
 	if err := os.MkdirAll(sp, 0700); err != nil { // occupy the credential path with a directory so the write fails
 		t.Fatal(err)
@@ -253,6 +262,7 @@ func TestValidateBridgeOriginURL(t *testing.T) {
 func TestWhoamiShowsOrganizationNameAndURL(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	tok := deviceToken{
 		BridgeURL:           "https://bridge.example",
 		APIVersion:          "v1",
@@ -325,6 +335,7 @@ func TestAuthorizeRequestBodyIncludesRequestedOrganization(t *testing.T) {
 func TestLogoutRemovesCredentialWhenMetadataAlreadyMissing(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	_, sp := bridgeStatePaths()
 	if err := atomicJSON(sp, bridgeSecret{CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}); err != nil {
 		t.Fatal(err)
@@ -346,6 +357,7 @@ func TestLogoutRemovesCredentialWhenMetadataAlreadyMissing(t *testing.T) {
 func TestLogoutRemovesManagedTelemetryAndState(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
 	if err := persistBridgeEnrollment(tok, "laptop"); err != nil {
 		t.Fatal(err)
@@ -363,9 +375,43 @@ func TestLogoutRemovesManagedTelemetryAndState(t *testing.T) {
 	if _, err := os.Stat(sp); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("credential still present after logout")
 	}
-	b, err := os.ReadFile(filepath.Join(dir, "bridge.yaml"))
-	if err != nil {
+	// bridge.yaml was created only to hold managed enrollment settings, so
+	// once those are cleared it must be removed entirely rather than left
+	// behind empty, which would otherwise permanently outrank (and shadow)
+	// an XDG config in server start's resolution order.
+	if _, err := os.Stat(filepath.Join(dir, "bridge.yaml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected the managed-only bridge.yaml to be removed, stat err=%v", err)
+	}
+}
+
+// TestLogoutPreservesStandaloneConfigAlongsideManagedTelemetry guards
+// against logout deleting a bridge.yaml that also holds the user's own
+// standalone settings: only the managed telemetry keys should be removed,
+// and the file itself must survive since it isn't empty afterward.
+func TestLogoutPreservesStandaloneConfigAlongsideManagedTelemetry(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	yamlPath := filepath.Join(dir, "bridge.yaml")
+	if err := os.WriteFile(yamlPath, []byte("providers:\n  claude:\n    binary: claude\n"), 0600); err != nil {
 		t.Fatal(err)
+	}
+	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
+	if err := persistBridgeEnrollment(tok, "laptop"); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newBridgeLogoutCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(yamlPath)
+	if err != nil {
+		t.Fatalf("expected bridge.yaml with standalone settings to survive logout: %v", err)
+	}
+	if !strings.Contains(string(b), "claude") {
+		t.Fatalf("standalone settings lost: %s", b)
 	}
 	if strings.Contains(string(b), "managed_by_bridge") || strings.Contains(string(b), "collector_url") {
 		t.Fatalf("managed telemetry not cleared: %s", b)
@@ -381,6 +427,7 @@ func TestLogoutRemovesManagedTelemetryAndState(t *testing.T) {
 func TestLogoutPreservesStateWhenTelemetryCleanupFails(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
 	if err := persistBridgeEnrollment(tok, "laptop"); err != nil {
 		t.Fatal(err)

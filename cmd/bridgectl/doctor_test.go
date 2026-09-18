@@ -31,6 +31,7 @@ func TestDoctorReportsNetworkStatus(t *testing.T) {
 	defer server.Close()
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	tok := deviceToken{BridgeURL: server.URL, APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v"}
 	if err := atomicJSON(func() string { mp, _ := bridgeStatePaths(); return mp }(), bridgeEnrollment{BridgeURL: tok.BridgeURL, OrganizationID: tok.OrganizationID, InstallationID: tok.InstallationID, TelemetryEndpoint: tok.TelemetryEndpoint}); err != nil {
 		t.Fatal(err)

@@ -498,8 +498,31 @@ func validateBridgeOriginURL(raw, expectedOrigin string, allowQuery bool) error 
 	}
 	return nil
 }
+
+// bridgeConfigPath resolves the same config file server start would use
+// (localserver.StateDir()/bridge.yaml, an XDG config, or a legacy config
+// path — see defaultServerConfigPath), falling back to the default
+// stateDir/bridge.yaml only when none of those candidates exist yet. Writing
+// to a hardcoded stateDir/bridge.yaml instead would, the first time it's
+// created, silently outrank an existing XDG config in that resolution
+// order — shadowing the user's real providers/security/session settings on
+// every later server start.
+func bridgeConfigPath() string {
+	stateDir := localserver.StateDir()
+	if p := defaultServerConfigPath(stateDir); p != "" {
+		return p
+	}
+	return filepath.Join(stateDir, "bridge.yaml")
+}
+
+func hasExplicitCollector(t map[string]any) bool {
+	url, _ := t["collector_url"].(string)
+	target, _ := t["collector_target"].(string)
+	return url != "" || target != ""
+}
+
 func configureBridgeTelemetry(e bridgeEnrollment, metadataPath string) error {
-	path := filepath.Join(localserver.StateDir(), "bridge.yaml")
+	path := bridgeConfigPath()
 	m := map[string]any{}
 	if b, err := os.ReadFile(path); err == nil {
 		if err := yaml.Unmarshal(b, &m); err != nil {
@@ -511,10 +534,18 @@ func configureBridgeTelemetry(e bridgeEnrollment, metadataPath string) error {
 		t = map[string]any{}
 	}
 	managed, _ := t["managed_by_bridge"].(bool)
-	if _, exists := t["collector_url"]; !exists || managed {
+	if !hasExplicitCollector(t) || managed {
 		t["collector_url"] = e.TelemetryEndpoint
 		t["collector_credential_file"] = filepath.Join(localserver.StateDir(), "bridge-credentials.json")
-		t["enabled"] = true
+		// Only default enabled to true when the user has not already set it
+		// (to either value): forcing it on would override an explicit
+		// enabled: false left alongside other standalone telemetry options.
+		// managed_enabled_default records that Bridge, not the user, set it,
+		// so logout knows to remove it again.
+		if _, exists := t["enabled"]; !exists {
+			t["enabled"] = true
+			t["managed_enabled_default"] = true
+		}
 		t["managed_by_bridge"] = true
 		m["telemetry"] = t
 	}
@@ -579,7 +610,7 @@ func newBridgeLogoutCmd() *cobra.Command {
 }
 
 func removeManagedTelemetry() error {
-	path := filepath.Join(localserver.StateDir(), "bridge.yaml")
+	path := bridgeConfigPath()
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -602,15 +633,27 @@ func removeManagedTelemetry() error {
 	delete(t, "collector_url")
 	delete(t, "collector_credential_file")
 	delete(t, "managed_by_bridge")
-	if len(t) == 1 {
-		if enabled, ok := t["enabled"].(bool); ok && enabled {
-			delete(t, "enabled")
-		}
+	// Only remove enabled if login set it itself (managed_enabled_default);
+	// an enabled value the user already had (true or false) alongside other
+	// standalone telemetry options must survive logout untouched.
+	if addedEnabled, _ := t["managed_enabled_default"].(bool); addedEnabled {
+		delete(t, "enabled")
 	}
+	delete(t, "managed_enabled_default")
 	if len(t) == 0 {
 		delete(m, "telemetry")
 	} else {
 		m["telemetry"] = t
+	}
+	// A config file that login created solely to hold managed enrollment
+	// settings and that now has nothing left in it must be removed, not
+	// written back empty: otherwise it keeps outranking (and shadowing) an
+	// existing XDG config in server start's resolution order forever.
+	if len(m) == 0 && path == filepath.Join(localserver.StateDir(), "bridge.yaml") {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
 	}
 	out, err := yaml.Marshal(m)
 	if err != nil {
