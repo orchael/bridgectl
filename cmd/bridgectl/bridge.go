@@ -27,6 +27,7 @@ type bridgeEnrollment struct {
 	BridgeURL         string `json:"bridge_url"`
 	OrganizationID    string `json:"organization_id"`
 	OrganizationName  string `json:"organization_name,omitempty"`
+	OrganizationURL   string `json:"organization_url,omitempty"`
 	InstallationID    string `json:"installation_id"`
 	InstallationName  string `json:"installation_name,omitempty"`
 	TelemetryEndpoint string `json:"telemetry_endpoint"`
@@ -186,6 +187,8 @@ type deviceAuthorization struct {
 type deviceToken struct {
 	BridgeURL           string `json:"bridge_url"`
 	OrganizationID      string `json:"organization_id"`
+	OrganizationName    string `json:"organization_name"`
+	OrganizationURL     string `json:"organization_url"`
 	InstallationID      string `json:"installation_id"`
 	TelemetryEndpoint   string `json:"telemetry_endpoint"`
 	CollectorCredential string `json:"collector_credential"`
@@ -307,7 +310,13 @@ func persistBridgeEnrollment(tok deviceToken, name string) error {
 	if tok.OrganizationID == "" || tok.InstallationID == "" || tok.CollectorCredential == "" {
 		return errors.New("bridge returned incomplete enrollment")
 	}
-	e := bridgeEnrollment{BridgeURL: validatedBridge, OrganizationID: tok.OrganizationID, InstallationID: tok.InstallationID, InstallationName: name, TelemetryEndpoint: tok.TelemetryEndpoint}
+	orgURL := strings.TrimSpace(tok.OrganizationURL)
+	if orgURL != "" {
+		if err := validateHTTPSURL(orgURL); err != nil {
+			return fmt.Errorf("invalid organization URL: %w", err)
+		}
+	}
+	e := bridgeEnrollment{BridgeURL: validatedBridge, OrganizationID: tok.OrganizationID, OrganizationName: strings.TrimSpace(tok.OrganizationName), OrganizationURL: orgURL, InstallationID: tok.InstallationID, InstallationName: name, TelemetryEndpoint: tok.TelemetryEndpoint}
 	mp, sp := bridgeStatePaths()
 	if err := atomicJSON(mp, e); err != nil {
 		return fmt.Errorf("save Bridge enrollment: %w", err)
@@ -370,7 +379,12 @@ func newBridgeWhoamiCmd() *cobra.Command {
 		if _, secretErr := readBridgeSecret(); secretErr != nil {
 			status = "credential missing"
 		}
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Bridge          %s\nOrganization    %s\nInstallation    %s\nStatus          %s\n", e.BridgeURL, display(e.OrganizationName, e.OrganizationID), display(e.InstallationName, e.InstallationID), status)
+		out := cmd.OutOrStdout()
+		_, _ = fmt.Fprintf(out, "Bridge          %s\nOrganization    %s\n", e.BridgeURL, display(e.OrganizationName, e.OrganizationID))
+		if e.OrganizationURL != "" {
+			_, _ = fmt.Fprintf(out, "Org URL         %s\n", e.OrganizationURL)
+		}
+		_, _ = fmt.Fprintf(out, "Installation    %s\nStatus          %s\n", display(e.InstallationName, e.InstallationID), status)
 		return nil
 	}}
 }

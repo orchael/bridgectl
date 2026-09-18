@@ -36,7 +36,7 @@ bridgectl doctor
 bridgectl logout
 ```
 
-`whoami` reports the Bridge origin, organization and installation identifiers, and login status. `doctor` reports enrollment and telemetry configuration without secrets. `logout` removes local enrollment metadata and secret material while leaving standalone bridgectl configuration untouched. The current Bridge device protocol does not expose an installation revocation endpoint to the telemetry-only credential, so logout reports that remote revocation is unavailable rather than claiming it occurred.
+`whoami` reports the Bridge origin, the organization (name when Bridge provides one, otherwise its identifier, plus a link to the organization when Bridge returns one) and installation identifiers, and login status. `doctor` reports enrollment and telemetry configuration without secrets. `logout` removes local enrollment metadata and secret material while leaving standalone bridgectl configuration untouched. The current Bridge device protocol does not expose an installation revocation endpoint to the telemetry-only credential, so logout reports that remote revocation is unavailable rather than claiming it occurred.
 
 ## Development integration
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -48,6 +49,78 @@ func TestPersistBridgeEnrollmentDoesNotOverwriteExplicitTelemetry(t *testing.T) 
 	}
 	if strings.Contains(string(b), "brc_secret") {
 		t.Fatal("credential leaked into config")
+	}
+}
+
+func TestPersistBridgeEnrollmentStoresOrganizationNameAndURL(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	tok := deviceToken{
+		BridgeURL:           "https://bridge.example",
+		OrganizationID:      "org-123",
+		OrganizationName:    "Acme Inc",
+		OrganizationURL:     "https://bridge.example/organizations/org-123",
+		InstallationID:      "install",
+		TelemetryEndpoint:   "https://bridge.example/v1/telemetry/segments",
+		CollectorCredential: "brc_secret",
+	}
+	if err := persistBridgeEnrollment(tok, "laptop"); err != nil {
+		t.Fatal(err)
+	}
+	e, err := readEnrollmentMetadata()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.OrganizationName != "Acme Inc" {
+		t.Fatalf("organization name: %q", e.OrganizationName)
+	}
+	if e.OrganizationURL != "https://bridge.example/organizations/org-123" {
+		t.Fatalf("organization url: %q", e.OrganizationURL)
+	}
+}
+
+func TestPersistBridgeEnrollmentRejectsInvalidOrganizationURL(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	tok := deviceToken{
+		BridgeURL:           "https://bridge.example",
+		OrganizationID:      "org-123",
+		OrganizationURL:     "not-a-url",
+		InstallationID:      "install",
+		TelemetryEndpoint:   "https://bridge.example/v1/telemetry/segments",
+		CollectorCredential: "brc_secret",
+	}
+	if err := persistBridgeEnrollment(tok, "laptop"); err == nil {
+		t.Fatal("expected invalid organization URL to be rejected")
+	}
+}
+
+func TestWhoamiShowsOrganizationNameAndURL(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	tok := deviceToken{
+		BridgeURL:           "https://bridge.example",
+		OrganizationID:      "org-123",
+		OrganizationName:    "Acme Inc",
+		OrganizationURL:     "https://bridge.example/organizations/org-123",
+		InstallationID:      "install",
+		TelemetryEndpoint:   "https://bridge.example/v1/telemetry/segments",
+		CollectorCredential: "brc_secret",
+	}
+	if err := persistBridgeEnrollment(tok, "laptop"); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newBridgeWhoamiCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Organization    Acme Inc") {
+		t.Fatalf("missing organization name: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "Org URL         https://bridge.example/organizations/org-123") {
+		t.Fatalf("missing organization url: %s", out.String())
 	}
 }
 

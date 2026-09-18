@@ -25,6 +25,9 @@ func newDoctorCmd() *cobra.Command {
 		_, _ = fmt.Fprintf(out, "  server        ✓ %s\n", e.BridgeURL)
 		_, _ = fmt.Fprintf(out, "  enrollment    ✓ logged in\n")
 		_, _ = fmt.Fprintf(out, "  organization  ✓ %s\n", display(e.OrganizationName, e.OrganizationID))
+		if e.OrganizationURL != "" {
+			_, _ = fmt.Fprintf(out, "  org url       ✓ %s\n", e.OrganizationURL)
+		}
 		_, _ = fmt.Fprintf(out, "  installation  ✓ %s\n", display(e.InstallationName, e.InstallationID))
 		if s, secretErr := readBridgeSecret(); secretErr != nil || s == nil || s.CollectorCredential == "" {
 			_, _ = fmt.Fprintln(out, "  telemetry     ! credential missing")
