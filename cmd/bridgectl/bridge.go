@@ -298,6 +298,19 @@ func runBridgeLogin(cmd *cobra.Command, bridge, organization string, force bool)
 	if auth.ExpiresIn <= 0 || auth.ExpiresIn > 900 || auth.Interval <= 0 || auth.Interval > 60 {
 		return fmt.Errorf("invalid Bridge authorization response")
 	}
+	// A compromised or misconfigured Bridge response could point the browser
+	// at an attacker-controlled origin, tricking the user into entering their
+	// real device code (or Google credentials) at a phishing site. Validate
+	// both returned URLs match the Bridge origin we requested before ever
+	// printing or opening them, per the documented protocol.
+	if err := validateBridgeOriginURL(auth.VerificationURI, base, false); err != nil {
+		return fmt.Errorf("invalid Bridge verification URI: %w", err)
+	}
+	if auth.VerificationURIComplete != "" {
+		if err := validateBridgeOriginURL(auth.VerificationURIComplete, base, true); err != nil {
+			return fmt.Errorf("invalid Bridge verification URI: %w", err)
+		}
+	}
 	out := cmd.OutOrStdout()
 	_, _ = fmt.Fprintf(out, "Opening %s\n\nAuthorization code:\n\n    %s\n\n", auth.VerificationURI, auth.UserCode)
 	if auth.VerificationURIComplete == "" {
@@ -397,6 +410,10 @@ func persistBridgeEnrollment(tok deviceToken, name string) error {
 		return fmt.Errorf("save Bridge enrollment: %w", err)
 	}
 	if err := atomicJSON(sp, bridgeSecret{CollectorCredential: tok.CollectorCredential}); err != nil {
+		// Roll back the metadata file too: leaving it behind makes the next
+		// login see a partially readable enrollment and refuse to re-enroll
+		// without --force, stranding recovery in a credential-missing state.
+		_ = os.Remove(mp)
 		return fmt.Errorf("save Bridge credential: %w", err)
 	}
 	if err := configureBridgeTelemetry(e, mp); err != nil {
@@ -410,6 +427,21 @@ func validateHTTPSURL(raw string) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return errors.New("must be an HTTPS URL without credentials, query, or fragment")
+	}
+	return nil
+}
+
+// validateBridgeOriginURL checks that raw is an HTTPS URL with no
+// credentials or fragment whose scheme+host exactly matches expectedOrigin
+// (an already-validated "https://host" origin). allowQuery permits a query
+// string, needed for verification_uri_complete's ?user_code=... parameter.
+func validateBridgeOriginURL(raw, expectedOrigin string, allowQuery bool) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" || (!allowQuery && (u.RawQuery != "" || u.ForceQuery)) {
+		return errors.New("must be an HTTPS URL without credentials or fragment")
+	}
+	if origin := u.Scheme + "://" + u.Host; origin != expectedOrigin {
+		return fmt.Errorf("origin %q does not match Bridge origin %q", origin, expectedOrigin)
 	}
 	return nil
 }
@@ -472,7 +504,9 @@ func display(name, id string) string {
 func newBridgeLogoutCmd() *cobra.Command {
 	return &cobra.Command{Use: "logout", Short: "Log out of Bridge", RunE: func(cmd *cobra.Command, _ []string) error {
 		mp, sp := bridgeStatePaths()
-		if _, err := os.Stat(mp); errors.Is(err, os.ErrNotExist) {
+		_, mpErr := os.Stat(mp)
+		_, spErr := os.Stat(sp)
+		if errors.Is(mpErr, os.ErrNotExist) && errors.Is(spErr, os.ErrNotExist) {
 			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Not logged into Bridge.")
 			return nil
 		}

@@ -725,15 +725,21 @@ func Start(cfg Config) (*Server, error) {
 			}
 			credentialData, readErr := os.ReadFile(expandTelemetryPath(credentialPath))
 			if readErr != nil {
+				if store != nil {
+					_ = store.Close()
+				}
 				return nil, fmt.Errorf("read telemetry collector credential: %w", readErr)
 			}
 			var credential struct {
 				CollectorCredential string `json:"collector_credential"`
 			}
 			if readErr = json.Unmarshal(credentialData, &credential); readErr != nil || credential.CollectorCredential == "" {
+				if store != nil {
+					_ = store.Close()
+				}
 				return nil, fmt.Errorf("invalid telemetry collector credential")
 			}
-			eventSink = telemetry.NewHTTPForwardingSink(segmentSpool, telemetryCfg.CollectorURL, credential.CollectorCredential, config.ParseDuration(telemetryCfg.FlushInterval, time.Second), func(err error) { logger.Warn("telemetry delivery", "error", err) })
+			eventSink = telemetry.NewHTTPForwardingSink(segmentSpool, telemetryCfg.CollectorURL, credential.CollectorCredential, config.ParseDuration(telemetryCfg.FlushInterval, time.Second), config.ParseDuration(telemetryCfg.RetryInterval, time.Second), func(err error) { logger.Warn("telemetry delivery", "error", err) })
 			destination = "https_collector"
 		} else if telemetryCfg.CollectorTarget != "" {
 			var transportCredentials credentials.TransportCredentials

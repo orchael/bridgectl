@@ -12,43 +12,68 @@ import (
 	"time"
 )
 
+const httpForwarderMaxBackoff = 30 * time.Second
+
 // HTTPForwardingSink delivers the existing normalized JSONL spool to Bridge's
 // HTTPS collector. The credential is held only in memory and is never logged.
 type HTTPForwardingSink struct {
 	spool                *SegmentSpool
 	endpoint, credential string
-	interval             time.Duration
+	flushInterval        time.Duration
+	retryInterval        time.Duration
 	client               *http.Client
 	stop                 chan struct{}
 	done                 chan struct{}
+	ctx                  context.Context
+	cancel               context.CancelFunc
 }
 
 func (s *HTTPForwardingSink) Record(event Event) error { return s.spool.Record(event) }
-func NewHTTPForwardingSink(spool *SegmentSpool, endpoint, credential string, interval time.Duration, onError func(error)) *HTTPForwardingSink {
-	if interval <= 0 {
-		interval = time.Second
+
+// NewHTTPForwardingSink starts delivery on flushInterval, retrying sooner
+// (with exponential backoff up to 30s) on failure using retryInterval as the
+// starting delay, matching GRPCForwardingSink's retry behavior.
+func NewHTTPForwardingSink(spool *SegmentSpool, endpoint, credential string, flushInterval, retryInterval time.Duration, onError func(error)) *HTTPForwardingSink {
+	if flushInterval <= 0 {
+		flushInterval = 10 * time.Second
 	}
-	s := &HTTPForwardingSink{spool: spool, endpoint: endpoint, credential: credential, interval: interval, client: &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}, stop: make(chan struct{}), done: make(chan struct{})}
+	if retryInterval <= 0 {
+		retryInterval = time.Second
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &HTTPForwardingSink{spool: spool, endpoint: endpoint, credential: credential, flushInterval: flushInterval, retryInterval: retryInterval, client: &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}, stop: make(chan struct{}), done: make(chan struct{}), ctx: ctx, cancel: cancel}
 	go func() {
 		defer close(s.done)
-		s.deliver(onError)
-		t := time.NewTicker(interval)
-		defer t.Stop()
+		flushTicker := time.NewTicker(flushInterval)
+		defer flushTicker.Stop()
+		retryTimer := time.NewTimer(0)
+		defer retryTimer.Stop()
+		backoff := retryInterval
+		deliver := func() {
+			if err := s.upload(s.ctx); err != nil {
+				if onError != nil {
+					onError(err)
+				}
+				resetTimer(retryTimer, backoff)
+				backoff = min(backoff*2, httpForwarderMaxBackoff)
+			} else {
+				backoff = retryInterval
+				resetTimer(retryTimer, flushInterval)
+			}
+		}
+		deliver()
 		for {
 			select {
 			case <-s.stop:
 				return
-			case <-t.C:
-				s.deliver(onError)
+			case <-flushTicker.C:
+				deliver()
+			case <-retryTimer.C:
+				deliver()
 			}
 		}
 	}()
 	return s
-}
-func (s *HTTPForwardingSink) deliver(onError func(error)) {
-	if err := s.upload(context.Background()); err != nil && onError != nil {
-		onError(err)
-	}
 }
 func (s *HTTPForwardingSink) upload(ctx context.Context) error {
 	if _, err := s.spool.Seal(); err != nil {
@@ -95,6 +120,10 @@ func (s *HTTPForwardingSink) Close(ctx context.Context) error {
 	case <-s.done:
 		return s.upload(ctx)
 	case <-ctx.Done():
+		// The worker goroutine is still running an in-flight upload on s.ctx;
+		// cancel it so a stalled collector cannot hold it open past the
+		// caller's shutdown deadline.
+		s.cancel()
 		return ctx.Err()
 	}
 }

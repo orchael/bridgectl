@@ -120,6 +120,55 @@ func TestPersistBridgeEnrollmentRejectsInvalidOrganizationURL(t *testing.T) {
 	}
 }
 
+// TestPersistBridgeEnrollmentRollsBackMetadataWhenCredentialWriteFails guards
+// against leaving bridge-enrollment.json behind when bridge-credentials.json
+// cannot be written: the next login would otherwise see a partially readable
+// enrollment and refuse to re-enroll without --force.
+func TestPersistBridgeEnrollmentRollsBackMetadataWhenCredentialWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	mp, sp := bridgeStatePaths()
+	if err := os.MkdirAll(sp, 0700); err != nil { // occupy the credential path with a directory so the write fails
+		t.Fatal(err)
+	}
+	tok := deviceToken{BridgeURL: "https://bridge.example", APIVersion: "v1", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", CollectorCredential: "brc_secret"}
+	if err := persistBridgeEnrollment(tok, "laptop"); err == nil {
+		t.Fatal("expected credential write failure to be reported")
+	}
+	if _, err := os.Stat(mp); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected enrollment metadata to be rolled back, stat err=%v", err)
+	}
+}
+
+func TestValidateBridgeOriginURL(t *testing.T) {
+	const origin = "https://bridge.example"
+	cases := []struct {
+		name       string
+		raw        string
+		allowQuery bool
+		wantErr    bool
+	}{
+		{"matching origin no query", "https://bridge.example/device", false, false},
+		{"matching origin with query when allowed", "https://bridge.example/device?user_code=ABCD-EFGH-JKLM", true, false},
+		{"query rejected when not allowed", "https://bridge.example/device?user_code=ABCD-EFGH-JKLM", false, true},
+		{"different host is phishing risk", "https://attacker.example/device", false, true},
+		{"http downgrade rejected", "http://bridge.example/device", false, true},
+		{"credentials rejected", "https://user:pass@bridge.example/device", false, true},
+		{"fragment rejected", "https://bridge.example/device#x", false, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateBridgeOriginURL(c.raw, origin, c.allowQuery)
+			if c.wantErr && err == nil {
+				t.Fatalf("expected error for %q", c.raw)
+			}
+			if !c.wantErr && err != nil {
+				t.Fatalf("unexpected error for %q: %v", c.raw, err)
+			}
+		})
+	}
+}
+
 func TestWhoamiShowsOrganizationNameAndURL(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
@@ -185,6 +234,31 @@ func TestAuthorizeRequestBodyIncludesRequestedOrganization(t *testing.T) {
 	}
 	if body["display_name"] == "" {
 		t.Fatalf("expected display_name to still be set, got %v", body)
+	}
+}
+
+// TestLogoutRemovesCredentialWhenMetadataAlreadyMissing guards against
+// logout reporting "Not logged into Bridge" (and leaving secret material on
+// disk) when bridge-enrollment.json is gone but bridge-credentials.json
+// survives a partial write or manual cleanup.
+func TestLogoutRemovesCredentialWhenMetadataAlreadyMissing(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	_, sp := bridgeStatePaths()
+	if err := atomicJSON(sp, bridgeSecret{CollectorCredential: "brc_secret"}); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newBridgeLogoutCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "Not logged into Bridge") {
+		t.Fatalf("logout incorrectly reported not logged in: %s", out.String())
+	}
+	if _, err := os.Stat(sp); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("credential file was not removed")
 	}
 }
 
