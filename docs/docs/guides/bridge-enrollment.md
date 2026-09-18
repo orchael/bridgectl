@@ -14,6 +14,8 @@ The equivalent flag is `bridgectl login --bridge https://bridge.orchael.dev`. Th
 
 Login uses Bridge's device authorization flow. bridgectl displays a short code, opens `/device` when a local browser opener is available, and polls until the browser approval succeeds. Google authentication and organization selection happen in Bridge; bridgectl never receives Google tokens, passwords, cookies, or Auth.js sessions.
 
+Polling honors the documented protocol exactly: on `slow_down`, bridgectl keeps the greatest of its current interval, the server-returned `interval`, and the `Retry-After` header, and never reduces it; `authorization_pending` continues at the current interval; `access_denied`, `expired_token`, and `invalid_grant` stop the login with that error. The successful exchange response carries an `api_version` field (currently `v1`); bridgectl rejects an enrollment whose `api_version` it does not recognize instead of silently persisting a credential issued under an incompatible protocol.
+
 To skip Bridge's organization picker when the target organization is already known, pass its name (not an ID — bridgectl has no way to know Bridge's internal organization IDs):
 
 ```sh
@@ -36,7 +38,7 @@ bridgectl doctor
 bridgectl logout
 ```
 
-`whoami` reports the Bridge origin, the organization (name when Bridge provides one, otherwise its identifier, plus a link to the organization when Bridge returns one) and installation identifiers, and login status. `doctor` reports enrollment and telemetry configuration without secrets. `logout` removes local enrollment metadata and secret material while leaving standalone bridgectl configuration untouched. The current Bridge device protocol does not expose an installation revocation endpoint to the telemetry-only credential, so logout reports that remote revocation is unavailable rather than claiming it occurred.
+`whoami` reports the Bridge origin, the organization (name when Bridge provides one, otherwise its identifier, plus a link to the organization when Bridge returns one) and installation identifiers, and login status. `doctor` reports enrollment, a best-effort network reachability check against the enrolled Bridge origin, and telemetry configuration, all without secrets. `logout` rewrites any Bridge-managed telemetry settings before removing local enrollment metadata and secret material, so a failure to update `bridge.yaml` fails the logout loudly instead of leaving it pointing at a deleted credential; standalone bridgectl configuration is left untouched. The current Bridge device protocol does not expose an installation revocation endpoint to the telemetry-only credential, so logout reports that remote revocation is unavailable rather than claiming it occurred.
 
 ## Development integration
 

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -186,12 +187,70 @@ type deviceAuthorization struct {
 }
 type deviceToken struct {
 	BridgeURL           string `json:"bridge_url"`
+	APIVersion          string `json:"api_version"`
 	OrganizationID      string `json:"organization_id"`
 	OrganizationName    string `json:"organization_name"`
 	OrganizationURL     string `json:"organization_url"`
 	InstallationID      string `json:"installation_id"`
 	TelemetryEndpoint   string `json:"telemetry_endpoint"`
 	CollectorCredential string `json:"collector_credential"`
+}
+
+// supportedDeviceAPIVersions are the device-enrollment protocol versions this
+// build understands. Bridge documents api_version as a versioned protocol
+// marker (docs/bridgectl-device-enrollment.md), not a free-form string; an
+// unrecognized value must fail enrollment explicitly instead of silently
+// persisting a credential issued under a protocol this build cannot honor.
+var supportedDeviceAPIVersions = map[string]bool{"v1": true}
+
+type deviceTokenError struct {
+	Error    string `json:"error"`
+	Interval int    `json:"interval"`
+}
+
+// pollDeviceToken calls /v1/device/token directly rather than through
+// httpJSON: the documented protocol (docs/bridgectl-device-enrollment.md)
+// requires reading the granted polling interval from both the JSON body and
+// the Retry-After header on a slow_down response, which a generic
+// status-code check cannot do.
+func pollDeviceToken(ctx context.Context, client *http.Client, endpoint, deviceCode string) (*deviceToken, *deviceTokenError, time.Duration, error) {
+	body, err := json.Marshal(map[string]string{"device_code": deviceCode})
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	var retryAfter time.Duration
+	if ra := resp.Header.Get("Retry-After"); ra != "" {
+		if secs, convErr := strconv.Atoi(ra); convErr == nil && secs > 0 {
+			retryAfter = time.Duration(secs) * time.Second
+		}
+	}
+	if resp.StatusCode == 200 {
+		var tok deviceToken
+		if err := json.Unmarshal(data, &tok); err != nil {
+			return nil, nil, retryAfter, fmt.Errorf("decode bridge response: %w", err)
+		}
+		return &tok, nil, retryAfter, nil
+	}
+	var derr deviceTokenError
+	_ = json.Unmarshal(data, &derr)
+	if derr.Error == "" {
+		return nil, nil, retryAfter, fmt.Errorf("bridge returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	return nil, &derr, retryAfter, nil
 }
 
 func newBridgeLoginCmd() *cobra.Command {
@@ -259,26 +318,39 @@ func runBridgeLogin(cmd *cobra.Command, bridge, organization string, force bool)
 			return fmt.Errorf("bridge authorization expired")
 		case <-time.After(interval):
 		}
-		var tok deviceToken
-		status, pollErr := httpJSON(ctx, client, "POST", base+"/v1/device/token", map[string]string{"device_code": auth.DeviceCode}, &tok)
-		if pollErr == nil {
-			if err := persistBridgeEnrollment(tok, installationName()); err != nil {
+		tok, derr, retryAfter, err := pollDeviceToken(ctx, client, base+"/v1/device/token", auth.DeviceCode)
+		if err != nil {
+			return fmt.Errorf("bridge authorization: %w", err)
+		}
+		if tok != nil {
+			if err := persistBridgeEnrollment(*tok, installationName()); err != nil {
 				return err
 			}
 			_, _ = fmt.Fprintln(out, "✓ Bridge authorization complete\n✓ Installation registered\n✓ Organization selected\n✓ Telemetry configured")
 			return nil
 		}
-		if status == 429 {
-			interval *= 2
-			if interval > 60*time.Second {
-				interval = 60 * time.Second
+		switch derr.Error {
+		case "authorization_pending":
+			continue
+		case "slow_down":
+			// The client must keep the greatest interval it has received:
+			// take the current interval, the server-granted interval, and
+			// Retry-After, and never go below any of them.
+			next := interval
+			if granted := time.Duration(derr.Interval) * time.Second; granted > next {
+				next = granted
 			}
+			if retryAfter > next {
+				next = retryAfter
+			}
+			if next > 60*time.Second {
+				next = 60 * time.Second
+			}
+			interval = next
 			continue
+		default:
+			return fmt.Errorf("bridge authorization: %s", derr.Error)
 		}
-		if status == 400 && strings.Contains(pollErr.Error(), "authorization_pending") {
-			continue
-		}
-		return fmt.Errorf("bridge authorization: %w", pollErr)
 	}
 }
 func signalContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -300,6 +372,9 @@ func openBrowser(target string) error {
 	return errors.New("no browser opener found")
 }
 func persistBridgeEnrollment(tok deviceToken, name string) error {
+	if !supportedDeviceAPIVersions[tok.APIVersion] {
+		return fmt.Errorf("unsupported Bridge device-enrollment api_version %q", tok.APIVersion)
+	}
 	validatedBridge, err := bridgeURL(tok.BridgeURL)
 	if err != nil {
 		return fmt.Errorf("invalid Bridge URL: %w", err)
@@ -401,13 +476,15 @@ func newBridgeLogoutCmd() *cobra.Command {
 			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Not logged into Bridge.")
 			return nil
 		}
+		if err := removeManagedTelemetry(); err != nil {
+			return fmt.Errorf("update telemetry configuration: %w", err)
+		}
 		if err := os.Remove(mp); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		if err := os.Remove(sp); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		_ = removeManagedTelemetry()
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Bridge enrollment removed locally.")
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Remote revocation is not exposed by this Bridge protocol.")
 		return nil
