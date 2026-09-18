@@ -115,7 +115,7 @@ func bridgeEnvelope(id string, jsonl []byte) ([]byte, error) {
 		if e.ByteCount > 0 {
 			payload["byte_count"] = e.ByteCount
 		}
-		events = append(events, map[string]any{"event_id": fmt.Sprintf("%s-%d", id, len(events)+1), "schema_version": 1, "occurred_at": e.Timestamp.UTC().Format(time.RFC3339Nano), "session_id": e.SessionID, "provider": func() string {
+		events = append(events, map[string]any{"event_id": fmt.Sprintf("%s-%d", id, len(events)+1), "schema_version": e.SchemaVersion, "occurred_at": e.Timestamp.UTC().Format(time.RFC3339Nano), "session_id": e.SessionID, "provider": func() string {
 			if e.Provider != "" {
 				return e.Provider
 			}
