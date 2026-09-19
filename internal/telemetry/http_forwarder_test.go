@@ -339,6 +339,12 @@ func TestBridgeEnvelopeUsesCollectorVersion(t *testing.T) {
 // included, since a malicious or misconfigured endpoint's response could
 // otherwise get logged verbatim (and could in principle reflect the brc_
 // Authorization header back).
+//
+// Uses newTestSink's short flush interval, not a long one: NewHTTPForwardingSink
+// fires its first upload attempt immediately (timer at 0), racing the caller's
+// first Record. A long flush interval turns a lost race into the worker
+// going quiet for the rest of that interval with nothing to report, which is
+// what made this test flaky under -race/CI scheduling.
 func TestHTTPForwardingSinkErrorIncludesBridgeErrorCodeNotRawBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(422)
@@ -346,22 +352,26 @@ func TestHTTPForwardingSinkErrorIncludesBridgeErrorCodeNotRawBody(t *testing.T) 
 	}))
 	defer server.Close()
 
-	var gotErr error
-	errCh := make(chan struct{}, 1)
-	sink := NewHTTPForwardingSink(newTestSpool(t), server.URL, "brc_test-credential", "1.2.3", time.Hour, time.Hour, func(err error) {
-		gotErr = err
+	// The server always returns 422, so newTestSink's worker keeps retrying
+	// (and invoking this callback) well past the first failure. Send the
+	// error itself through errCh rather than writing a shared variable from
+	// the callback: gotErr is then set exactly once, by the synchronized
+	// channel receive below, so later retries can't race the assertions
+	// against it.
+	errCh := make(chan error, 1)
+	sink := newTestSink(t, server.URL, func(err error) {
 		select {
-		case errCh <- struct{}{}:
+		case errCh <- err:
 		default:
 		}
 	})
-	defer func() { _ = sink.Close(context.Background()) }()
 	if err := sink.Record(Event{SchemaVersion: 2, Timestamp: time.Now().UTC(), SessionID: "s1", Kind: EventSessionStarted}); err != nil {
 		t.Fatal(err)
 	}
 
+	var gotErr error
 	select {
-	case <-errCh:
+	case gotErr = <-errCh:
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected a delivery error callback")
 	}
@@ -371,13 +381,4 @@ func TestHTTPForwardingSinkErrorIncludesBridgeErrorCodeNotRawBody(t *testing.T) 
 	if strings.Contains(gotErr.Error(), "brc_should-not-be-logged") {
 		t.Fatalf("error must not include the raw response body: %v", gotErr)
 	}
-}
-
-func newTestSpool(t *testing.T) *SegmentSpool {
-	t.Helper()
-	spool, err := NewSegmentSpool(t.TempDir(), 1<<20, 10<<20, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return spool
 }

@@ -65,6 +65,9 @@ Set `PROTOC_INCLUDE` if your protobuf headers are outside the Homebrew prefix or
 `make setup` persists the Go tools directory from `GOBIN` or `GOPATH` in Bash's
 `.bashrc` and active login profile, or Zsh's `.zshrc`. It prints a command to update
 the current terminal because Make cannot change its parent shell's environment.
+It also installs `pre-commit` (via Homebrew or apt if missing) and registers the
+`pre-commit`/`pre-push` git hooks from `.pre-commit-config.yaml`, so run `make setup`
+at the start of every session — including agent sessions — not just once per machine.
 `make tools` and `make setup-node` remain available separately; `make dev-setup`
 is a separate workflow for development certificates, provider CLIs, and host setup.
 

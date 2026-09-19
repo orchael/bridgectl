@@ -28,6 +28,20 @@ build-cli:
 .PHONY: deps setup
 setup:
 	bash ./scripts/setup-go-path.sh
+	@if ! command -v pre-commit >/dev/null 2>&1; then \
+		if command -v brew >/dev/null 2>&1; then \
+			HOMEBREW_NO_ASK=1 brew install pre-commit; \
+		elif command -v apt-get >/dev/null 2>&1; then \
+			if [ "$$(id -u)" -eq 0 ]; then \
+				apt-get update && apt-get install -y pre-commit; \
+			else \
+				sudo apt-get update && sudo apt-get install -y pre-commit; \
+			fi; \
+		else \
+			echo "Install pre-commit (https://pre-commit.com/#install), then rerun make setup." >&2; exit 1; \
+		fi; \
+	fi
+	bash ./scripts/setup-git-hooks.sh
 
 deps:
 	$(MAKE) setup-node
