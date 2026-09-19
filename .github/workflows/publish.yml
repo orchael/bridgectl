@@ -506,6 +506,15 @@ jobs:
           name: deb-packages
           path: dist/deb
 
+      - name: Generate AI release notes
+        id: ai_notes
+        if: ${{ secrets.OPENAI_API_KEY != '' }}
+        continue-on-error: true
+        uses: everydaydevopsio/castoff/castoff@v2
+        with:
+          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          tag: ${{ env.RELEASE_TAG }}
+
       - name: Create GitHub release for Go SDK tag
         uses: softprops/action-gh-release@v3
         with:
@@ -513,6 +522,8 @@ jobs:
           generate_release_notes: true
           files: dist/deb/*.deb
           body: |
+            ${{ steps.ai_notes.outcome == 'success' && steps.ai_notes.outputs.release_notes || '' }}
+
             ## Published artifacts
 
             - Go SDK module tag: `${{ env.RELEASE_TAG }}`
