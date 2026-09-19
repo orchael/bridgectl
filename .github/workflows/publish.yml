@@ -485,6 +485,7 @@ jobs:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && needs.bump_and_tag.outputs.tag || github.ref_name }}
       RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', needs.bump_and_tag.outputs.tag) || github.ref }}
       REPO_BASE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/apt
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     steps:
       - name: Check out release tag
         uses: actions/checkout@v7
@@ -508,11 +509,11 @@ jobs:
 
       - name: Generate AI release notes
         id: ai_notes
-        if: ${{ secrets.OPENAI_API_KEY != '' }}
+        if: env.OPENAI_API_KEY != ''
         continue-on-error: true
         uses: everydaydevopsio/castoff/castoff@v2
         with:
-          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          openai_api_key: ${{ env.OPENAI_API_KEY }}
           tag: ${{ env.RELEASE_TAG }}
 
       - name: Create GitHub release for Go SDK tag
