@@ -142,6 +142,7 @@ infrastructure (Google, GitHub, Okta, etc.) managed through Step CA.`,
 			}
 
 			cfg := localserver.Config{
+				Version:                       version,
 				SecurityMode:                  localserver.ServerMode(securityMode),
 				ListenAddr:                    listenAddr,
 				ServerSANs:                    serverSANs,

@@ -30,6 +30,10 @@ across terminal windows.`,
 		newEnrollmentCmd(),
 		newIdentityCmd(),
 		newTelemetryCmd(),
+		newBridgeLoginCmd(),
+		newBridgeLogoutCmd(),
+		newBridgeWhoamiCmd(),
+		newDoctorCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
