@@ -352,12 +352,16 @@ func TestHTTPForwardingSinkErrorIncludesBridgeErrorCodeNotRawBody(t *testing.T) 
 	}))
 	defer server.Close()
 
-	var gotErr error
-	errCh := make(chan struct{}, 1)
+	// The server always returns 422, so newTestSink's worker keeps retrying
+	// (and invoking this callback) well past the first failure. Send the
+	// error itself through errCh rather than writing a shared variable from
+	// the callback: gotErr is then set exactly once, by the synchronized
+	// channel receive below, so later retries can't race the assertions
+	// against it.
+	errCh := make(chan error, 1)
 	sink := newTestSink(t, server.URL, func(err error) {
-		gotErr = err
 		select {
-		case errCh <- struct{}{}:
+		case errCh <- err:
 		default:
 		}
 	})
@@ -365,8 +369,9 @@ func TestHTTPForwardingSinkErrorIncludesBridgeErrorCodeNotRawBody(t *testing.T) 
 		t.Fatal(err)
 	}
 
+	var gotErr error
 	select {
-	case <-errCh:
+	case gotErr = <-errCh:
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected a delivery error callback")
 	}
