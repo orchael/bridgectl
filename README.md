@@ -547,9 +547,16 @@ if none exists. Repeated runs and sourcing do not duplicate the new PATH entry. 
 Bash/Zsh startup file. Make cannot change the calling shell's environment, so
 run the printed export command to update your current terminal immediately.
 
+`make setup` also installs `pre-commit` (via Homebrew or `apt-get` if it is not
+already on `PATH`) and runs `scripts/setup-git-hooks.sh`, which registers the
+`pre-commit` and `pre-push` git hooks from `.pre-commit-config.yaml`. Run
+`make setup` at the start of every session (including agent sessions) so
+`gofmt`/`goimports`/`golangci-lint` and `go test -race` actually run locally
+before a commit or push, instead of only in CI.
+
 | Target | Description |
 |--------|-------------|
-| `make setup` | Persist the Go tools directory on PATH for Bash/Zsh |
+| `make setup` | Persist the Go tools directory on PATH for Bash/Zsh; install `pre-commit` and register the git hooks |
 | `make deps` | Verify Node.js and install Go development tools, protoc, and Go module dependencies |
 | `make build` | Build `bin/bridgectl` and `bin/bridge-ca` |
 | `make test` | Run unit tests with race detection |
