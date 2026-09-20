@@ -5,9 +5,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/orchael/bridgectl/internal/bridgecontrol"
+	"github.com/orchael/bridgectl/internal/localserver"
 )
 
 // bridgeReachable does a best-effort, short-timeout connectivity check. It
@@ -53,11 +57,43 @@ func newDoctorCmd() *cobra.Command {
 			_, _ = fmt.Fprintf(out, "  org url       ✓ %s\n", e.OrganizationURL)
 		}
 		_, _ = fmt.Fprintf(out, "  installation  ✓ %s\n", display(e.InstallationName, e.InstallationID))
-		if s, secretErr := readBridgeSecret(); secretErr != nil || s == nil || s.CollectorCredential == "" {
+		secret, secretErr := readBridgeSecret()
+		if secretErr != nil || secret == nil || secret.CollectorCredential == "" {
 			_, _ = fmt.Fprintln(out, "  telemetry     ! credential missing")
 		} else {
 			_, _ = fmt.Fprintln(out, "  telemetry     ✓ configured")
 		}
+		_, _ = fmt.Fprintln(out, "  control       "+controlDoctorLine(e, secret))
 		return nil
 	}}
+}
+
+// controlDoctorLine reports the control-plane connection state for
+// `bridgectl doctor`. It never opens its own WebSocket connection: doing so
+// with the shared installation credential would trigger Bridge's
+// generation-fencing and evict the daemon's real, already-live connection
+// (see docs on control/connection.go's "superseded" behavior). Instead it
+// reads the small status file the daemon's control client persists on every
+// state change.
+func controlDoctorLine(e *bridgeEnrollment, secret *bridgeSecret) string {
+	if !controlProvisioned(e, secret) {
+		return "- not provisioned — run bridgectl bridge login --force"
+	}
+	statusPath := filepath.Join(localserver.StateDir(), "bridge-control-status.json")
+	st, err := bridgecontrol.ReadStatus(statusPath)
+	if err != nil {
+		return "! disconnected"
+	}
+	switch st.State {
+	case bridgecontrol.StateConnected:
+		return "✓ connected"
+	case bridgecontrol.StateAuthRejected:
+		return "! authentication rejected"
+	case bridgecontrol.StateUnavailable:
+		return "! Bridge unavailable"
+	case bridgecontrol.StateConnecting:
+		return "! connecting"
+	default:
+		return "! disconnected"
+	}
 }

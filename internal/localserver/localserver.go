@@ -27,6 +27,7 @@ import (
 	bridgev1 "github.com/orchael/bridgectl/gen/bridge/v1"
 	"github.com/orchael/bridgectl/internal/auth"
 	"github.com/orchael/bridgectl/internal/bridge"
+	"github.com/orchael/bridgectl/internal/bridgecontrol"
 	"github.com/orchael/bridgectl/internal/certprovider"
 	"github.com/orchael/bridgectl/internal/config"
 	"github.com/orchael/bridgectl/internal/pki"
@@ -60,6 +61,13 @@ func StateDir() string {
 // the server-start read path here so a malformed credential file is
 // rejected the same way regardless of how it got there.
 var CollectorCredentialPattern = regexp.MustCompile(`^brc_[A-Za-z0-9_-]{43}$`)
+
+// ControlCredentialPattern matches Bridge's documented bri_ control-only
+// credential format (bri_ followed by base64url(32 random bytes), 43
+// characters). It must never match a brc_ telemetry credential and vice
+// versa; the two are never interchangeable. Shared between the enrollment
+// write path (cmd/bridgectl) and this server-start read path.
+var ControlCredentialPattern = regexp.MustCompile(`^bri_[A-Za-z0-9_-]{43}$`)
 
 // SecureReadFile reads path only if it is a regular, non-symlink file with
 // no group/world permission bits set, restoring 0600 afterward. A permissive
@@ -387,6 +395,7 @@ func Start(cfg Config) (*Server, error) {
 	repoSetupDefaultTimeout := 2 * time.Minute
 	repoSetupMaxTimeout := 15 * time.Minute
 	telemetryCfg := config.TelemetryConfig{}
+	controlCfg := config.ControlConfig{}
 	configHasServerListen := false
 	if cfg.ConfigPath != "" {
 		var err error
@@ -400,6 +409,7 @@ func Start(cfg Config) (*Server, error) {
 		}
 		if fileCfg != nil {
 			telemetryCfg = fileCfg.Telemetry
+			controlCfg = fileCfg.Control
 			if len(fileCfg.Providers) > 0 {
 				configProviderDefs = fileCfg.Providers
 			}
@@ -848,7 +858,48 @@ func Start(cfg Config) (*Server, error) {
 		logger.Info("telemetry enabled", "source_id", sourceID, "destination", destination, "kinds", telemetryCfg.Kinds, "rolling_window", telemetryCfg.RollingWindow)
 	}
 
-	sup := bridge.NewSupervisor(registry, policy, cfg.EventBufferSize, cfg.IdleTimeout, supOpts...)
+	// Bridge control-plane client (optional, additive). No control endpoint
+	// or credential file means no network connection is attempted at all,
+	// per docs/bridge-control-client.md's "no Bridge configuration means no
+	// control connection is attempted" invariant. This also covers an
+	// enrollment created before Bridge added control-plane support: such an
+	// enrollment's config.yaml simply has no control: block.
+	var sup *bridge.Supervisor
+	var controlClient *bridgecontrol.Client
+	if controlCfg.Endpoint != "" && controlCfg.CredentialFile != "" {
+		credentialData, readErr := SecureReadFile(expandTelemetryPath(controlCfg.CredentialFile))
+		if readErr != nil {
+			logger.Warn("bridge control: read credential failed, control disabled", "error", readErr)
+		} else {
+			var credential struct {
+				ControlCredential string `json:"control_credential"`
+			}
+			if readErr := json.Unmarshal(credentialData, &credential); readErr != nil || !ControlCredentialPattern.MatchString(credential.ControlCredential) {
+				logger.Warn("bridge control: invalid or missing control credential, control disabled")
+			} else {
+				controlClient = bridgecontrol.New(bridgecontrol.Config{
+					Endpoint:         controlCfg.Endpoint,
+					Credential:       credential.ControlCredential,
+					BridgectlVersion: cfg.Version,
+					StatusPath:       filepath.Join(stateDir, "bridge-control-status.json"),
+					RevisionPath:     filepath.Join(stateDir, "bridge-control-revisions.json"),
+					Logger:           logger,
+					SnapshotFunc: func() []bridgecontrol.SessionSnapshot {
+						if sup == nil {
+							return nil
+						}
+						return bridgecontrol.ActiveSnapshots(sup.List(""))
+					},
+				})
+				supOpts = append(supOpts, bridge.WithControlObserver(bridgecontrol.NewSupervisorObserver(controlClient)))
+			}
+		}
+	}
+
+	sup = bridge.NewSupervisor(registry, policy, cfg.EventBufferSize, cfg.IdleTimeout, supOpts...)
+	if controlClient != nil {
+		controlClient.Start(context.Background())
+	}
 	if store != nil {
 		if err := sup.LoadHistory(); err != nil {
 			logger.Warn("failed to load session history", "error", err)
