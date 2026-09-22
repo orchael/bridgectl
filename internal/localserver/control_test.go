@@ -1,11 +1,13 @@
 package localserver
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/orchael/bridgectl/internal/bridge"
 	"github.com/orchael/bridgectl/internal/bridgecontrol"
 )
 
@@ -143,4 +145,137 @@ func TestStart_ControlConfig_ValidCredential_ConnectsAsynchronously(t *testing.T
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("control status file never reflected a background connection attempt (lastErr=%v)", lastErr)
+}
+
+// TestStart_ControlFailing_SessionOperationsStillWork guards the
+// architectural invariant that a *actively erroring* control client (not
+// merely an absent one) never affects local Supervisor operations: starting
+// and completing a real session must succeed and complete normally while
+// the control client sits in a permanent, fast-retrying failure loop
+// against an unreachable endpoint.
+func TestStart_ControlFailing_SessionOperationsStillWork(t *testing.T) {
+	stateDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "bridge.yaml")
+	credPath := filepath.Join(stateDir, "bridge-credentials.json")
+	if err := os.WriteFile(credPath, []byte(`{"collector_credential":"brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v","control_credential":"`+testValidControlCredential+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	yaml := `
+control:
+  endpoint: wss://127.0.0.1:1/v1/control
+  credential_file: ` + credPath + `
+providers:
+  testprovider:
+    binary: "cat"
+    startup_probe: "none"
+`
+	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := Start(Config{StateDir: stateDir, ConfigPath: configPath, Logger: testLogger()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+
+	// Give the control client a moment to actually start failing (not just
+	// be absent), so this exercises "erroring", not "unconfigured".
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if st, err := bridgecontrol.ReadStatus(statusFilePath(stateDir)); err == nil && st.State != "" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	info, err := srv.supervisor.Start(ctx, bridge.SessionConfig{
+		ProjectID: "p1", SessionID: "session-ops-during-control-failure", RepoPath: t.TempDir(),
+		Options: map[string]string{"provider": "testprovider"},
+	})
+	if err != nil {
+		t.Fatalf("session Start failed while control was erroring: %v", err)
+	}
+	if info.State != bridge.SessionStateRunning {
+		t.Fatalf("session state = %v, want Running", info.State)
+	}
+	if err := srv.supervisor.Stop(info.SessionID, true); err != nil {
+		t.Fatalf("session Stop failed while control was erroring: %v", err)
+	}
+}
+
+// TestStart_ControlFailing_TelemetryStillDelivers guards the independence
+// of the two outbound paths: telemetry event capture/delivery must keep
+// working even while the separate control-plane connection is permanently
+// failing. Telemetry here uses its local-spool destination (no
+// collector_url/collector_target configured) rather than a real HTTPS
+// collector: internal/config strictly validates collector_url as HTTPS at
+// load time, and internal/telemetry's HTTP sink uses a fixed http.Client
+// with no test-injectable transport, so a real TLS round trip isn't
+// practical to assert on here without changing production code. The local
+// spool still exercises the exact same Supervisor -> TelemetryObserver ->
+// LiveCollector -> Sink pipeline this test is about — the write to disk
+// happens synchronously with Record(), independent of the collector_url
+// path added on top of it. Real end-to-end HTTPS delivery alongside a real
+// control-plane failure was additionally verified live against
+// bridge.orchael.dev / control.bridge.orchael.dev (see MAR-71 final
+// report), where telemetry kept flowing throughout a control outage.
+func TestStart_ControlFailing_TelemetryStillDelivers(t *testing.T) {
+	stateDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "bridge.yaml")
+	credPath := filepath.Join(stateDir, "bridge-credentials.json")
+	if err := os.WriteFile(credPath, []byte(`{"collector_credential":"brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v","control_credential":"`+testValidControlCredential+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	yaml := `
+telemetry:
+  enabled: true
+control:
+  endpoint: wss://127.0.0.1:1/v1/control
+  credential_file: ` + credPath + `
+providers:
+  testprovider:
+    binary: "cat"
+    startup_probe: "none"
+`
+	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := Start(Config{StateDir: stateDir, ConfigPath: configPath, Logger: testLogger()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+
+	// Confirm control really is failing (not merely slow to start), so this
+	// test proves independence, not a race that happened not to matter.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if st, err := bridgecontrol.ReadStatus(statusFilePath(stateDir)); err == nil && st.State != "" && st.State != bridgecontrol.StateConnected {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := srv.supervisor.Start(ctx, bridge.SessionConfig{
+		ProjectID: "p1", SessionID: "telemetry-during-control-failure", RepoPath: t.TempDir(),
+		Options: map[string]string{"provider": "testprovider"},
+	}); err != nil {
+		t.Fatalf("session Start: %v", err)
+	}
+
+	spoolFile := filepath.Join(TelemetrySpoolDir("", stateDir), ".active.jsonl")
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if info, err := os.Stat(spoolFile); err == nil && info.Size() > 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("telemetry never recorded a segment at %s while control was failing", spoolFile)
 }

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -425,6 +426,168 @@ func TestConnectAndServe_SilentConnectionDetectedViaIdleTimeout(t *testing.T) {
 	}
 	if elapsed > 4500*time.Millisecond {
 		t.Fatalf("silent connection took %v to detect, want a bounded, short window", elapsed)
+	}
+}
+
+// --- duplicate / stale event handling ---
+
+// TestSendEvent_DuplicateAck_TreatedAsSuccess covers Bridge's "duplicate"
+// ack result: an incremental event whose revision is <= the revision Bridge
+// already has for that session (e.g. a retried send after an ambiguous
+// network error) is acknowledged as "duplicate", not an error. The client
+// must treat this exactly like "applied" and keep going.
+func TestSendEvent_DuplicateAck_TreatedAsSuccess(t *testing.T) {
+	var mu sync.Mutex
+	var results []string
+	fs := newFakeServer(t, nil, func(conn *websocket.Conn, _ int) {
+		if _, _, err := serverHandshake(conn, 30); err != nil {
+			return
+		}
+		first := true
+		for {
+			env, err := serverReadEnvelope(conn)
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			results = append(results, env.Type)
+			mu.Unlock()
+			result := "applied"
+			if first {
+				result = "duplicate" // Bridge treats this event as already known.
+				first = false
+			}
+			_ = serverWriteEnvelope(conn, msgAck, "srv-ack", ackPayload{MessageID: env.MessageID, Result: result})
+		}
+	})
+	defer fs.Close()
+
+	c := newTestClient(t, fs.wsURL(), "bri_valid", func() []SessionSnapshot { return nil })
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	go func() { _ = c.connectAndServe(ctx) }()
+
+	c.Notify(SessionSnapshot{SessionID: "s1", Status: StatusRunning, CreatedAt: time.Now()})
+	c.Notify(SessionSnapshot{SessionID: "s1", Status: StatusAttached, CreatedAt: time.Now()})
+
+	waitFor(t, testTimeout, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(results) >= 2
+	})
+	// A "duplicate" ack on the first event must not have torn down the
+	// connection or stopped subsequent sends: the second event still went
+	// through as session_updated, not a retried session_started.
+	mu.Lock()
+	defer mu.Unlock()
+	if results[0] != msgSessionStarted || results[1] != msgSessionUpdated {
+		t.Fatalf("results=%v, want [session_started session_updated] despite a duplicate ack on the first", results)
+	}
+}
+
+// TestSendSnapshot_RevisionNotAdvanced_StillAppliesSuccessfully covers
+// Bridge's snapshot-level staleness semantics: a session_snapshot row whose
+// revision does not exceed what Bridge already has for that session is
+// silently no-op'd for that one row (the whole snapshot still acks
+// "applied" — Bridge never fails a snapshot solely for a stale row). From
+// the client's side this means sending the same snapshot twice in a row
+// (e.g. two reconnects with no local state change) must never be treated as
+// an error.
+func TestSendSnapshot_RevisionNotAdvanced_StillAppliesSuccessfully(t *testing.T) {
+	var snapshotAcks int32
+	var snapshotRevisions []int64
+	var mu sync.Mutex
+	// Each connectAndServe call below dials a fresh connection, so the fake
+	// server's handler runs once per connection: handshake, then exactly the
+	// one session_snapshot a real client sends right after hello_ack.
+	fs := newFakeServer(t, nil, func(conn *websocket.Conn, _ int) {
+		_, snap, err := serverHandshake(conn, 30)
+		if err != nil {
+			return
+		}
+		var sp sessionSnapshotPayload
+		if err := json.Unmarshal(snap.Payload, &sp); err == nil && len(sp.Sessions) == 1 {
+			mu.Lock()
+			snapshotRevisions = append(snapshotRevisions, sp.Sessions[0].Revision)
+			mu.Unlock()
+		}
+		atomic.AddInt32(&snapshotAcks, 1)
+	})
+	defer fs.Close()
+
+	snapshotFn := func() []SessionSnapshot {
+		return []SessionSnapshot{{SessionID: "s1", Status: StatusRunning, CreatedAt: time.Now()}}
+	}
+	c := newTestClient(t, fs.wsURL(), "bri_valid", snapshotFn)
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	// First connectAndServe assigns and sends revision 1 (session never seen
+	// before). A second, independent connection (as a real reconnect would
+	// be) sends the *same* revision again, since sendSnapshot uses
+	// RevisionStore.Current (peek), not Next (bump) — exactly Bridge's
+	// "stale row in a snapshot" scenario. Neither call may error.
+	// The fake server closes the connection right after acking the
+	// snapshot (see serverHandshake), so connectAndServe returning an error
+	// here is the harness disconnecting on purpose, not a failure worth
+	// asserting on; only the server-observed snapshots matter below.
+	_ = c.connectAndServe(ctx)
+	_ = c.connectAndServe(ctx)
+
+	if got := atomic.LoadInt32(&snapshotAcks); got != 2 {
+		t.Fatalf("server observed %d snapshots, want 2", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(snapshotRevisions) != 2 || snapshotRevisions[0] != 1 || snapshotRevisions[1] != 1 {
+		t.Fatalf("snapshot revisions=%v, want [1 1] (not re-advanced on the second, unchanged, connection)", snapshotRevisions)
+	}
+}
+
+// --- credential revoked mid-connection ---
+
+// TestConnectAndServe_CredentialRevokedMidConnection covers Bridge's
+// documented "invalid_request"/"credential no longer valid" close: unlike
+// an invalid credential rejected at the initial HTTP upgrade (401, tested
+// separately), a credential revoked after a successful hello is only
+// discovered lazily on the connection's next write, and closes with
+// StatusPolicyViolation rather than a transport-level error.
+func TestConnectAndServe_CredentialRevokedMidConnection(t *testing.T) {
+	fs := newFakeServer(t, nil, func(conn *websocket.Conn, _ int) {
+		if _, _, err := serverHandshake(conn, 30); err != nil {
+			return
+		}
+		env, err := serverReadEnvelope(conn)
+		if err != nil {
+			return
+		}
+		_ = serverWriteEnvelope(conn, msgError, env.MessageID, errorPayload{
+			MessageID: env.MessageID, Code: errCodeInvalidRequest, Message: "credential no longer valid",
+		})
+		_ = conn.Close(websocket.StatusPolicyViolation, "credential no longer valid")
+	})
+	defer fs.Close()
+
+	c := newTestClient(t, fs.wsURL(), "bri_valid", func() []SessionSnapshot { return nil })
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- c.connectAndServe(ctx) }()
+
+	// Trigger the write that discovers the revocation.
+	c.Notify(SessionSnapshot{SessionID: "s1", Status: StatusRunning, CreatedAt: time.Now()})
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected an error once the credential is revoked mid-connection")
+		}
+		if got := classifyStatus(err); got != StateAuthRejected {
+			t.Fatalf("classifyStatus(%v) = %v, want StateAuthRejected", err, got)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("connectAndServe never returned after the mid-connection revocation")
 	}
 }
 
