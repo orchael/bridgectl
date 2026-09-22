@@ -27,6 +27,21 @@ const (
 	StateUnavailable    State = "unavailable"
 )
 
+// StatusStaleAfter is how old a "connected" Status entry can be before
+// `doctor` stops trusting it at face value. The status file is written on
+// every state *change*, not periodically, so a healthy long-lived
+// connection can leave a "connected" entry untouched for hours — meaning a
+// naive age check would misreport a perfectly healthy connection as
+// disconnected. To make an age check meaningful without that false
+// positive, Client refreshes the "connected" entry's timestamp on every
+// successful heartbeat (see Client.sendHeartbeat); an entry older than this
+// threshold can therefore only mean the daemon died without a chance to
+// write a final status (killed, powered off) or the client has otherwise
+// stopped heartbeating, both of which are correctly "disconnected". Set
+// comfortably above the heartbeat interval Bridge documents today (30s) to
+// tolerate normal scheduling jitter.
+const StatusStaleAfter = 2 * time.Minute
+
 // Status is the JSON shape persisted to disk and read back by `doctor`.
 type Status struct {
 	State          State     `json:"state"`

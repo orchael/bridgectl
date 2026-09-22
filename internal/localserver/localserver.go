@@ -867,43 +867,56 @@ func Start(cfg Config) (*Server, error) {
 	var sup *bridge.Supervisor
 	var controlClient *bridgecontrol.Client
 	if controlCfg.Endpoint != "" && controlCfg.CredentialFile != "" {
-		credentialData, readErr := SecureReadFile(expandTelemetryPath(controlCfg.CredentialFile))
-		if readErr != nil {
-			logger.Warn("bridge control: read credential failed, control disabled", "error", readErr)
+		// A hand-edited or otherwise stale config could supply a plain
+		// ws:// endpoint; validateControlEndpoint-equivalent enforcement at
+		// enrollment-write time (cmd/bridgectl) doesn't protect a daemon
+		// reading a config it didn't write. Reject anything but wss:// here
+		// too, rather than sending the bri_ bearer credential in plaintext.
+		if err := bridgecontrol.ValidateEndpoint(controlCfg.Endpoint); err != nil {
+			logger.Warn("bridge control: invalid endpoint, control disabled", "error", err)
 		} else {
-			var credential struct {
-				ControlCredential string `json:"control_credential"`
-			}
-			if readErr := json.Unmarshal(credentialData, &credential); readErr != nil || !ControlCredentialPattern.MatchString(credential.ControlCredential) {
-				logger.Warn("bridge control: invalid or missing control credential, control disabled")
+			credentialData, readErr := SecureReadFile(expandTelemetryPath(controlCfg.CredentialFile))
+			if readErr != nil {
+				logger.Warn("bridge control: read credential failed, control disabled", "error", readErr)
 			} else {
-				controlClient = bridgecontrol.New(bridgecontrol.Config{
-					Endpoint:         controlCfg.Endpoint,
-					Credential:       credential.ControlCredential,
-					BridgectlVersion: cfg.Version,
-					StatusPath:       filepath.Join(stateDir, "bridge-control-status.json"),
-					RevisionPath:     filepath.Join(stateDir, "bridge-control-revisions.json"),
-					Logger:           logger,
-					SnapshotFunc: func() []bridgecontrol.SessionSnapshot {
-						if sup == nil {
-							return nil
-						}
-						return bridgecontrol.ActiveSnapshots(sup.List(""))
-					},
-				})
-				supOpts = append(supOpts, bridge.WithControlObserver(bridgecontrol.NewSupervisorObserver(controlClient)))
+				var credential struct {
+					ControlCredential string `json:"control_credential"`
+				}
+				if readErr := json.Unmarshal(credentialData, &credential); readErr != nil || !ControlCredentialPattern.MatchString(credential.ControlCredential) {
+					logger.Warn("bridge control: invalid or missing control credential, control disabled")
+				} else {
+					controlClient = bridgecontrol.New(bridgecontrol.Config{
+						Endpoint:         controlCfg.Endpoint,
+						Credential:       credential.ControlCredential,
+						BridgectlVersion: cfg.Version,
+						StatusPath:       filepath.Join(stateDir, "bridge-control-status.json"),
+						RevisionPath:     filepath.Join(stateDir, "bridge-control-revisions.json"),
+						Logger:           logger,
+						SnapshotFunc: func() []bridgecontrol.SessionSnapshot {
+							if sup == nil {
+								return nil
+							}
+							return bridgecontrol.ActiveSnapshots(sup.List(""))
+						},
+					})
+					supOpts = append(supOpts, bridge.WithControlObserver(bridgecontrol.NewSupervisorObserver(controlClient)))
+				}
 			}
 		}
 	}
 
 	sup = bridge.NewSupervisor(registry, policy, cfg.EventBufferSize, cfg.IdleTimeout, supOpts...)
-	if controlClient != nil {
-		controlClient.Start(context.Background())
-	}
 	if store != nil {
 		if err := sup.LoadHistory(); err != nil {
 			logger.Warn("failed to load session history", "error", err)
 		}
+	}
+	// Started only after LoadHistory: a recovered session added by
+	// LoadHistory must already be present in sup.List("") by the time the
+	// control client builds its first authoritative snapshot, or Bridge
+	// never learns about it until a later reconnect.
+	if controlClient != nil {
+		controlClient.Start(context.Background())
 	}
 
 	// Server instance ID

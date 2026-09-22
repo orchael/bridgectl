@@ -3,6 +3,7 @@ package localserver
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -278,4 +279,96 @@ providers:
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("telemetry never recorded a segment at %s while control was failing", spoolFile)
+}
+
+// TestStart_ControlConfig_PlainWsEndpoint_DisablesControl guards against
+// sending the bri_ bearer credential over an unencrypted connection: a
+// hand-edited or otherwise stale config supplying a plain ws:// endpoint
+// (enrollment-write-time validation in cmd/bridgectl doesn't protect a
+// daemon reading a config it didn't write) must disable control entirely,
+// not silently connect insecurely.
+func TestStart_ControlConfig_PlainWsEndpoint_DisablesControl(t *testing.T) {
+	stateDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "bridge.yaml")
+	credPath := filepath.Join(stateDir, "bridge-credentials.json")
+	if err := os.WriteFile(credPath, []byte(`{"collector_credential":"brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v","control_credential":"`+testValidControlCredential+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	yaml := "control:\n  endpoint: ws://control.bridge.example/v1/control\n  credential_file: " + credPath + "\n"
+	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := Start(Config{StateDir: stateDir, ConfigPath: configPath, Logger: testLogger()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+
+	if _, err := os.Stat(statusFilePath(stateDir)); !os.IsNotExist(err) {
+		t.Fatalf("expected no control status file for a plain ws:// endpoint, got err=%v", err)
+	}
+}
+
+// TestStart_LoadHistoryCompletesBeforeControlClientStarts guards against a
+// daemon restart where the control client's very first authoritative
+// snapshot (built from sup.List("")) races Supervisor.LoadHistory(): if the
+// control client's connect goroutine were launched before LoadHistory
+// populated recovered sessions, a still-live recovered session would be
+// silently missing from Bridge's view until some later reconnect.
+// Start() only calls controlClient.Start() after sup.LoadHistory()
+// returns, so by the time anything (including a real control client's
+// SnapshotFunc) can observe Supervisor state, the recovered session is
+// already present — exactly what bridgecontrol.ActiveSnapshots(sup.List(""))
+// would read for the first snapshot.
+func TestStart_LoadHistoryCompletesBeforeControlClientStarts(t *testing.T) {
+	// A real, still-running process for recoverProcess to find alive.
+	sleepCmd := exec.Command("sleep", "30")
+	if err := sleepCmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sleepCmd.Process.Kill(); _ = sleepCmd.Wait() }()
+
+	stateDir := t.TempDir()
+	dbPath := filepath.Join(stateDir, "sessions.db")
+	store, err := bridge.NewBoltSessionStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(bridge.SessionInfo{
+		SessionID: "recovered-1", ProjectID: "p1", Provider: "codex",
+		State: bridge.SessionStateRunning, ProcessID: sleepCmd.Process.Pid, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "bridge.yaml")
+	credPath := filepath.Join(stateDir, "bridge-credentials.json")
+	if err := os.WriteFile(credPath, []byte(`{"collector_credential":"brc_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v","control_credential":"`+testValidControlCredential+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Endpoint is unreachable; this test only cares that Supervisor state is
+	// correct by the time Start() returns, not that the connection succeeds.
+	yaml := "control:\n  endpoint: wss://127.0.0.1:1/v1/control\n  credential_file: " + credPath + "\n"
+	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := Start(Config{StateDir: stateDir, ConfigPath: configPath, DBPath: dbPath, Logger: testLogger()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+
+	found := false
+	for _, info := range srv.supervisor.List("") {
+		if info.SessionID == "recovered-1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("recovered session not visible via Supervisor.List immediately after Start returns")
+	}
 }

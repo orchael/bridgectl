@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/orchael/bridgectl/internal/bridgecontrol"
 	"github.com/orchael/bridgectl/internal/localserver"
@@ -49,7 +50,7 @@ func TestPersistBridgeEnrollment_StoresControlFieldsWhenSchemaVersion2(t *testin
 	if s.ControlCredential != validControlCredential {
 		t.Fatalf("control credential not persisted: %+v", s)
 	}
-	if !controlProvisioned(e, s) {
+	if !controlProvisioned(e, s.ControlCredential) {
 		t.Fatal("expected controlProvisioned to be true")
 	}
 
@@ -92,7 +93,7 @@ func TestPersistBridgeEnrollment_OldEnrollmentHasNoControlFields(t *testing.T) {
 	if s.ControlCredential != "" {
 		t.Fatalf("expected no control credential on an old enrollment, got %+v", s)
 	}
-	if controlProvisioned(e, s) {
+	if controlProvisioned(e, s.ControlCredential) {
 		t.Fatal("expected controlProvisioned to be false for an old enrollment")
 	}
 	if b, err := os.ReadFile(bridgeConfigPath()); err == nil && strings.Contains(string(b), "control:") {
@@ -152,15 +153,15 @@ func TestPersistBridgeEnrollment_RejectsNonWssControlEndpoint(t *testing.T) {
 }
 
 func TestControlProvisioned_NilSafety(t *testing.T) {
-	if controlProvisioned(nil, nil) {
-		t.Fatal("nil enrollment/secret must not be provisioned")
+	if controlProvisioned(nil, "") {
+		t.Fatal("nil enrollment must not be provisioned")
 	}
 	e := &bridgeEnrollment{SchemaVersion: 2, ControlEndpoint: "wss://x/v1/control"}
-	if controlProvisioned(e, nil) {
-		t.Fatal("nil secret must not be provisioned")
-	}
-	if controlProvisioned(e, &bridgeSecret{}) {
+	if controlProvisioned(e, "") {
 		t.Fatal("empty control credential must not be provisioned")
+	}
+	if controlProvisioned(e, validCollectorCredential) {
+		t.Fatal("a brc_ telemetry credential must never satisfy control provisioning")
 	}
 }
 
@@ -234,7 +235,7 @@ func TestDoctor_ControlConnectedFromStatusFile(t *testing.T) {
 	if err := atomicJSON(sp, bridgeSecret{CollectorCredential: validCollectorCredential, ControlCredential: validControlCredential}); err != nil {
 		t.Fatal(err)
 	}
-	if err := bridgecontrol.WriteStatus(dir+"/bridge-control-status.json", bridgecontrol.Status{State: bridgecontrol.StateConnected}); err != nil {
+	if err := bridgecontrol.WriteStatus(dir+"/bridge-control-status.json", bridgecontrol.Status{State: bridgecontrol.StateConnected, UpdatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	if localserver.StateDir() != dir {
@@ -248,6 +249,85 @@ func TestDoctor_ControlConnectedFromStatusFile(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "control       ✓ connected") {
 		t.Fatalf("expected connected control line: %s", out.String())
+	}
+}
+
+// TestDoctor_ControlStaleConnectedStatusReportsDisconnected guards against
+// trusting a persisted "connected" state indefinitely: if the daemon died
+// without a chance to write a final status (killed, powered off), a stale
+// "connected" entry must not be reported as live forever.
+func TestDoctor_ControlStaleConnectedStatusReportsDisconnected(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	mp, sp := bridgeStatePaths()
+	if err := atomicJSON(mp, bridgeEnrollment{BridgeURL: "https://bridge.example", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", SchemaVersion: 2, ControlEndpoint: "wss://control.bridge.example/v1/control"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicJSON(sp, bridgeSecret{CollectorCredential: validCollectorCredential, ControlCredential: validControlCredential}); err != nil {
+		t.Fatal(err)
+	}
+	stale := time.Now().UTC().Add(-2 * bridgecontrol.StatusStaleAfter)
+	if err := bridgecontrol.WriteStatus(dir+"/bridge-control-status.json", bridgecontrol.Status{State: bridgecontrol.StateConnected, UpdatedAt: stale}); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newDoctorCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "control       ! disconnected") {
+		t.Fatalf("expected a stale connected status to report disconnected: %s", out.String())
+	}
+}
+
+// TestWhoamiAndDoctor_ControlIndependentOfBrokenTelemetryCredential guards
+// against conflating the two unrelated credentials in the same secret
+// file: a malformed collector_credential (telemetry) must never make an
+// otherwise-valid control_credential report as unconfigured/unprovisioned,
+// since the daemon reads and uses them independently.
+func TestWhoamiAndDoctor_ControlIndependentOfBrokenTelemetryCredential(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	mp, sp := bridgeStatePaths()
+	if err := atomicJSON(mp, bridgeEnrollment{BridgeURL: "https://bridge.example", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments", SchemaVersion: 2, ControlEndpoint: "wss://control.bridge.example/v1/control"}); err != nil {
+		t.Fatal(err)
+	}
+	// CollectorCredential is deliberately malformed; ControlCredential is
+	// valid.
+	if err := atomicJSON(sp, bridgeSecret{CollectorCredential: "not-a-valid-credential", ControlCredential: validControlCredential}); err != nil {
+		t.Fatal(err)
+	}
+	if err := bridgecontrol.WriteStatus(dir+"/bridge-control-status.json", bridgecontrol.Status{State: bridgecontrol.StateConnected, UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+
+	whoamiCmd := newBridgeWhoamiCmd()
+	var whoamiOut bytes.Buffer
+	whoamiCmd.SetOut(&whoamiOut)
+	if err := whoamiCmd.RunE(whoamiCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(whoamiOut.String(), "Telemetry       not configured") {
+		t.Fatalf("expected telemetry to report not configured: %s", whoamiOut.String())
+	}
+	if !strings.Contains(whoamiOut.String(), "Control         configured") {
+		t.Fatalf("expected control to remain configured despite a broken telemetry credential: %s", whoamiOut.String())
+	}
+
+	doctorCmd := newDoctorCmd()
+	var doctorOut bytes.Buffer
+	doctorCmd.SetOut(&doctorOut)
+	if err := doctorCmd.RunE(doctorCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(doctorOut.String(), "telemetry     ! credential missing") {
+		t.Fatalf("expected telemetry credential missing: %s", doctorOut.String())
+	}
+	if !strings.Contains(doctorOut.String(), "control       ✓ connected") {
+		t.Fatalf("expected control to remain connected despite a broken telemetry credential: %s", doctorOut.String())
 	}
 }
 

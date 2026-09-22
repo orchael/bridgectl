@@ -21,6 +21,11 @@ const (
 	helloAckTimeout       = 10 * time.Second
 	defaultHeartbeatEvery = 30 * time.Second
 	eventQueueSize        = 64
+	// shutdownFlushBudget bounds the best-effort attempt to send any
+	// lifecycle notifications still queued when a graceful shutdown begins,
+	// matching the 2s budgets Supervisor already gives telemetry/control
+	// Close calls elsewhere.
+	shutdownFlushBudget = 2 * time.Second
 )
 
 // minIdleReadTimeout is a var (not const) so tests can shrink it to keep a
@@ -58,6 +63,15 @@ type Config struct {
 	// hello_ack. A nil result is treated as zero active sessions.
 	SnapshotFunc func() []SessionSnapshot
 
+	// HTTPClient overrides the client used for the WebSocket upgrade
+	// request. Nil (the default) uses coder/websocket's own default
+	// client/transport, which performs normal TLS certificate verification.
+	// This exists for tests to point at a local TLS test server (e.g.
+	// httptest.NewTLSServer's own .Client(), which trusts that server's
+	// certificate) — production wiring must never set this to a client with
+	// relaxed certificate verification.
+	HTTPClient *http.Client
+
 	Logger *slog.Logger
 }
 
@@ -75,6 +89,12 @@ type Client struct {
 	closeCh   chan struct{}
 	closeOnce sync.Once
 	doneCh    chan struct{}
+
+	// everConnected is set after the first successful connection's initial
+	// snapshot. It is only ever read/written from within connectAndServe,
+	// which run's single goroutine calls sequentially (never concurrently),
+	// so it needs no additional synchronization.
+	everConnected bool
 }
 
 // New constructs a Client. It does not connect until Start is called.
@@ -208,6 +228,7 @@ func (c *Client) connectAndServe(parent context.Context) error {
 	defer cancel()
 
 	conn, resp, err := websocket.Dial(dialCtx, c.cfg.Endpoint, &websocket.DialOptions{
+		HTTPClient: c.cfg.HTTPClient,
 		HTTPHeader: http.Header{"Authorization": []string{"Bearer " + c.cfg.Credential}},
 	})
 	if err != nil {
@@ -232,6 +253,22 @@ func (c *Client) connectAndServe(parent context.Context) error {
 	if err := c.sendSnapshot(parent, conn); err != nil {
 		return err
 	}
+	if c.everConnected {
+		// This is a reconnect, not the first-ever connection: anything
+		// still queued can only have been enqueued while disconnected (a
+		// live connection drains c.events as fast as it fills), so it
+		// necessarily predates the live Supervisor state this snapshot just
+		// captured. Applying it now with a freshly assigned revision would
+		// let that stale, pre-snapshot state overwrite what the snapshot
+		// just established, and would replay rather than reconcile. This
+		// reasoning does not hold for the very first connection (nothing to
+		// have gone stale relative to yet), so skip the drain there: a
+		// notification racing the first handshake is still fresh, and
+		// discarding it would be a real, avoidable loss of the only report
+		// of that state change.
+		c.drainEvents()
+	}
+	c.everConnected = true
 
 	heartbeatInterval := time.Duration(ack.HeartbeatIntervalSeconds) * time.Second
 	if heartbeatInterval <= 0 {
@@ -264,9 +301,17 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, heartbeatInter
 	for {
 		select {
 		case <-c.closeCh:
+			// Supervisor.Shutdown/Close already enqueues final terminal
+			// notifications (e.g. session_stopped) before calling
+			// Client.Close; without a best-effort flush here they would sit
+			// in the queue forever once the socket closes, leaving Bridge's
+			// view of those sessions stale until a reconnect that may never
+			// happen.
+			c.flushPendingEvents(conn)
 			_ = conn.Close(websocket.StatusNormalClosure, "client shutting down")
 			return nil
 		case <-ctx.Done():
+			c.flushPendingEvents(conn)
 			_ = conn.Close(websocket.StatusNormalClosure, "shutting down")
 			return nil
 		case err := <-readErrCh:
@@ -275,6 +320,7 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, heartbeatInter
 			if err := c.sendSnapshot(ctx, conn); err != nil {
 				return err
 			}
+			c.drainEvents() // see the identical comment in connectAndServe
 		case <-ticker.C:
 			if err := c.sendHeartbeat(ctx, conn); err != nil {
 				return err
@@ -329,6 +375,54 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idleTimeout
 			// Bridge's milestone-1 protocol never pushes any other message
 			// type; ignore unknown types rather than treating them as fatal,
 			// in case a future protocol version adds informational messages.
+		}
+	}
+}
+
+// drainEvents discards any notifications already sitting in the queue.
+// Called immediately after an authoritative snapshot is sent (initial
+// connect, and revision_gap reconciliation): anything still queued predates
+// that snapshot's data-gathering, so sending it afterward would risk
+// overwriting the snapshot's just-established state with stale data. A
+// notification that happens to be enqueued in the narrow window between
+// the snapshot's SnapshotFunc() call and this drain is lost, same as any
+// other dropped notification (see Notify's doc comment) — the next real
+// state change on that session produces a fresh one.
+func (c *Client) drainEvents() {
+	for {
+		select {
+		case <-c.events:
+		default:
+			return
+		}
+	}
+}
+
+// flushPendingEvents makes a best-effort, time-bounded attempt to send any
+// notifications still queued when a graceful shutdown begins, so a final
+// session_stopped enqueued just before Close() isn't silently lost. Unlike
+// drainEvents, this path sends (rather than discards) the queue, because
+// shutdown is the one case where the client is not about to reconcile with
+// a fresh snapshot afterward.
+//
+// Deliberately uses a fresh background deadline rather than the caller's
+// ctx: this is invoked from the very branches (closeCh/ctx.Done) where the
+// caller's context may already be cancelled or expired, which would make
+// every send fail immediately and defeat the flush entirely.
+func (c *Client) flushPendingEvents(conn *websocket.Conn) {
+	deadline := time.Now().Add(shutdownFlushBudget)
+	for time.Now().Before(deadline) {
+		var info SessionSnapshot
+		select {
+		case info = <-c.events:
+		default:
+			return
+		}
+		sendCtx, cancel := context.WithDeadline(context.Background(), deadline)
+		err := c.sendEvent(sendCtx, conn, info)
+		cancel()
+		if err != nil {
+			return // connection is going or gone; nothing more we can do
 		}
 	}
 }
@@ -422,7 +516,18 @@ func (c *Client) sendSnapshot(ctx context.Context, conn *websocket.Conn) error {
 }
 
 func (c *Client) sendHeartbeat(ctx context.Context, conn *websocket.Conn) error {
-	return c.writeEnvelope(ctx, conn, msgHeartbeat, nil)
+	if err := c.writeEnvelope(ctx, conn, msgHeartbeat, nil); err != nil {
+		return err
+	}
+	// The status file is otherwise written only on state *change*, so a
+	// healthy long-lived connection would leave a "connected" entry
+	// untouched for as long as it stays up. Refreshing it here is what
+	// makes doctor's staleness check (bridgecontrol.StatusStaleAfter)
+	// meaningful: an old timestamp can then only mean heartbeats have
+	// actually stopped (daemon killed, powered off, or otherwise wedged),
+	// not "still connected, just hasn't needed to write again."
+	c.setStatus(StateConnected, "")
+	return nil
 }
 
 // sendEvent publishes one incremental lifecycle change. It classifies the

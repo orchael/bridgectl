@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/orchael/bridgectl/internal/bridgecontrol"
 	"github.com/orchael/bridgectl/internal/localserver"
 )
 
@@ -48,13 +49,17 @@ type bridgeSecret struct {
 	ControlCredential string `json:"control_credential,omitempty"`
 }
 
-// controlProvisioned reports whether e/s together describe a complete,
-// usable control-plane credential. It is the single source of truth for
-// "not provisioned" vs "configured" across whoami/doctor/the control
-// client's own startup gate, so all three agree.
-func controlProvisioned(e *bridgeEnrollment, s *bridgeSecret) bool {
+// controlProvisioned reports whether e/controlCredential together describe
+// a complete, usable control-plane credential. It is the single source of
+// truth for "not provisioned" vs "configured" across whoami/doctor/the
+// control client's own startup gate, so all three agree. controlCredential
+// must come from readControlCredential (or an equivalent independent read),
+// never from readBridgeSecret: the two credentials are unrelated, and a
+// broken telemetry (brc_) credential in the same file must never make a
+// perfectly valid control (bri_) credential report as unconfigured.
+func controlProvisioned(e *bridgeEnrollment, controlCredential string) bool {
 	return e != nil && e.SchemaVersion >= 2 && e.ControlEndpoint != "" &&
-		s != nil && controlCredentialPattern.MatchString(s.ControlCredential)
+		controlCredentialPattern.MatchString(controlCredential)
 }
 
 func bridgeStatePaths() (string, string) {
@@ -127,6 +132,36 @@ func readBridgeSecret() (*bridgeSecret, error) {
 	}
 	return &s, nil
 }
+
+// readControlCredential reads only control_credential from the shared
+// secret file, independent of whether collector_credential in that same
+// file is valid: readBridgeSecret rejects the whole file when the
+// (unrelated) telemetry credential is malformed, which must never make an
+// otherwise-healthy control credential report as missing. Returns ("", nil)
+// when the file exists but has no control_credential set — an enrollment
+// created before Bridge PR #16, or a telemetry-only enrollment — which is a
+// valid, expected state, not an error.
+func readControlCredential() (string, error) {
+	_, sp := bridgeStatePaths()
+	b, err := secureRead(sp)
+	if err != nil {
+		return "", err
+	}
+	var s struct {
+		ControlCredential string `json:"control_credential"`
+	}
+	if err := json.Unmarshal(b, &s); err != nil {
+		return "", err
+	}
+	if s.ControlCredential == "" {
+		return "", nil
+	}
+	if !controlCredentialPattern.MatchString(s.ControlCredential) {
+		return "", fmt.Errorf("bridge credential file %q has a malformed control_credential", sp)
+	}
+	return s.ControlCredential, nil
+}
+
 func secureRead(path string) ([]byte, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -562,12 +597,13 @@ func persistBridgeEnrollment(tok deviceToken, name, expectedOrigin string) error
 // credentials/query/fragment, matching Bridge's own startup validation for
 // BRIDGE_CONTROL_URL. bridgectl must never fall back to plain ws:// even if
 // a misconfigured Bridge were to return one.
+// validateControlEndpoint delegates to bridgecontrol.ValidateEndpoint, the
+// single shared check enforced at every point a control endpoint value is
+// accepted (here, at enrollment write time, and again at daemon read time
+// in internal/localserver, since a hand-edited config bypasses this write
+// path entirely).
 func validateControlEndpoint(raw string) error {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.Scheme != "wss" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Path == "" {
-		return errors.New("must be a wss:// URL with a path and no credentials, query, or fragment")
-	}
-	return nil
+	return bridgecontrol.ValidateEndpoint(raw)
 }
 func validateHTTPSURL(raw string) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
@@ -706,8 +742,9 @@ func newBridgeWhoamiCmd() *cobra.Command {
 		if secretErr != nil || secret == nil || secret.CollectorCredential == "" {
 			telemetryStatus = "not configured"
 		}
+		controlCredential, _ := readControlCredential() // a read error just means "not usable" here
 		controlStatus := "configured"
-		if !controlProvisioned(e, secret) {
+		if !controlProvisioned(e, controlCredential) {
 			controlStatus = "not configured"
 		}
 		_, _ = fmt.Fprintf(out, "Telemetry       %s\nControl         %s\n", telemetryStatus, controlStatus)

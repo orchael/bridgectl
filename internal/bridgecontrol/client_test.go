@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -49,6 +51,53 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	}
 	if !cond() {
 		t.Fatalf("condition not met within %s", timeout)
+	}
+}
+
+// TestConnectAndServe_WssEndpoint_WithCustomHTTPClient exercises a real
+// wss:// (TLS) connection end to end, using Config.HTTPClient to trust the
+// test server's certificate — the supported way to point the client at a
+// local TLS test server (or a custom/self-hosted control endpoint whose CA
+// isn't in the system trust store) without weakening default certificate
+// verification for production use, where HTTPClient stays nil.
+func TestConnectAndServe_WssEndpoint_WithCustomHTTPClient(t *testing.T) {
+	var helloEnv envelope
+	done := make(chan struct{})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		var handshakeErr error
+		helloEnv, _, handshakeErr = serverHandshake(conn, 30)
+		if handshakeErr != nil {
+			t.Errorf("server handshake: %v", handshakeErr)
+		}
+		close(done)
+	}))
+	defer server.Close()
+
+	wssURL := "wss" + strings.TrimPrefix(server.URL, "https")
+	c := New(Config{
+		Endpoint:         wssURL,
+		Credential:       "bri_valid",
+		BridgectlVersion: "test-version",
+		HTTPClient:       server.Client(), // trusts this test server's cert
+		SnapshotFunc:     func() []SessionSnapshot { return nil },
+		Logger:           testLogger(),
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	_ = c.connectAndServe(ctx)
+
+	select {
+	case <-done:
+	case <-time.After(testTimeout):
+		t.Fatal("server handler did not complete")
+	}
+	if helloEnv.Type != msgHello {
+		t.Fatalf("expected hello over the TLS connection, got %q", helloEnv.Type)
 	}
 }
 
@@ -388,6 +437,136 @@ func TestReconnect_AfterServerDisconnect_SendsFreshSnapshot(t *testing.T) {
 		defer fs.mu.Unlock()
 		return fs.connCount >= 2
 	})
+}
+
+// TestReconnect_DiscardsPreSnapshotQueuedEvents guards against a queued
+// notification from before a disconnect being replayed on top of the fresh
+// authoritative snapshot sent after reconnecting: anything still queued at
+// reconnect time was necessarily enqueued while disconnected (a live
+// connection drains the queue as fast as it fills), so it predates the
+// snapshot's live Supervisor read and must be discarded, not replayed with
+// a newly assigned revision.
+func TestReconnect_DiscardsPreSnapshotQueuedEvents(t *testing.T) {
+	origBase, origMin, origMax := backoffBase, backoffMin, backoffMax
+	backoffBase, backoffMin, backoffMax = 10*time.Millisecond, 5*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { backoffBase, backoffMin, backoffMax = origBase, origMin, origMax })
+
+	var mu sync.Mutex
+	var secondConnMessages []envelope
+	fs := newFakeServer(t, nil, func(conn *websocket.Conn, n int) {
+		if _, _, err := serverHandshake(conn, 30); err != nil {
+			return
+		}
+		if n == 1 {
+			_ = conn.CloseNow() // drop right after the first snapshot
+			return
+		}
+		// Second connection (the reconnect): record everything the client
+		// sends afterward; there must be no incremental event for the
+		// notification that was queued while disconnected.
+		for {
+			env, err := serverReadEnvelope(conn)
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			secondConnMessages = append(secondConnMessages, env)
+			mu.Unlock()
+			_ = serverWriteEnvelope(conn, msgAck, "srv-ack", ackPayload{MessageID: env.MessageID, Result: "applied"})
+		}
+	})
+	defer fs.Close()
+
+	c := newTestClient(t, fs.wsURL(), "bri_valid", func() []SessionSnapshot { return nil })
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	c.Start(ctx)
+	defer func() {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), testTimeout)
+		defer closeCancel()
+		_ = c.Close(closeCtx)
+	}()
+
+	// Enqueue while the first connection is being torn down / before the
+	// reconnect completes. This is the notification that must never reach
+	// the second connection as a replayed incremental event.
+	c.Notify(SessionSnapshot{SessionID: "stale-session", Status: StatusRunning, CreatedAt: time.Now()})
+
+	waitFor(t, testTimeout, func() bool {
+		fs.mu.Lock()
+		defer fs.mu.Unlock()
+		return fs.connCount >= 2
+	})
+	// Give the (would-be) replay a chance to happen before asserting it didn't.
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, env := range secondConnMessages {
+		if env.Type == msgSessionStarted || env.Type == msgSessionUpdated || env.Type == msgSessionStopped {
+			var sp sessionPayload
+			_ = json.Unmarshal(env.Payload, &sp)
+			if sp.SessionID == "stale-session" {
+				t.Fatalf("stale pre-reconnect notification for %q was replayed as %q on the new connection", sp.SessionID, env.Type)
+			}
+		}
+	}
+}
+
+// TestGracefulShutdown_FlushesPendingEvent guards against losing a final
+// lifecycle notification (typically session_stopped) enqueued just before
+// Close(): the Supervisor enqueues such notifications synchronously before
+// calling Client.Close during shutdown, so they must have a chance to reach
+// Bridge rather than sitting in a queue that's about to be torn down.
+func TestGracefulShutdown_FlushesPendingEvent(t *testing.T) {
+	flushed := make(chan envelope, 1)
+	fs := newFakeServer(t, nil, func(conn *websocket.Conn, _ int) {
+		if _, _, err := serverHandshake(conn, 30); err != nil {
+			return
+		}
+		env, err := serverReadEnvelope(conn)
+		if err != nil {
+			return
+		}
+		_ = serverWriteEnvelope(conn, msgAck, "srv-ack", ackPayload{MessageID: env.MessageID, Result: "applied"})
+		select {
+		case flushed <- env:
+		default:
+		}
+	})
+	defer fs.Close()
+
+	c := newTestClient(t, fs.wsURL(), "bri_valid", func() []SessionSnapshot { return nil })
+	c.Start(context.Background())
+
+	// Wait for the connection to be up before racing Notify against Close.
+	waitFor(t, testTimeout, func() bool {
+		st, err := ReadStatus(c.cfg.StatusPath)
+		return err == nil && st.State == StateConnected
+	})
+
+	c.Notify(SessionSnapshot{SessionID: "final-session", Status: StatusStopped, CreatedAt: time.Now()})
+	closeCtx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	if err := c.Close(closeCtx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case env := <-flushed:
+		if env.Type != msgSessionStarted { // a never-before-seen session starts here
+			t.Fatalf("expected session_started for the final notification, got %q", env.Type)
+		}
+		var sp sessionPayload
+		if err := json.Unmarshal(env.Payload, &sp); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		if sp.SessionID != "final-session" {
+			t.Fatalf("session_id=%q, want final-session", sp.SessionID)
+		}
+	default:
+		t.Fatal("the queued notification was never flushed before shutdown closed the connection")
+	}
 }
 
 // --- silent/black-holed connection detection (no explicit close or error) ---
