@@ -31,6 +31,7 @@ type Config struct {
 	Runtime      RuntimeConfig             `yaml:"runtime"`
 	RepoSetup    RepoSetupConfig           `yaml:"repo_setup"`
 	Telemetry    TelemetryConfig           `yaml:"telemetry"`
+	Control      ControlConfig             `yaml:"control"`
 	Providers    map[string]ProviderConfig `yaml:"providers"`
 	AllowedPaths []string                  `yaml:"allowed_paths"`
 	Logging      LoggingConfig             `yaml:"logging"`
@@ -169,6 +170,30 @@ func (c *TelemetryConfig) UnmarshalYAML(node *yaml.Node) error {
 
 func (r RepoSetupConfig) IsEnabled() bool {
 	return r.Enabled == nil || *r.Enabled
+}
+
+// ControlConfig holds bridgectl's optional outbound Bridge control-plane
+// WebSocket client configuration. It is populated by `bridgectl bridge
+// login` alongside the telemetry block (see cmd/bridgectl's
+// configureBridgeTelemetry), never hand-written.
+//
+// Unlike TelemetryConfig, Control has no local/offline fallback: an empty
+// Endpoint or CredentialFile simply disables the control client entirely.
+// This is the expected, non-error state for standalone bridgectl (no Bridge
+// enrollment) and for an enrollment created before Bridge added
+// control-plane support (schema_version < 2, no control_endpoint/
+// control_credential).
+type ControlConfig struct {
+	// Endpoint is the control-plane WebSocket URL (e.g.
+	// "wss://control.bridge.orchael.dev/v1/control"), taken verbatim from
+	// Bridge's enrollment response.
+	Endpoint string `yaml:"endpoint"`
+	// CredentialFile points at the JSON file holding the bri_ control
+	// credential (never the brc_ telemetry credential).
+	CredentialFile string `yaml:"credential_file"`
+	// ManagedByBridge records that `bridgectl bridge login` wrote this
+	// block, so `bridgectl bridge logout` knows it owns removing it.
+	ManagedByBridge bool `yaml:"managed_by_bridge"`
 }
 
 type ServerConfig struct {

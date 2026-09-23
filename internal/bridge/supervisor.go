@@ -109,6 +109,9 @@ type Supervisor struct {
 	histMu    sync.RWMutex
 	history   map[string]SessionInfo
 	telemetry TelemetryObserver
+
+	controlCloseOnce sync.Once
+	control          ControlObserver
 }
 
 type managedSession struct {
@@ -838,6 +841,7 @@ func (s *Supervisor) waitLoop(ms *managedSession) {
 		slog.Info("session process exited", "session_id", ms.info.SessionID, "provider", ms.info.Provider, "exit_code", exitCode)
 	}
 	tsession := telemetry.Session{SessionID: ms.info.SessionID, ProjectID: ms.info.ProjectID, Provider: ms.info.Provider, RepoPath: ms.info.RepoPath}
+	infoCopy := ms.info
 	ms.telemetryMu.Lock()
 	ms.cancel()
 	ms.mu.Unlock()
@@ -845,6 +849,7 @@ func (s *Supervisor) waitLoop(ms *managedSession) {
 		s.telemetry.SessionEnded(tsession)
 	}
 	ms.telemetryMu.Unlock()
+	s.notifyControl(infoCopy)
 
 	s.persistSession(ms.snapshotInfo())
 }
@@ -869,7 +874,9 @@ func (s *Supervisor) Stop(sessionID string, force bool) error {
 		ms.forceStop = force
 		pid := ms.info.ProcessID
 		grace := ms.stopGrace
+		infoCopy := ms.info
 		ms.mu.Unlock()
+		s.notifyControl(infoCopy)
 
 		if force {
 			if pid > 0 {
@@ -887,8 +894,10 @@ func (s *Supervisor) Stop(sessionID string, force bool) error {
 					ms.info.State = SessionStateStopped
 					ms.info.StoppedAt = nowUTC()
 					ms.info.ProcessID = 0
+					stoppedInfo := ms.info
 					ms.mu.Unlock()
 					s.persistSession(ms.snapshotInfo())
+					s.notifyControl(stoppedInfo)
 					return
 				}
 				time.Sleep(100 * time.Millisecond)
@@ -900,8 +909,10 @@ func (s *Supervisor) Stop(sessionID string, force bool) error {
 			ms.info.State = SessionStateStopped
 			ms.info.StoppedAt = nowUTC()
 			ms.info.ProcessID = 0
+			stoppedInfo := ms.info
 			ms.mu.Unlock()
 			s.persistSession(ms.snapshotInfo())
+			s.notifyControl(stoppedInfo)
 		}()
 		return nil
 	}
@@ -910,7 +921,9 @@ func (s *Supervisor) Stop(sessionID string, force bool) error {
 	pid := ms.cmd.Process.Pid
 	grace := ms.stopGrace
 	stdin := ms.stdin
+	infoCopy := ms.info
 	ms.mu.Unlock()
+	s.notifyControl(infoCopy)
 
 	// Closing stdin signals EOF to stream-JSON providers that read from stdin.
 	if stdin != nil {
@@ -1094,6 +1107,7 @@ func (s *Supervisor) Attach(sessionID, clientID string, afterSeq uint64, role At
 		ms.info.Attached = true
 		ms.info.AttachedClientID = clientID
 		ms.info.State = SessionStateAttached
+		s.notifyControl(ms.info)
 	}
 	ms.info.ObserverCount = s.countObservers(ms)
 	ms.lastActivity = time.Now()
@@ -1164,6 +1178,7 @@ func (s *Supervisor) Detach(sessionID, clientID string) (wasWriter bool, err err
 	ms.info.ObserverCount = s.countObservers(ms)
 	if len(ms.observers) == 0 && ms.info.State == SessionStateAttached {
 		ms.info.State = SessionStateRunning
+		s.notifyControl(ms.info)
 	}
 	return wasWriter, nil
 }
@@ -1233,11 +1248,13 @@ func (s *Supervisor) Shutdown(ctx context.Context) error {
 		s.stopSessions(s.nonTerminalSessionIDs(), true)
 		s.waitBestEffort(2 * time.Second)
 		s.closeTelemetryBestEffort()
+		s.closeControlBestEffort()
 		return err
 	}
 	flushCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	s.closeTelemetry(flushCtx)
+	s.closeControl(flushCtx)
 	return nil
 }
 
@@ -1307,12 +1324,27 @@ func (s *Supervisor) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	s.closeTelemetry(ctx)
+	s.closeControl(ctx)
 }
 
 func (s *Supervisor) observeSessionStarted(ms *managedSession) {
 	if s.telemetry != nil {
 		s.telemetry.SessionStarted(telemetrySession(ms))
 	}
+	s.notifyControl(ms.snapshotInfo())
+}
+
+// notifyControl forwards a session's current state to the optional
+// ControlObserver. It is safe to call with or without ms.mu held by the
+// caller: pass an already-copied SessionInfo (e.g. ms.info while holding
+// ms.mu, since SessionInfo is a plain value type) rather than re-deriving it
+// via ms.snapshotInfo(), which itself locks ms.mu and would deadlock if
+// called while that lock is already held.
+func (s *Supervisor) notifyControl(info SessionInfo) {
+	if s.control == nil {
+		return
+	}
+	s.control.SessionChanged(info)
 }
 
 func telemetrySession(ms *managedSession) telemetry.Session {
@@ -1330,6 +1362,23 @@ func (s *Supervisor) closeTelemetry(ctx context.Context) {
 			slog.Warn("telemetry flush failed", "error", err)
 		}
 	})
+}
+
+func (s *Supervisor) closeControl(ctx context.Context) {
+	if s.control == nil {
+		return
+	}
+	s.controlCloseOnce.Do(func() {
+		if err := s.control.Close(ctx); err != nil {
+			slog.Warn("control observer close failed", "error", err)
+		}
+	})
+}
+
+func (s *Supervisor) closeControlBestEffort() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	s.closeControl(ctx)
 }
 
 func (s *Supervisor) closeTelemetryBestEffort() {
