@@ -146,6 +146,21 @@ func (p *CodexAppServerProvider) WatchInteraction(ctx context.Context, sessionID
 	return codexapp.Watch(ctx, endpoint, slog.Default())
 }
 
+// CompanionEndpoint returns the ws:// URL of sessionID's companion
+// app-server, for diagnostics (e.g. `bridgectl doctor`) or a caller that
+// needs to connect its own additional client to the same instance. Returns
+// ok=false once BuildCommand hasn't run yet for this session, or after the
+// session has stopped and its companion was torn down.
+func (p *CodexAppServerProvider) CompanionEndpoint(sessionID string) (endpoint string, ok bool) {
+	p.mu.Lock()
+	sess, found := p.sessions[sessionID]
+	p.mu.Unlock()
+	if !found {
+		return "", false
+	}
+	return fmt.Sprintf("ws://127.0.0.1:%d", sess.port), true
+}
+
 // freeLocalPort asks the OS for an unused TCP port by briefly binding to
 // port 0 and reading back what was assigned. This is inherently a
 // time-of-check/time-of-use race (another process could bind the same port

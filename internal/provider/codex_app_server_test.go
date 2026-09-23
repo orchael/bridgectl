@@ -219,3 +219,10 @@ func simulateTUIThreadStart(t *testing.T, wsURL string) {
 		}
 	}
 }
+
+func TestCodexAppServer_CompanionEndpoint_UnknownSession(t *testing.T) {
+	p := newTestCodexAppServerProvider("codex")
+	if _, ok := p.CompanionEndpoint("never-started"); ok {
+		t.Fatal("expected ok=false for a session BuildCommand never started")
+	}
+}
