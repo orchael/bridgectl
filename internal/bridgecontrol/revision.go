@@ -46,7 +46,12 @@ func NewRevisionStore(path string) *RevisionStore {
 		return rs
 	}
 	var loaded map[string]int64
-	if err := json.Unmarshal(b, &loaded); err == nil {
+	if err := json.Unmarshal(b, &loaded); err == nil && loaded != nil {
+		// json.Unmarshal accepts the JSON literal null for a map and leaves
+		// loaded nil without erroring; assigning that nil map to rs.rev
+		// would make a later Next's rs.rev[sessionID] = next panic (write
+		// to a nil map). A corrupted or manually edited revisions file must
+		// be treated the same as an empty/missing one, never a crash.
 		rs.rev = loaded
 	}
 	return rs

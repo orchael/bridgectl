@@ -75,6 +75,15 @@ type Config struct {
 	Logger *slog.Logger
 }
 
+// queuedNotification is what actually sits in Client.events: a
+// SessionSnapshot plus the instant it was enqueued, so a subsequent
+// reconciliation can tell whether it predates the authoritative snapshot
+// that just superseded it (see drainStalePending).
+type queuedNotification struct {
+	info       SessionSnapshot
+	enqueuedAt time.Time
+}
+
 // Client is the optional outbound control-plane WebSocket client. All
 // exported methods are non-blocking and safe to call from the Supervisor's
 // hot path; the actual network I/O happens on a single background
@@ -85,16 +94,10 @@ type Client struct {
 	rng       *rand.Rand
 	rngMu     sync.Mutex
 
-	events    chan SessionSnapshot
+	events    chan queuedNotification
 	closeCh   chan struct{}
 	closeOnce sync.Once
 	doneCh    chan struct{}
-
-	// everConnected is set after the first successful connection's initial
-	// snapshot. It is only ever read/written from within connectAndServe,
-	// which run's single goroutine calls sequentially (never concurrently),
-	// so it needs no additional synchronization.
-	everConnected bool
 }
 
 // New constructs a Client. It does not connect until Start is called.
@@ -106,7 +109,7 @@ func New(cfg Config) *Client {
 		cfg:       cfg,
 		revisions: NewRevisionStore(cfg.RevisionPath),
 		rng:       rand.New(rand.NewSource(time.Now().UnixNano())),
-		events:    make(chan SessionSnapshot, eventQueueSize),
+		events:    make(chan queuedNotification, eventQueueSize),
 		closeCh:   make(chan struct{}),
 		doneCh:    make(chan struct{}),
 	}
@@ -126,8 +129,9 @@ func (c *Client) Start(ctx context.Context) {
 // snapshot/event always reflects bridgectl's then-current authoritative
 // state.
 func (c *Client) Notify(info SessionSnapshot) {
+	item := queuedNotification{info: info, enqueuedAt: time.Now()}
 	select {
-	case c.events <- info:
+	case c.events <- item:
 		return
 	default:
 	}
@@ -136,7 +140,7 @@ func (c *Client) Notify(info SessionSnapshot) {
 	default:
 	}
 	select {
-	case c.events <- info:
+	case c.events <- item:
 	default:
 		c.cfg.Logger.Warn("bridgecontrol: event queue full, dropped notification", "session_id", info.SessionID)
 	}
@@ -250,25 +254,9 @@ func (c *Client) connectAndServe(parent context.Context) error {
 	c.setStatus(StateConnected, "")
 	c.cfg.Logger.Info("bridgecontrol: connected", "installation_id", ack.InstallationID, "heartbeat_interval_s", ack.HeartbeatIntervalSeconds)
 
-	if err := c.sendSnapshot(parent, conn); err != nil {
+	if err := c.sendAuthoritativeSnapshot(parent, conn); err != nil {
 		return err
 	}
-	if c.everConnected {
-		// This is a reconnect, not the first-ever connection: anything
-		// still queued can only have been enqueued while disconnected (a
-		// live connection drains c.events as fast as it fills), so it
-		// necessarily predates the live Supervisor state this snapshot just
-		// captured. Applying it now with a freshly assigned revision would
-		// let that stale, pre-snapshot state overwrite what the snapshot
-		// just established, and would replay rather than reconcile. This
-		// reasoning does not hold for the very first connection (nothing to
-		// have gone stale relative to yet), so skip the drain there: a
-		// notification racing the first handshake is still fresh, and
-		// discarding it would be a real, avoidable loss of the only report
-		// of that state change.
-		c.drainEvents()
-	}
-	c.everConnected = true
 
 	heartbeatInterval := time.Duration(ack.HeartbeatIntervalSeconds) * time.Second
 	if heartbeatInterval <= 0 {
@@ -317,16 +305,15 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, heartbeatInter
 		case err := <-readErrCh:
 			return err
 		case <-reconcileCh:
-			if err := c.sendSnapshot(ctx, conn); err != nil {
+			if err := c.sendAuthoritativeSnapshot(ctx, conn); err != nil {
 				return err
 			}
-			c.drainEvents() // see the identical comment in connectAndServe
 		case <-ticker.C:
 			if err := c.sendHeartbeat(ctx, conn); err != nil {
 				return err
 			}
-		case info := <-c.events:
-			if err := c.sendEvent(ctx, conn, info); err != nil {
+		case item := <-c.events:
+			if err := c.sendEvent(ctx, conn, item.info); err != nil {
 				return err
 			}
 		}
@@ -379,21 +366,62 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idleTimeout
 	}
 }
 
-// drainEvents discards any notifications already sitting in the queue.
-// Called immediately after an authoritative snapshot is sent (initial
-// connect, and revision_gap reconciliation): anything still queued predates
-// that snapshot's data-gathering, so sending it afterward would risk
-// overwriting the snapshot's just-established state with stale data. A
-// notification that happens to be enqueued in the narrow window between
-// the snapshot's SnapshotFunc() call and this drain is lost, same as any
-// other dropped notification (see Notify's doc comment) — the next real
-// state change on that session produces a fresh one.
-func (c *Client) drainEvents() {
+// sendAuthoritativeSnapshot sends a fresh session_snapshot and then
+// discards any queued notification that predates it (see
+// drainStalePending). Used both right after the initial hello_ack and after
+// a revision_gap reconcile — every case where the snapshot, not the queue,
+// becomes the authoritative source of truth going forward.
+func (c *Client) sendAuthoritativeSnapshot(ctx context.Context, conn *websocket.Conn) error {
+	// Captured before SnapshotFunc() runs (inside sendSnapshot), not after:
+	// erring toward an earlier cutoff means a notification that actually
+	// raced the read keeps rather than loses a real update. Supervisor.Start
+	// is asynchronous, so this matters on the very first connection too, not
+	// only on reconnects — a session can start while the initial dial and
+	// handshake are still in flight.
+	cutoff := time.Now()
+	if err := c.sendSnapshot(ctx, conn); err != nil {
+		return err
+	}
+	c.drainStalePending(cutoff)
+	return nil
+}
+
+// drainStalePending removes queued notifications enqueued strictly before
+// cutoff (the instant just before the snapshot's SnapshotFunc() read) and
+// keeps the rest. Anything predating cutoff is necessarily already
+// reflected (or superseded) by the snapshot's live Supervisor read;
+// resending it afterward with a freshly assigned revision would let stale
+// state overwrite what the snapshot just established. A discarded terminal
+// (stopped/failed) notification's revision bookkeeping is forgotten here —
+// ActiveSnapshots excludes terminal sessions, so Bridge already infers the
+// session as stopped from its absence in the very snapshot just sent,
+// making the discarded event's own wire delivery redundant — without this,
+// sendEvent (and its Forget call) would simply never run for that session,
+// leaking one entry in the revisions file for the rest of the daemon's
+// lifetime.
+func (c *Client) drainStalePending(cutoff time.Time) {
+	var keep []queuedNotification
+loop:
 	for {
 		select {
-		case <-c.events:
+		case item := <-c.events:
+			if item.enqueuedAt.Before(cutoff) {
+				if item.info.Status == StatusStopped || item.info.Status == StatusFailed {
+					c.revisions.Forget(item.info.SessionID)
+				}
+				continue
+			}
+			keep = append(keep, item)
 		default:
-			return
+			break loop
+		}
+	}
+	for _, item := range keep {
+		select {
+		case c.events <- item:
+		default:
+			// Can't happen (we only put back a subset of what we just took
+			// out of a channel of the same capacity), but never block here.
 		}
 	}
 }
@@ -401,9 +429,9 @@ func (c *Client) drainEvents() {
 // flushPendingEvents makes a best-effort, time-bounded attempt to send any
 // notifications still queued when a graceful shutdown begins, so a final
 // session_stopped enqueued just before Close() isn't silently lost. Unlike
-// drainEvents, this path sends (rather than discards) the queue, because
-// shutdown is the one case where the client is not about to reconcile with
-// a fresh snapshot afterward.
+// drainStalePending, this path sends (rather than discards) the queue,
+// because shutdown is the one case where the client is not about to
+// reconcile with a fresh snapshot afterward.
 //
 // Deliberately uses a fresh background deadline rather than the caller's
 // ctx: this is invoked from the very branches (closeCh/ctx.Done) where the
@@ -412,14 +440,14 @@ func (c *Client) drainEvents() {
 func (c *Client) flushPendingEvents(conn *websocket.Conn) {
 	deadline := time.Now().Add(shutdownFlushBudget)
 	for time.Now().Before(deadline) {
-		var info SessionSnapshot
+		var item queuedNotification
 		select {
-		case info = <-c.events:
+		case item = <-c.events:
 		default:
 			return
 		}
 		sendCtx, cancel := context.WithDeadline(context.Background(), deadline)
-		err := c.sendEvent(sendCtx, conn, info)
+		err := c.sendEvent(sendCtx, conn, item.info)
 		cancel()
 		if err != nil {
 			return // connection is going or gone; nothing more we can do

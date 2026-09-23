@@ -272,12 +272,15 @@ func TestConnectAndServe_OversizedMessage(t *testing.T) {
 // --- session lifecycle: started / updated / stopped with monotonic revisions ---
 
 func TestSessionLifecycle_StartedUpdatedStopped(t *testing.T) {
+	snapshotSeen := make(chan struct{})
+	var closeOnce sync.Once
 	var fs *fakeServer
 	fs = newFakeServer(t, nil, func(conn *websocket.Conn, _ int) {
 		if _, _, err := serverHandshake(conn, 30); err != nil {
 			t.Errorf("handshake: %v", err)
 			return
 		}
+		closeOnce.Do(func() { close(snapshotSeen) })
 		for {
 			env, err := serverReadEnvelope(conn)
 			if err != nil {
@@ -294,8 +297,24 @@ func TestSessionLifecycle_StartedUpdatedStopped(t *testing.T) {
 	defer cancel()
 	go func() { _ = c.connectAndServe(ctx) }()
 
-	// Notify is safe to call immediately: it only enqueues, and the client's
-	// serve loop drains events in order once the handshake/snapshot finish.
+	// Wait until the server has already acked the initial snapshot (and the
+	// client has drained anything predating it) before notifying: a real
+	// Supervisor's SnapshotFunc always reflects the same live state a
+	// concurrent Notify describes, so a notification racing the handshake
+	// would already be captured by the snapshot itself and correctly
+	// dropped as redundant. This fake server's SnapshotFunc is a static nil
+	// stub, so it can't reflect that — notifying only after the snapshot is
+	// what makes this test's events unambiguously post-snapshot.
+	select {
+	case <-snapshotSeen:
+	case <-time.After(testTimeout):
+		t.Fatal("server never received the initial snapshot")
+	}
+	// The server receiving the snapshot only proves the client sent it; give
+	// the client's own drainStalePending (which runs immediately after,
+	// before the server's ack can arrive) a brief moment to finish first.
+	time.Sleep(50 * time.Millisecond)
+
 	c.Notify(SessionSnapshot{SessionID: "s1", Provider: "codex", ProjectID: "p1", Status: StatusRunning, CreatedAt: time.Now()})
 	c.Notify(SessionSnapshot{SessionID: "s1", Provider: "codex", ProjectID: "p1", Status: StatusAttached, CreatedAt: time.Now()})
 	c.Notify(SessionSnapshot{SessionID: "s1", Provider: "codex", ProjectID: "p1", Status: StatusStopped, CreatedAt: time.Now()})
@@ -513,6 +532,60 @@ func TestReconnect_DiscardsPreSnapshotQueuedEvents(t *testing.T) {
 	}
 }
 
+// TestReconnect_DiscardedTerminalNotificationForgetsRevision guards against
+// a revisions-file leak: if a discarded stale notification describes a
+// terminal (stopped/failed) session, sendEvent (and its RevisionStore.Forget
+// call) never runs for it, since the notification is dropped rather than
+// sent. Without an explicit Forget in the discard path itself, that
+// session's entry would remain in the revisions map forever, growing the
+// persisted file by one entry per session whose final notification happened
+// to be discarded during a reconcile — silently contradicting the
+// bounded-memory design.
+func TestReconnect_DiscardedTerminalNotificationForgetsRevision(t *testing.T) {
+	origBase, origMin, origMax := backoffBase, backoffMin, backoffMax
+	backoffBase, backoffMin, backoffMax = 10*time.Millisecond, 5*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { backoffBase, backoffMin, backoffMax = origBase, origMin, origMax })
+
+	fs := newFakeServer(t, nil, func(conn *websocket.Conn, n int) {
+		if _, _, err := serverHandshake(conn, 30); err != nil {
+			return
+		}
+		if n == 1 {
+			_ = conn.CloseNow()
+			return
+		}
+		_, _ = serverReadEnvelope(conn) // block; test only cares about local state
+	})
+	defer fs.Close()
+
+	c := newTestClient(t, fs.wsURL(), "bri_valid", func() []SessionSnapshot { return nil })
+	// Give this session a known revision before it "completes", as a real
+	// started/attached sequence would.
+	c.revisions.Next("done-session")
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	c.Start(ctx)
+	defer func() {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), testTimeout)
+		defer closeCancel()
+		_ = c.Close(closeCtx)
+	}()
+
+	// Enqueued while disconnected: will be discarded as stale on reconnect.
+	c.Notify(SessionSnapshot{SessionID: "done-session", Status: StatusStopped, CreatedAt: time.Now()})
+
+	waitFor(t, testTimeout, func() bool {
+		fs.mu.Lock()
+		defer fs.mu.Unlock()
+		return fs.connCount >= 2
+	})
+	time.Sleep(100 * time.Millisecond)
+
+	if got := c.revisions.Current("done-session"); got != 0 {
+		t.Fatalf("revisions.Current(done-session) = %d, want 0 (forgotten when its terminal notification was discarded)", got)
+	}
+}
+
 // TestGracefulShutdown_FlushesPendingEvent guards against losing a final
 // lifecycle notification (typically session_stopped) enqueued just before
 // Close(): the Supervisor enqueues such notifications synchronously before
@@ -618,10 +691,12 @@ func TestConnectAndServe_SilentConnectionDetectedViaIdleTimeout(t *testing.T) {
 func TestSendEvent_DuplicateAck_TreatedAsSuccess(t *testing.T) {
 	var mu sync.Mutex
 	var results []string
+	snapshotAcked := make(chan struct{})
 	fs := newFakeServer(t, nil, func(conn *websocket.Conn, _ int) {
 		if _, _, err := serverHandshake(conn, 30); err != nil {
 			return
 		}
+		close(snapshotAcked)
 		first := true
 		for {
 			env, err := serverReadEnvelope(conn)
@@ -645,6 +720,13 @@ func TestSendEvent_DuplicateAck_TreatedAsSuccess(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	go func() { _ = c.connectAndServe(ctx) }()
+
+	select {
+	case <-snapshotAcked:
+	case <-time.After(testTimeout):
+		t.Fatal("server never received the initial snapshot")
+	}
+	time.Sleep(50 * time.Millisecond) // let the client's own post-snapshot drain finish first
 
 	c.Notify(SessionSnapshot{SessionID: "s1", Status: StatusRunning, CreatedAt: time.Now()})
 	c.Notify(SessionSnapshot{SessionID: "s1", Status: StatusAttached, CreatedAt: time.Now()})
@@ -732,10 +814,12 @@ func TestSendSnapshot_RevisionNotAdvanced_StillAppliesSuccessfully(t *testing.T)
 // discovered lazily on the connection's next write, and closes with
 // StatusPolicyViolation rather than a transport-level error.
 func TestConnectAndServe_CredentialRevokedMidConnection(t *testing.T) {
+	snapshotAcked := make(chan struct{})
 	fs := newFakeServer(t, nil, func(conn *websocket.Conn, _ int) {
 		if _, _, err := serverHandshake(conn, 30); err != nil {
 			return
 		}
+		close(snapshotAcked)
 		env, err := serverReadEnvelope(conn)
 		if err != nil {
 			return
@@ -753,6 +837,13 @@ func TestConnectAndServe_CredentialRevokedMidConnection(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- c.connectAndServe(ctx) }()
+
+	select {
+	case <-snapshotAcked:
+	case <-time.After(testTimeout):
+		t.Fatal("server never received the initial snapshot")
+	}
+	time.Sleep(50 * time.Millisecond) // let the client's own post-snapshot drain finish first
 
 	// Trigger the write that discovers the revocation.
 	c.Notify(SessionSnapshot{SessionID: "s1", Status: StatusRunning, CreatedAt: time.Now()})

@@ -1,6 +1,7 @@
 package bridgecontrol
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -70,5 +71,24 @@ func TestRevisionStore_EmptyPathDisablesPersistence(t *testing.T) {
 	rs := NewRevisionStore("")
 	if got := rs.Next("s1"); got != 1 {
 		t.Fatalf("Next with empty path = %d, want 1 (in-memory still works)", got)
+	}
+}
+
+// TestRevisionStore_JSONNullTreatedAsEmpty guards against a corrupted or
+// manually edited revisions file containing the JSON literal null:
+// json.Unmarshal accepts it and leaves the target map nil without erroring,
+// which would otherwise make a later Next's map write panic (assignment to
+// a nil map) instead of being treated the same as a missing/empty file.
+func TestRevisionStore_JSONNullTreatedAsEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "revisions.json")
+	if err := os.WriteFile(path, []byte("null"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rs := NewRevisionStore(path)
+	if got := rs.Current("s1"); got != 0 {
+		t.Fatalf("Current on a null-file store = %d, want 0", got)
+	}
+	if got := rs.Next("s1"); got != 1 { // must not panic
+		t.Fatalf("Next on a null-file store = %d, want 1", got)
 	}
 }

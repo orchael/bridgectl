@@ -63,7 +63,7 @@ func TestSupervisorObserver_ForwardsToClientNotify(t *testing.T) {
 
 	select {
 	case got := <-c.events:
-		if got.SessionID != "s1" || got.Status != StatusRunning {
+		if got.info.SessionID != "s1" || got.info.Status != StatusRunning {
 			t.Fatalf("forwarded snapshot = %+v", got)
 		}
 	default:
