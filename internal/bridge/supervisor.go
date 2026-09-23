@@ -484,6 +484,7 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 	}
 
 	now := nowUTC()
+	interactionCaps := interactionCapabilitiesFor(provider)
 	ms := &managedSession{
 		info: SessionInfo{
 			SessionID: cfg.SessionID,
@@ -494,6 +495,13 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 			CreatedAt: now,
 			Cols:      cfg.InitialCols,
 			Rows:      cfg.InitialRows,
+			Interaction: Interaction{
+				State:          InteractionUnknown,
+				UpdatedAt:      now,
+				LastActivityAt: now,
+				Evidence:       InteractionEvidence{Capability: interactionCaps},
+			},
+			InteractionCapabilities: interactionCaps,
 		},
 		provider:     provider,
 		cmd:          cmd,
@@ -688,6 +696,7 @@ func (s *Supervisor) readLoopStreamJSON(ms *managedSession, r io.ReadCloser) {
 				}
 			}
 		}
+		s.observeStreamJSONInteraction(ms, ev.Type)
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
 				slog.Warn("session stream-JSON read error", "session_id", ms.info.SessionID, "provider", ms.info.Provider, "error", err)
@@ -701,6 +710,39 @@ func (s *Supervisor) readLoopStreamJSON(ms *managedSession, r io.ReadCloser) {
 			}
 			return
 		}
+	}
+}
+
+// observeStreamJSONInteraction derives an authoritative Working/Idle
+// interaction-state transition from the Anthropic Messages streaming
+// protocol's own turn-boundary events (message_start / message_stop). This
+// is structural, not a heuristic: these are the real event types the
+// protocol emits to mark a turn beginning/ending, not an inference over
+// output text. It never claims WaitingForInput or WaitingForApproval —
+// stream-json as currently invoked by bridgectl (see claude_chat.go) has no
+// wired channel for a permission/approval request, so a provider only
+// gains that capability by explicitly declaring
+// ApprovalStateSupported and being wired to a real request event.
+func (s *Supervisor) observeStreamJSONInteraction(ms *managedSession, eventType string) {
+	caps := ms.info.InteractionCapabilities
+	if !caps.InteractionStateSupported {
+		return
+	}
+	var state InteractionStateValue
+	switch eventType {
+	case "message_start":
+		state = InteractionWorking
+	case "message_stop":
+		state = InteractionIdle
+	default:
+		return
+	}
+	source := ms.info.Provider + "-stream-json"
+	if err := s.UpdateInteraction(ms.info.SessionID, Interaction{
+		State:    state,
+		Evidence: InteractionEvidence{Source: source, Capability: caps},
+	}); err != nil {
+		slog.Debug("interaction update failed", "session_id", ms.info.SessionID, "error", err)
 	}
 }
 
@@ -998,6 +1040,48 @@ func (s *Supervisor) WriteInput(sessionID, clientID string, data []byte) (int, e
 	}
 	n, err := ptmx.Write(data)
 	return n, err
+}
+
+// UpdateInteraction records a new authoritative interaction-state report for
+// sessionID. Callers must only invoke this from a real provider/runtime
+// signal (see InteractionEvidence.Source) — never in response to bridgectl
+// merely writing bytes to a session's stdin/PTY (WriteInput does not, and
+// must not, call this). next.Evidence.Source identifies that signal; an
+// empty Source is rejected.
+//
+// The stored revision and UpdatedAt only advance when next actually differs
+// from the current state (a different State, or a different Pending
+// request identity/summary — see Interaction.changed); a repeated report of
+// the same value still refreshes LastActivityAt and is still forwarded to
+// the optional ControlObserver so Bridge's staleness reasoning has a fresh
+// timestamp to work with, but never fabricates a new state transition.
+func (s *Supervisor) UpdateInteraction(sessionID string, next Interaction) error {
+	if next.Evidence.Source == "" {
+		return fmt.Errorf("bridge: UpdateInteraction requires a non-empty evidence source")
+	}
+	s.mu.RLock()
+	ms, ok := s.sessions[sessionID]
+	s.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("%w: %q", ErrSessionNotFound, sessionID)
+	}
+	now := nowUTC()
+	ms.mu.Lock()
+	cur := ms.info.Interaction
+	next.LastActivityAt = now
+	if cur.changed(next) {
+		next.Revision = cur.Revision + 1
+		next.UpdatedAt = now
+	} else {
+		next.Revision = cur.Revision
+		next.UpdatedAt = cur.UpdatedAt
+		next.Pending = cur.Pending
+	}
+	ms.info.Interaction = next
+	info := ms.info
+	ms.mu.Unlock()
+	s.notifyControl(info)
+	return nil
 }
 
 func (s *Supervisor) Resize(sessionID, clientID string, cols, rows uint32) error {

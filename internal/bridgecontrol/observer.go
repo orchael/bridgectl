@@ -10,12 +10,20 @@ import (
 // SessionSnapshot is the safe, minimal session metadata bridgecontrol
 // publishes to Bridge: no PTY output, environment variables, provider
 // credentials, OAuth tokens, or filesystem contents.
+//
+// Interaction carries the session's current authoritative interaction state
+// as bridgectl knows it right now (bridge.InteractionUnknown with a
+// zero-value capability for a provider that reports nothing). It is always
+// populated here; Client decides on the wire whether it actually needs
+// resending (see Client.toInteractionPayload) so an unsupported/unchanged
+// provider does not spam Bridge with no-op traffic.
 type SessionSnapshot struct {
-	SessionID string
-	Provider  string
-	ProjectID string
-	Status    string
-	CreatedAt time.Time
+	SessionID   string
+	Provider    string
+	ProjectID   string
+	Status      string
+	CreatedAt   time.Time
+	Interaction bridge.Interaction
 }
 
 // sessionStatus maps a Supervisor lifecycle state to Bridge's documented
@@ -52,11 +60,12 @@ func ActiveSnapshots(infos []bridge.SessionInfo) []SessionSnapshot {
 			continue
 		}
 		out = append(out, SessionSnapshot{
-			SessionID: info.SessionID,
-			Provider:  info.Provider,
-			ProjectID: info.ProjectID,
-			Status:    sessionStatus(info.State),
-			CreatedAt: info.CreatedAt,
+			SessionID:   info.SessionID,
+			Provider:    info.Provider,
+			ProjectID:   info.ProjectID,
+			Status:      sessionStatus(info.State),
+			CreatedAt:   info.CreatedAt,
+			Interaction: info.Interaction,
 		})
 	}
 	return out
@@ -79,11 +88,12 @@ func NewSupervisorObserver(client *Client) *SupervisorObserver {
 // SessionChanged implements bridge.ControlObserver.
 func (o *SupervisorObserver) SessionChanged(info bridge.SessionInfo) {
 	o.client.Notify(SessionSnapshot{
-		SessionID: info.SessionID,
-		Provider:  info.Provider,
-		ProjectID: info.ProjectID,
-		Status:    sessionStatus(info.State),
-		CreatedAt: info.CreatedAt,
+		SessionID:   info.SessionID,
+		Provider:    info.Provider,
+		ProjectID:   info.ProjectID,
+		Status:      sessionStatus(info.State),
+		CreatedAt:   info.CreatedAt,
+		Interaction: info.Interaction,
 	})
 }
 

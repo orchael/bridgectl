@@ -31,6 +31,13 @@ type StdioConfig struct {
 	// relative Binary and DefaultArgs paths. When empty, relative paths are
 	// resolved against the daemon working directory (legacy behaviour).
 	ProviderRoot string
+	// InteractionCapabilities declares what this provider configuration can
+	// authoritatively report about interaction state (see
+	// bridge.InteractionCapableProvider). The zero value (all false) is
+	// correct for any provider that has no wired structured signal:
+	// Supervisor then only ever reports InteractionUnknown for it, never a
+	// guess.
+	InteractionCapabilities bridge.InteractionCapabilities
 }
 
 // StdioProvider defines how to launch and validate one interactive CLI.
@@ -82,6 +89,14 @@ func (p *StdioProvider) IsStreamJSON() bool { return p.cfg.StreamJSON }
 // provider is configured with StripANSI: true so the supervisor strips ANSI
 // escape codes from PTY output before forwarding to clients.
 func (p *StdioProvider) IsStripANSI() bool { return p.cfg.StripANSI }
+
+// InteractionCapabilities implements bridge.InteractionCapableProvider. It
+// returns the zero value (every field false) for any configuration that
+// does not explicitly set InteractionCapabilities, which is the correct,
+// honest report for a provider with no wired structured signal.
+func (p *StdioProvider) InteractionCapabilities() bridge.InteractionCapabilities {
+	return p.cfg.InteractionCapabilities
+}
 
 func (p *StdioProvider) BuildCommand(ctx context.Context, cfg bridge.SessionConfig) (*exec.Cmd, error) {
 	binPath, err := resolveBinaryPath(p.cfg.Binary, p.cfg.ProviderRoot)

@@ -86,6 +86,13 @@ type helloAckPayload struct {
 
 // sessionPayload is both the element type of a session_snapshot's Sessions
 // array and the payload of session_started/session_updated/session_stopped.
+//
+// Interaction extends the protocol introduced by PR #16/#246 (protocol v1)
+// additively: an old Bridge server that doesn't understand the field simply
+// ignores an unrecognized JSON key, and an old bridgectl that never sets it
+// sends no interaction field at all, which Bridge (see
+// docs/control-plane-v1.md) must treat as "no update", never as an implicit
+// Unknown/cleared state.
 type sessionPayload struct {
 	SessionID  string    `json:"session_id"`
 	Provider   string    `json:"provider,omitempty"`
@@ -93,7 +100,59 @@ type sessionPayload struct {
 	Status     string    `json:"status"`
 	Revision   int64     `json:"revision"`
 	OccurredAt time.Time `json:"occurred_at"`
+	// Interaction is nil when this message carries no interaction-state
+	// update (e.g. a pure lifecycle event, or a snapshot for a session whose
+	// interaction state has never actually changed since it was last
+	// reported). It is always populated on the first event/snapshot for a
+	// session and on every session_snapshot's authoritative reconciliation.
+	Interaction *interactionPayload `json:"interaction,omitempty"`
 }
+
+// pendingRequestPayload is the wire shape of bridge.PendingRequest.
+type pendingRequestPayload struct {
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Summary string `json:"summary,omitempty"`
+}
+
+// interactionCapabilityPayload is the wire shape of
+// bridge.InteractionCapabilities.
+type interactionCapabilityPayload struct {
+	InteractionStateSupported bool `json:"interaction_state_supported"`
+	ApprovalStateSupported    bool `json:"approval_state_supported"`
+	PendingSummarySupported   bool `json:"pending_summary_supported"`
+}
+
+// interactionPayload is the wire shape of bridge.Interaction. Revision is
+// bridgecontrol's own restart-durable wire counter (see
+// RevisionStore/observer.go's toInteractionPayload) — a distinct sequence
+// from Supervisor's in-process bridge.Interaction.Revision, and also
+// distinct from sessionPayload.Revision (the session lifecycle revision):
+// the two axes advance independently, exactly as the product model requires
+// (runtime state changing must never bump interaction's revision, and vice
+// versa).
+type interactionPayload struct {
+	State          string                       `json:"state"`
+	Revision       int64                        `json:"revision"`
+	UpdatedAt      time.Time                    `json:"updated_at"`
+	LastActivityAt time.Time                    `json:"last_activity_at"`
+	Pending        *pendingRequestPayload       `json:"pending_request,omitempty"`
+	Source         string                       `json:"source,omitempty"`
+	Capability     interactionCapabilityPayload `json:"capability"`
+}
+
+// Interaction states and pending-request types Bridge accepts, exactly
+// matching control.validInteractionStates / control.validPendingRequestTypes.
+const (
+	InteractionUnknown            = "unknown"
+	InteractionWorking            = "working"
+	InteractionWaitingForInput    = "waiting_for_input"
+	InteractionWaitingForApproval = "waiting_for_approval"
+	InteractionIdle               = "idle"
+
+	PendingRequestInput    = "input"
+	PendingRequestApproval = "approval"
+)
 
 // sessionSnapshotPayload always marshals Sessions as a concrete (possibly
 // empty) JSON array, never omitted or null: Bridge requires an explicit
