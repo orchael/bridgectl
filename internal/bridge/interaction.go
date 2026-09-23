@@ -1,6 +1,9 @@
 package bridge
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // InteractionStateValue is the provider-neutral, authoritative-only
 // interaction state of a session: what the agent is doing right now from the
@@ -180,4 +183,24 @@ func interactionCapabilitiesFor(provider Provider) InteractionCapabilities {
 		return icp.InteractionCapabilities()
 	}
 	return InteractionCapabilities{}
+}
+
+// InteractionWatcher is implemented by a provider that can supply a live
+// stream of authoritative interaction-state updates for a session out of
+// band from however its PTY/stdout is otherwise structured — for example a
+// companion protocol connection alongside an ordinary interactive PTY
+// process (see internal/provider's Codex app-server observer). A provider
+// that also implements InteractionCapableProvider should keep the two
+// consistent: the capability it declares should describe exactly what this
+// watch stream can report.
+//
+// Supervisor starts watching immediately after the session's process is
+// successfully started and stops when the session's context is cancelled
+// (on Stop, on process exit, or on daemon shutdown). WatchInteraction must
+// return promptly; any setup it needs (dialing a companion process, etc.)
+// happens after return, inside the goroutine that drains the returned
+// channel, so a slow or failing watch connection never delays session
+// startup or blocks WriteInput/Attach.
+type InteractionWatcher interface {
+	WatchInteraction(ctx context.Context, sessionID string, cfg SessionConfig) (<-chan Interaction, error)
 }

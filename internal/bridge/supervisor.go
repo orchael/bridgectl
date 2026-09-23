@@ -118,6 +118,7 @@ type managedSession struct {
 	mu           sync.Mutex
 	telemetryMu  sync.Mutex
 	info         SessionInfo
+	startConfig  SessionConfig // the SessionConfig Start was called with, for InteractionWatcher
 	provider     Provider
 	cmd          *exec.Cmd
 	ptmx         *os.File       // non-nil for PTY-backed sessions
@@ -503,6 +504,7 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 			},
 			InteractionCapabilities: interactionCaps,
 		},
+		startConfig:  cfg,
 		provider:     provider,
 		cmd:          cmd,
 		streamJSON:   useStreamJSON,
@@ -598,6 +600,7 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 		go s.readLoop(ms)
 		go s.waitLoop(ms)
 	}
+	s.startInteractionWatcher(sessionCtx, provider, ms)
 
 	info := ms.snapshotInfo()
 	s.persistSession(info)
@@ -744,6 +747,39 @@ func (s *Supervisor) observeStreamJSONInteraction(ms *managedSession, eventType 
 	}); err != nil {
 		slog.Debug("interaction update failed", "session_id", ms.info.SessionID, "error", err)
 	}
+}
+
+// startInteractionWatcher launches provider's InteractionWatcher, if it
+// implements one, and forwards every value it emits into UpdateInteraction.
+// A watcher that fails to start (e.g. its companion connection never comes
+// up) only logs — it never fails or delays session startup, matching every
+// other optional-observer path in this file (control, telemetry).
+func (s *Supervisor) startInteractionWatcher(ctx context.Context, provider Provider, ms *managedSession) {
+	watcher, ok := provider.(InteractionWatcher)
+	if !ok {
+		return
+	}
+	sessionID, cfg := ms.info.SessionID, ms.startConfig
+	go func() {
+		ch, err := watcher.WatchInteraction(ctx, sessionID, cfg)
+		if err != nil {
+			slog.Debug("interaction watcher failed to start", "session_id", sessionID, "error", err)
+			return
+		}
+		for {
+			select {
+			case interaction, ok := <-ch:
+				if !ok {
+					return
+				}
+				if updErr := s.UpdateInteraction(sessionID, interaction); updErr != nil {
+					slog.Debug("interaction watcher update failed", "session_id", sessionID, "error", updErr)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 }
 
 func signalReaderDone(ms *managedSession) {

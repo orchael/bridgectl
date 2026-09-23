@@ -634,6 +634,8 @@ func Start(cfg Config) (*Server, error) {
 			p = provider.NewOpenCodeServerProvider(osCfg)
 		case id == "codex":
 			p = provider.NewCodexProvider(sc)
+		case id == "codex-app-server":
+			p = provider.NewCodexAppServerProvider(sc)
 		default:
 			p = provider.NewStdioProvider(sc)
 		}
@@ -682,9 +684,12 @@ func Start(cfg Config) (*Server, error) {
 			StreamJSON:     pd.StreamJSON,
 		}
 		var p bridge.Provider
-		if pd.ID == "codex" {
+		switch pd.ID {
+		case "codex":
 			p = provider.NewCodexProvider(sc)
-		} else {
+		case "codex-app-server":
+			p = provider.NewCodexAppServerProvider(sc)
+		default:
 			p = provider.NewStdioProvider(sc)
 		}
 		if err := registry.Register(p); err != nil {
@@ -1786,6 +1791,23 @@ func knownProviders() []providerDef {
 		},
 		{
 			ID:             "codex",
+			Binary:         "codex",
+			Args:           nil,
+			StartupTimeout: 60 * time.Second,
+			StartupProbe:   "prompt",
+			PromptPattern:  `(?m)(>\s*$|›)`,
+		},
+		{
+			// codex-app-server is an opt-in variant of the plain "codex"
+			// interactive session above: the same PTY-attached TUI, plus
+			// authoritative interaction state (MAR-85) via a read-only
+			// observer connection to a companion `codex app-server`
+			// instance. It is never auto-selected in place of "codex" —
+			// detectProviders only auto-registers it when the "codex"
+			// binary is on PATH, same as the plain provider, and a session
+			// must explicitly request provider "codex-app-server" to use
+			// it. See internal/provider/codex_app_server.go.
+			ID:             "codex-app-server",
 			Binary:         "codex",
 			Args:           nil,
 			StartupTimeout: 60 * time.Second,

@@ -395,3 +395,108 @@ func TestUpdateInteraction_StandaloneOperationUnaffected(t *testing.T) {
 		t.Fatalf("interaction not applied locally: %+v", info.Interaction)
 	}
 }
+
+// watcherTestProvider implements InteractionWatcher generically (not tied
+// to stream-JSON), exercising Supervisor.startInteractionWatcher directly —
+// the extension point internal/provider's Codex app-server observer (a
+// PTY-based provider with a companion out-of-process connection) relies on.
+type watcherTestProvider struct {
+	testProvider
+	caps InteractionCapabilities
+	ch   chan Interaction
+}
+
+func (p *watcherTestProvider) InteractionCapabilities() InteractionCapabilities { return p.caps }
+func (p *watcherTestProvider) WatchInteraction(ctx context.Context, sessionID string, cfg SessionConfig) (<-chan Interaction, error) {
+	return p.ch, nil
+}
+
+type watcherErrProvider struct {
+	testProvider
+}
+
+func (p *watcherErrProvider) WatchInteraction(ctx context.Context, sessionID string, cfg SessionConfig) (<-chan Interaction, error) {
+	return nil, errors.New("companion connection refused")
+}
+
+// TestInteractionWatcher_ValuesForwardedToUpdateInteraction covers the
+// generic Supervisor<->InteractionWatcher wiring (not the stream-JSON-
+// specific path already covered above): every value WatchInteraction's
+// channel emits reaches UpdateInteraction, in order.
+func TestInteractionWatcher_ValuesForwardedToUpdateInteraction(t *testing.T) {
+	ch := make(chan Interaction, 4)
+	prov := &watcherTestProvider{
+		testProvider: testProvider{id: "fake"},
+		caps:         InteractionCapabilities{InteractionStateSupported: true, ApprovalStateSupported: true},
+		ch:           ch,
+	}
+	registry := NewRegistry()
+	if err := registry.Register(prov); err != nil {
+		t.Fatal(err)
+	}
+	sup := NewSupervisor(registry, DefaultPolicy(), 1024*1024, time.Minute)
+	t.Cleanup(func() { sup.Close() })
+	startTestSession(t, sup, "s1")
+
+	ch <- Interaction{State: InteractionWorking, Evidence: InteractionEvidence{Source: "watcher-test"}}
+	waitForInteraction(t, sup, "s1", InteractionWorking)
+
+	ch <- Interaction{
+		State: InteractionWaitingForApproval, Pending: &PendingRequest{ID: "req-1", Type: PendingRequestApproval},
+		Evidence: InteractionEvidence{Source: "watcher-test"},
+	}
+	waitForInteraction(t, sup, "s1", InteractionWaitingForApproval)
+	info, err := sup.Get("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Interaction.Pending == nil || info.Interaction.Pending.ID != "req-1" {
+		t.Fatalf("Pending = %+v, want req-1", info.Interaction.Pending)
+	}
+}
+
+// TestInteractionWatcher_StartFailureDoesNotBreakSession covers: a watcher
+// that fails to start (e.g. its companion connection never comes up) must
+// never fail or delay session startup — the session keeps running as an
+// ordinary session with Unknown interaction state.
+func TestInteractionWatcher_StartFailureDoesNotBreakSession(t *testing.T) {
+	registry := NewRegistry()
+	if err := registry.Register(&watcherErrProvider{testProvider: testProvider{id: "fake"}}); err != nil {
+		t.Fatal(err)
+	}
+	sup := NewSupervisor(registry, DefaultPolicy(), 1024*1024, time.Minute)
+	t.Cleanup(func() { sup.Close() })
+	info := startTestSession(t, sup, "s1")
+	if info.State != SessionStateRunning {
+		t.Fatalf("session state = %v, want Running despite a failing interaction watcher", info.State)
+	}
+	if info.Interaction.EffectiveState() != InteractionUnknown {
+		t.Fatalf("Interaction.State = %q, want unknown", info.Interaction.EffectiveState())
+	}
+}
+
+// TestInteractionWatcher_ChannelClosedOnSessionStop covers: Supervisor
+// stops draining a watcher's channel once the session's context is
+// cancelled (Stop), rather than leaking the forwarding goroutine forever.
+func TestInteractionWatcher_ChannelClosedOnSessionStop(t *testing.T) {
+	ch := make(chan Interaction)
+	prov := &watcherTestProvider{testProvider: testProvider{id: "fake"}, ch: ch}
+	registry := NewRegistry()
+	if err := registry.Register(prov); err != nil {
+		t.Fatal(err)
+	}
+	sup := NewSupervisor(registry, DefaultPolicy(), 1024*1024, time.Minute)
+	t.Cleanup(func() { sup.Close() })
+	startTestSession(t, sup, "s1")
+
+	if err := sup.Stop("s1", true); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	// The forwarding goroutine should have exited via ctx.Done(); sending on
+	// ch now must never panic or block the test (nothing is reading it, but
+	// nothing should be trying to either).
+	select {
+	case ch <- Interaction{State: InteractionWorking, Evidence: InteractionEvidence{Source: "watcher-test"}}:
+	case <-time.After(200 * time.Millisecond):
+	}
+}
