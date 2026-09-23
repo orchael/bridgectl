@@ -366,3 +366,32 @@ type interactionCapableStreamJSONProvider struct {
 func (p *interactionCapableStreamJSONProvider) InteractionCapabilities() InteractionCapabilities {
 	return p.caps
 }
+
+// TestUpdateInteraction_StandaloneOperationUnaffected covers: with no
+// ControlObserver configured at all (standalone bridgectl, no Bridge
+// enrollment), UpdateInteraction still succeeds and updates local state —
+// interaction reporting must never depend on, or be broken by, the
+// optional Bridge control-plane integration being absent.
+func TestUpdateInteraction_StandaloneOperationUnaffected(t *testing.T) {
+	registry := NewRegistry()
+	if err := registry.Register(&testProvider{id: "fake"}); err != nil {
+		t.Fatal(err)
+	}
+	sup := NewSupervisor(registry, DefaultPolicy(), 1024*1024, time.Minute) // no WithControlObserver
+	t.Cleanup(func() { sup.Close() })
+	startTestSession(t, sup, "s1")
+
+	if err := sup.UpdateInteraction("s1", Interaction{
+		State: InteractionWaitingForInput, Pending: &PendingRequest{ID: "req-1", Type: PendingRequestInput},
+		Evidence: InteractionEvidence{Source: "test-signal"},
+	}); err != nil {
+		t.Fatalf("UpdateInteraction without a control observer: %v", err)
+	}
+	info, err := sup.Get("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Interaction.EffectiveState() != InteractionWaitingForInput || info.Interaction.Pending == nil {
+		t.Fatalf("interaction not applied locally: %+v", info.Interaction)
+	}
+}
