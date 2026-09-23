@@ -315,10 +315,20 @@ func TestSessionLifecycle_StartedUpdatedStopped(t *testing.T) {
 	// before the server's ack can arrive) a brief moment to finish first.
 	time.Sleep(50 * time.Millisecond)
 
+	// Notify is called once per transition and each is given a moment to be
+	// drained and sent before the next: Client.Notify coalesces repeated
+	// updates for the *same* session_id into a single pending entry (by
+	// design — only the latest state matters if updates arrive faster than
+	// they can be sent), so notifying all three transitions back-to-back
+	// would legitimately collapse into just the final "stopped" message
+	// rather than three distinct ones. Spacing them out is what makes this
+	// test about the started/updated/stopped sequence, not about coalescing
+	// (which has its own dedicated test).
 	c.Notify(SessionSnapshot{SessionID: "s1", Provider: "codex", ProjectID: "p1", Status: StatusRunning, CreatedAt: time.Now()})
+	waitFor(t, testTimeout, func() bool { return len(fs.recorded()) >= 1 })
 	c.Notify(SessionSnapshot{SessionID: "s1", Provider: "codex", ProjectID: "p1", Status: StatusAttached, CreatedAt: time.Now()})
+	waitFor(t, testTimeout, func() bool { return len(fs.recorded()) >= 2 })
 	c.Notify(SessionSnapshot{SessionID: "s1", Provider: "codex", ProjectID: "p1", Status: StatusStopped, CreatedAt: time.Now()})
-
 	waitFor(t, testTimeout, func() bool { return len(fs.recorded()) >= 3 })
 	msgs := fs.recorded()
 	if len(msgs) < 3 {
@@ -659,10 +669,17 @@ func TestConnectAndServe_SilentConnectionDetectedViaIdleTimeout(t *testing.T) {
 		if _, _, err := serverHandshake(conn, 1); err != nil { // 1s heartbeat -> idle timeout still floors at minIdleReadTimeout
 			return
 		}
-		// Go completely silent forever: never send another message, never
-		// close. A well-behaved client must still notice within a bounded
-		// window.
-		select {}
+		// Go completely silent toward the client forever (never send another
+		// message, never close) — but keep reading and discarding whatever
+		// the client sends, so this handler returns (and httptest.Server's
+		// deferred Close doesn't hang forever waiting for it) once the
+		// client itself closes the connection after detecting the idle
+		// timeout.
+		for {
+			if _, _, err := conn.Read(context.Background()); err != nil {
+				return
+			}
+		}
 	})
 	defer fs.Close()
 
@@ -728,7 +745,17 @@ func TestSendEvent_DuplicateAck_TreatedAsSuccess(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond) // let the client's own post-snapshot drain finish first
 
+	// Space the two Notify calls apart (waiting for the first to be recorded)
+	// so they don't coalesce into a single pending entry for session "s1" —
+	// coalescing repeated updates to the same session is the intended
+	// behavior of Client.Notify, but this test is specifically about two
+	// distinct wire messages surviving a duplicate ack on the first.
 	c.Notify(SessionSnapshot{SessionID: "s1", Status: StatusRunning, CreatedAt: time.Now()})
+	waitFor(t, testTimeout, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(results) >= 1
+	})
 	c.Notify(SessionSnapshot{SessionID: "s1", Status: StatusAttached, CreatedAt: time.Now()})
 
 	waitFor(t, testTimeout, func() bool {
@@ -884,8 +911,64 @@ func TestNotify_NeverBlocks(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("10000 Notify calls with no consumer took %v, want fast/non-blocking", elapsed)
 	}
-	if len(c.events) > eventQueueSize {
-		t.Fatalf("event queue length %d exceeds bound %d", len(c.events), eventQueueSize)
+	c.mu.Lock()
+	pendingLen := len(c.pending)
+	c.mu.Unlock()
+	if pendingLen > eventQueueSize {
+		t.Fatalf("pending map length %d exceeds bound %d", pendingLen, eventQueueSize)
+	}
+}
+
+// TestNotify_CoalescesRepeatedUpdatesForSameSession guards the core premise
+// of the pending map: many Notify calls for the *same* session_id before
+// it's drained must never grow unboundedly or lose the latest state to a
+// FIFO-style eviction — they coalesce into one pending entry holding only
+// the most recent status.
+func TestNotify_CoalescesRepeatedUpdatesForSameSession(t *testing.T) {
+	c := newTestClient(t, "ws://unused.invalid/v1/control", "bri_valid", nil)
+	for i := 0; i < 1000; i++ {
+		c.Notify(SessionSnapshot{SessionID: "s1", Status: StatusRunning, CreatedAt: time.Now()})
+	}
+	c.Notify(SessionSnapshot{SessionID: "s1", Status: StatusStopped, CreatedAt: time.Now()})
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.pending) != 1 {
+		t.Fatalf("pending map has %d entries, want 1 (coalesced)", len(c.pending))
+	}
+	if got := c.pending["s1"].info.Status; got != StatusStopped {
+		t.Fatalf("coalesced status = %q, want %q (the latest)", got, StatusStopped)
+	}
+}
+
+// TestNotify_OverflowEvictsOldestAndSchedulesReconcile guards the fix for
+// silently losing a session's only pending notification under overflow: once
+// eventQueueSize distinct sessions are already pending, a new distinct
+// session evicts the oldest one, but — unlike a plain drop — also schedules
+// a fresh authoritative snapshot so the evicted session's true state is
+// re-derived from the Supervisor rather than left stale indefinitely.
+func TestNotify_OverflowEvictsOldestAndSchedulesReconcile(t *testing.T) {
+	c := newTestClient(t, "ws://unused.invalid/v1/control", "bri_valid", nil)
+	for i := 0; i < eventQueueSize; i++ {
+		c.Notify(SessionSnapshot{SessionID: fmt.Sprintf("s%d", i), Status: StatusRunning, CreatedAt: time.Now()})
+		time.Sleep(time.Millisecond) // ensure distinct, increasing enqueuedAt
+	}
+	c.Notify(SessionSnapshot{SessionID: "overflow", Status: StatusRunning, CreatedAt: time.Now()})
+
+	c.mu.Lock()
+	_, oldestStillPending := c.pending["s0"]
+	pendingLen := len(c.pending)
+	c.mu.Unlock()
+	if oldestStillPending {
+		t.Fatal("expected the oldest pending session (s0) to be evicted")
+	}
+	if pendingLen != eventQueueSize {
+		t.Fatalf("pending map length = %d, want %d (bounded)", pendingLen, eventQueueSize)
+	}
+	select {
+	case <-c.reconcileCh:
+	default:
+		t.Fatal("expected overflow to schedule a reconcile")
 	}
 }
 

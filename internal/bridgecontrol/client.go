@@ -75,10 +75,10 @@ type Config struct {
 	Logger *slog.Logger
 }
 
-// queuedNotification is what actually sits in Client.events: a
-// SessionSnapshot plus the instant it was enqueued, so a subsequent
-// reconciliation can tell whether it predates the authoritative snapshot
-// that just superseded it (see drainStalePending).
+// queuedNotification is what Client.pending holds: a SessionSnapshot plus
+// the instant it was enqueued, so a subsequent reconciliation can tell
+// whether it predates the authoritative snapshot that just superseded it
+// (see drainStalePending).
 type queuedNotification struct {
 	info       SessionSnapshot
 	enqueuedAt time.Time
@@ -94,7 +94,27 @@ type Client struct {
 	rng       *rand.Rand
 	rngMu     sync.Mutex
 
-	events    chan queuedNotification
+	// pending holds at most one queued notification per session_id: a
+	// repeated Notify for a session already pending simply overwrites its
+	// entry with the latest state, rather than queuing a second item. This
+	// guarantees a session's latest reported state is never lost to a plain
+	// FIFO eviction — only distinct *sessions* compete for the bounded
+	// eventQueueSize slots (see the overflow handling in Notify), not
+	// individual updates to the same session.
+	mu      sync.Mutex
+	pending map[string]queuedNotification
+	// dirty signals serve's select loop that pending has at least one entry
+	// worth draining. Buffered 1: multiple Notify calls between drains
+	// collapse into a single wakeup, which is fine since the wakeup always
+	// drains the entire map, not just one entry.
+	dirty chan struct{}
+	// reconcileCh requests a fresh authoritative snapshot at the next
+	// opportunity. Fed by readLoop on a server-reported revision_gap and by
+	// Notify when the pending map overflows (see Notify) — both cases where
+	// the queue can no longer be trusted to converge on its own and a
+	// snapshot is the only way back to a known-correct state.
+	reconcileCh chan struct{}
+
 	closeCh   chan struct{}
 	closeOnce sync.Once
 	doneCh    chan struct{}
@@ -106,12 +126,14 @@ func New(cfg Config) *Client {
 		cfg.Logger = slog.Default()
 	}
 	return &Client{
-		cfg:       cfg,
-		revisions: NewRevisionStore(cfg.RevisionPath),
-		rng:       rand.New(rand.NewSource(time.Now().UnixNano())),
-		events:    make(chan queuedNotification, eventQueueSize),
-		closeCh:   make(chan struct{}),
-		doneCh:    make(chan struct{}),
+		cfg:         cfg,
+		revisions:   NewRevisionStore(cfg.RevisionPath),
+		rng:         rand.New(rand.NewSource(time.Now().UnixNano())),
+		pending:     make(map[string]queuedNotification),
+		dirty:       make(chan struct{}, 1),
+		reconcileCh: make(chan struct{}, 1),
+		closeCh:     make(chan struct{}),
+		doneCh:      make(chan struct{}),
 	}
 }
 
@@ -122,27 +144,55 @@ func (c *Client) Start(ctx context.Context) {
 }
 
 // Notify enqueues a session lifecycle change for publication to Bridge. It
-// never blocks the caller (the Supervisor): if the bounded queue is full,
-// the oldest pending notification is dropped to make room. A dropped
-// notification never corrupts Bridge's view of the world because revisions
-// are assigned at send time (see sendEvent) and the next successful
-// snapshot/event always reflects bridgectl's then-current authoritative
-// state.
+// never blocks the caller (the Supervisor). Repeated calls for the same
+// session_id coalesce into a single pending entry holding the latest state,
+// so no update is ever silently lost to eviction just because the *same*
+// session changed state again before it could be sent.
+//
+// The bounded eventQueueSize instead limits how many *distinct* sessions
+// may be pending at once — a much rarer condition in practice, since the
+// Supervisor's own concurrency limits bound how many sessions can be
+// simultaneously active. If that limit is ever hit, the oldest pending
+// session is evicted to make room, but — unlike a plain drop — this also
+// schedules a fresh authoritative snapshot (scheduleReconcile) rather than
+// letting Bridge's view of the evicted session drift indefinitely until
+// some future reconnect: the very next snapshot re-derives every session's
+// true current state from the Supervisor directly, so nothing is lost for
+// longer than it takes to send one more snapshot.
 func (c *Client) Notify(info SessionSnapshot) {
-	item := queuedNotification{info: info, enqueuedAt: time.Now()}
+	c.mu.Lock()
+	_, alreadyPending := c.pending[info.SessionID]
+	if !alreadyPending && len(c.pending) >= eventQueueSize {
+		var oldestID string
+		var oldestAt time.Time
+		first := true
+		for id, item := range c.pending {
+			if first || item.enqueuedAt.Before(oldestAt) {
+				oldestID, oldestAt, first = id, item.enqueuedAt, false
+			}
+		}
+		delete(c.pending, oldestID)
+		c.cfg.Logger.Warn("bridgecontrol: pending notification queue full, evicted oldest session and scheduled reconciliation",
+			"evicted_session_id", oldestID, "new_session_id", info.SessionID)
+		c.scheduleReconcile()
+	}
+	c.pending[info.SessionID] = queuedNotification{info: info, enqueuedAt: time.Now()}
+	c.mu.Unlock()
+
 	select {
-	case c.events <- item:
-		return
+	case c.dirty <- struct{}{}:
 	default:
 	}
+}
+
+// scheduleReconcile requests a fresh authoritative snapshot at the next
+// opportunity. Safe to call from any goroutine and at any time (including
+// while disconnected, in which case the request is simply picked up by the
+// next connection's serve loop).
+func (c *Client) scheduleReconcile() {
 	select {
-	case <-c.events:
+	case c.reconcileCh <- struct{}{}:
 	default:
-	}
-	select {
-	case c.events <- item:
-	default:
-		c.cfg.Logger.Warn("bridgecontrol: event queue full, dropped notification", "session_id", info.SessionID)
 	}
 }
 
@@ -267,7 +317,6 @@ func (c *Client) connectAndServe(parent context.Context) error {
 
 func (c *Client) serve(ctx context.Context, conn *websocket.Conn, heartbeatInterval time.Duration) error {
 	readErrCh := make(chan error, 1)
-	reconcileCh := make(chan struct{}, 1)
 	// idleReadTimeout detects a silently dead connection (e.g. a network
 	// partition or a docker/NAT path black-holing packets) that never
 	// produces an explicit read/write error: a TCP write can keep
@@ -281,7 +330,7 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, heartbeatInter
 	if idleReadTimeout < minIdleReadTimeout {
 		idleReadTimeout = minIdleReadTimeout
 	}
-	go c.readLoop(ctx, conn, idleReadTimeout, readErrCh, reconcileCh)
+	go c.readLoop(ctx, conn, idleReadTimeout, readErrCh)
 
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
@@ -304,7 +353,7 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, heartbeatInter
 			return nil
 		case err := <-readErrCh:
 			return err
-		case <-reconcileCh:
+		case <-c.reconcileCh:
 			if err := c.sendAuthoritativeSnapshot(ctx, conn); err != nil {
 				return err
 			}
@@ -312,9 +361,11 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, heartbeatInter
 			if err := c.sendHeartbeat(ctx, conn); err != nil {
 				return err
 			}
-		case item := <-c.events:
-			if err := c.sendEvent(ctx, conn, item.info); err != nil {
-				return err
+		case <-c.dirty:
+			for _, item := range c.drainAllPending() {
+				if err := c.sendEvent(ctx, conn, item.info); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -325,7 +376,7 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, heartbeatInter
 // (concurrent Read+Write from separate goroutines is explicitly supported).
 // Each read is individually bounded by idleTimeout so a peer that stops
 // responding entirely (rather than closing cleanly) is still detected.
-func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idleTimeout time.Duration, errCh chan<- error, reconcileCh chan<- struct{}) {
+func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idleTimeout time.Duration, errCh chan<- error) {
 	for {
 		rctx, cancel := context.WithTimeout(ctx, idleTimeout)
 		_, data, err := conn.Read(rctx)
@@ -345,16 +396,20 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idleTimeout
 			}
 			return
 		}
+		if env.ProtocolVersion != ProtocolVersion {
+			select {
+			case errCh <- fmt.Errorf("unsupported protocol_version %d in server message (want %d)", env.ProtocolVersion, ProtocolVersion):
+			default:
+			}
+			return
+		}
 		switch env.Type {
 		case msgError:
 			var p errorPayload
 			_ = json.Unmarshal(env.Payload, &p)
 			c.cfg.Logger.Warn("bridgecontrol: server error", "code", p.Code, "message", p.Message)
 			if p.ReconcileRequired || p.Code == errCodeRevisionGap {
-				select {
-				case reconcileCh <- struct{}{}:
-				default:
-				}
+				c.scheduleReconcile()
 			}
 		case msgAck:
 			// "applied" and "duplicate" both indicate success; nothing to do.
@@ -386,7 +441,25 @@ func (c *Client) sendAuthoritativeSnapshot(ctx context.Context, conn *websocket.
 	return nil
 }
 
-// drainStalePending removes queued notifications enqueued strictly before
+// drainAllPending atomically removes and returns every currently pending
+// notification. Called once per c.dirty wakeup so a single signal (dirty is
+// buffered 1 and coalesces repeated Notify calls) always empties the whole
+// map, not just one entry.
+func (c *Client) drainAllPending() []queuedNotification {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.pending) == 0 {
+		return nil
+	}
+	out := make([]queuedNotification, 0, len(c.pending))
+	for _, item := range c.pending {
+		out = append(out, item)
+	}
+	c.pending = make(map[string]queuedNotification)
+	return out
+}
+
+// drainStalePending removes pending notifications enqueued strictly before
 // cutoff (the instant just before the snapshot's SnapshotFunc() read) and
 // keeps the rest. Anything predating cutoff is necessarily already
 // reflected (or superseded) by the snapshot's live Supervisor read;
@@ -400,38 +473,25 @@ func (c *Client) sendAuthoritativeSnapshot(ctx context.Context, conn *websocket.
 // leaking one entry in the revisions file for the rest of the daemon's
 // lifetime.
 func (c *Client) drainStalePending(cutoff time.Time) {
-	var keep []queuedNotification
-loop:
-	for {
-		select {
-		case item := <-c.events:
-			if item.enqueuedAt.Before(cutoff) {
-				if item.info.Status == StatusStopped || item.info.Status == StatusFailed {
-					c.revisions.Forget(item.info.SessionID)
-				}
-				continue
-			}
-			keep = append(keep, item)
-		default:
-			break loop
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id, item := range c.pending {
+		if !item.enqueuedAt.Before(cutoff) {
+			continue
 		}
-	}
-	for _, item := range keep {
-		select {
-		case c.events <- item:
-		default:
-			// Can't happen (we only put back a subset of what we just took
-			// out of a channel of the same capacity), but never block here.
+		if item.info.Status == StatusStopped || item.info.Status == StatusFailed {
+			c.revisions.Forget(id)
 		}
+		delete(c.pending, id)
 	}
 }
 
 // flushPendingEvents makes a best-effort, time-bounded attempt to send any
-// notifications still queued when a graceful shutdown begins, so a final
+// notifications still pending when a graceful shutdown begins, so a final
 // session_stopped enqueued just before Close() isn't silently lost. Unlike
-// drainStalePending, this path sends (rather than discards) the queue,
-// because shutdown is the one case where the client is not about to
-// reconcile with a fresh snapshot afterward.
+// drainStalePending, this path sends (rather than discards) the pending
+// entries, because shutdown is the one case where the client is not about
+// to reconcile with a fresh snapshot afterward.
 //
 // Deliberately uses a fresh background deadline rather than the caller's
 // ctx: this is invoked from the very branches (closeCh/ctx.Done) where the
@@ -439,11 +499,8 @@ loop:
 // every send fail immediately and defeat the flush entirely.
 func (c *Client) flushPendingEvents(conn *websocket.Conn) {
 	deadline := time.Now().Add(shutdownFlushBudget)
-	for time.Now().Before(deadline) {
-		var item queuedNotification
-		select {
-		case item = <-c.events:
-		default:
+	for _, item := range c.drainAllPending() {
+		if time.Now().After(deadline) {
 			return
 		}
 		sendCtx, cancel := context.WithDeadline(context.Background(), deadline)
@@ -496,6 +553,12 @@ func (c *Client) readHelloAck(ctx context.Context, conn *websocket.Conn) (*hello
 	if err := json.Unmarshal(data, &env); err != nil {
 		return nil, fmt.Errorf("malformed hello_ack: %w", err)
 	}
+	// Checked before even looking at Type, mirroring Bridge's own server:
+	// a version mismatch means the rest of the envelope (including an
+	// "error" type) can't be trusted to mean what protocol v1 says it does.
+	if env.ProtocolVersion != ProtocolVersion {
+		return nil, fmt.Errorf("unsupported protocol_version %d in server envelope (want %d)", env.ProtocolVersion, ProtocolVersion)
+	}
 	if env.Type == msgError {
 		var p errorPayload
 		_ = json.Unmarshal(env.Payload, &p)
@@ -507,6 +570,9 @@ func (c *Client) readHelloAck(ctx context.Context, conn *websocket.Conn) (*hello
 	var ack helloAckPayload
 	if err := json.Unmarshal(env.Payload, &ack); err != nil {
 		return nil, fmt.Errorf("malformed hello_ack payload: %w", err)
+	}
+	if ack.ProtocolVersion != ProtocolVersion {
+		return nil, fmt.Errorf("unsupported protocol_version %d in hello_ack payload (want %d)", ack.ProtocolVersion, ProtocolVersion)
 	}
 	return &ack, nil
 }

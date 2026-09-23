@@ -61,13 +61,14 @@ func TestSupervisorObserver_ForwardsToClientNotify(t *testing.T) {
 
 	obs.SessionChanged(bridge.SessionInfo{SessionID: "s1", Provider: "codex", ProjectID: "p1", State: bridge.SessionStateRunning, CreatedAt: time.Now()})
 
-	select {
-	case got := <-c.events:
-		if got.info.SessionID != "s1" || got.info.Status != StatusRunning {
-			t.Fatalf("forwarded snapshot = %+v", got)
-		}
-	default:
-		t.Fatal("expected SessionChanged to enqueue a notification")
+	c.mu.Lock()
+	got, ok := c.pending["s1"]
+	c.mu.Unlock()
+	if !ok {
+		t.Fatal("expected SessionChanged to enqueue a pending notification")
+	}
+	if got.info.SessionID != "s1" || got.info.Status != StatusRunning {
+		t.Fatalf("forwarded snapshot = %+v", got)
 	}
 }
 

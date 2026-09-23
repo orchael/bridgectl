@@ -906,17 +906,27 @@ func Start(cfg Config) (*Server, error) {
 	}
 
 	sup = bridge.NewSupervisor(registry, policy, cfg.EventBufferSize, cfg.IdleTimeout, supOpts...)
+	historyLoaded := true
 	if store != nil {
 		if err := sup.LoadHistory(); err != nil {
 			logger.Warn("failed to load session history", "error", err)
+			historyLoaded = false
 		}
 	}
-	// Started only after LoadHistory: a recovered session added by
+	// Started only after LoadHistory succeeds: a recovered session added by
 	// LoadHistory must already be present in sup.List("") by the time the
 	// control client builds its first authoritative snapshot, or Bridge
-	// never learns about it until a later reconnect.
+	// never learns about it until a later reconnect. If LoadHistory failed,
+	// sup.List("") reflects incomplete (often empty) state — sending that as
+	// authoritative would make Bridge infer still-running recovered sessions
+	// as stopped, which is worse than not connecting control at all until a
+	// future daemon restart succeeds in loading history.
 	if controlClient != nil {
-		controlClient.Start(context.Background())
+		if historyLoaded {
+			controlClient.Start(context.Background())
+		} else {
+			logger.Warn("bridge control: session history failed to load, not starting control client to avoid publishing an incomplete initial snapshot")
+		}
 	}
 
 	// Server instance ID
