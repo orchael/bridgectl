@@ -13,6 +13,8 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
+
+	"github.com/orchael/bridgectl/internal/bridge"
 )
 
 const (
@@ -94,6 +96,24 @@ type Client struct {
 	rng       *rand.Rand
 	rngMu     sync.Mutex
 
+	// interactions allocates bridgecontrol's own restart-durable wire
+	// revision for interaction-state updates, independent of the session
+	// lifecycle revision in c.revisions. Persisted alongside it (see New)
+	// for the same restart-recovery reason RevisionStore's doc comment
+	// gives for lifecycle revisions: without persistence, a daemon restart
+	// would reissue a low interaction revision that Bridge would reject as
+	// stale against what it already has on file.
+	interactions *RevisionStore
+	// lastSentLocalRev records, per session, the Supervisor-local
+	// bridge.Interaction.Revision most recently included on the wire, so an
+	// unchanged interaction state is never resent (and never consumes a new
+	// wire revision) on every incremental lifecycle event. In practice only
+	// ever touched from the single serve goroutine (see
+	// sendEvent/sendSnapshot); guarded with its own mutex regardless so that
+	// invariant is enforced rather than merely assumed.
+	interactionMu    sync.Mutex
+	lastSentLocalRev map[string]int64
+
 	// pending holds at most one queued notification per session_id: a
 	// repeated Notify for a session already pending simply overwrites its
 	// entry with the latest state, rather than queuing a second item. This
@@ -126,15 +146,29 @@ func New(cfg Config) *Client {
 		cfg.Logger = slog.Default()
 	}
 	return &Client{
-		cfg:         cfg,
-		revisions:   NewRevisionStore(cfg.RevisionPath),
-		rng:         rand.New(rand.NewSource(time.Now().UnixNano())),
-		pending:     make(map[string]queuedNotification),
-		dirty:       make(chan struct{}, 1),
-		reconcileCh: make(chan struct{}, 1),
-		closeCh:     make(chan struct{}),
-		doneCh:      make(chan struct{}),
+		cfg:              cfg,
+		revisions:        NewRevisionStore(cfg.RevisionPath),
+		interactions:     NewRevisionStore(interactionRevisionPath(cfg.RevisionPath)),
+		lastSentLocalRev: make(map[string]int64),
+		rng:              rand.New(rand.NewSource(time.Now().UnixNano())),
+		pending:          make(map[string]queuedNotification),
+		dirty:            make(chan struct{}, 1),
+		reconcileCh:      make(chan struct{}, 1),
+		closeCh:          make(chan struct{}),
+		doneCh:           make(chan struct{}),
 	}
+}
+
+// interactionRevisionPath derives a sibling path for the interaction-state
+// revision store from the lifecycle revision store's path, keeping the two
+// independent persisted files rather than interleaving two counters in one.
+// An empty base path (revision persistence disabled) stays empty, matching
+// RevisionStore's own in-memory-only fallback.
+func interactionRevisionPath(base string) string {
+	if base == "" {
+		return ""
+	}
+	return base + ".interaction"
 }
 
 // Start begins the background connect/reconnect loop. It returns
@@ -481,6 +515,7 @@ func (c *Client) drainStalePending(cutoff time.Time) {
 		}
 		if item.info.Status == StatusStopped || item.info.Status == StatusFailed {
 			c.revisions.Forget(id)
+			c.forgetInteraction(id)
 		}
 		delete(c.pending, id)
 	}
@@ -598,15 +633,86 @@ func (c *Client) sendSnapshot(ctx context.Context, conn *websocket.Conn) error {
 			occurred = now
 		}
 		sessions = append(sessions, sessionPayload{
-			SessionID:  s.SessionID,
-			Provider:   s.Provider,
-			ProjectID:  s.ProjectID,
-			Status:     s.Status,
-			Revision:   rev,
-			OccurredAt: occurred,
+			SessionID:   s.SessionID,
+			Provider:    s.Provider,
+			ProjectID:   s.ProjectID,
+			Status:      s.Status,
+			Revision:    rev,
+			OccurredAt:  occurred,
+			Interaction: c.toInteractionPayload(s.SessionID, s.Interaction, true),
 		})
 	}
 	return c.writeEnvelope(ctx, conn, msgSessionSnapshot, sessionSnapshotPayload{Sessions: sessions})
+}
+
+// toInteractionPayload converts current into the wire payload, or returns
+// nil when there is nothing new to report.
+//
+// A session_snapshot is always a full authoritative reconciliation (force
+// is true): it always includes the session's current interaction state,
+// using its already-allocated wire revision if this session has reported
+// one before, or allocating one now for a session interaction state is
+// being described for the first time (mirroring how the lifecycle revision
+// just above handles the same "already known" vs "first snapshot" split).
+//
+// An incremental session_started/updated/stopped event (force is false)
+// only includes interaction when it actually changed since the last time
+// this Client sent one for sessionID (tracked by Supervisor's local
+// bridge.Interaction.Revision, not the wire revision): resending an
+// unchanged value on every lifecycle event would be wasted traffic and
+// would burn a wire revision for no reason.
+func (c *Client) toInteractionPayload(sessionID string, current bridge.Interaction, force bool) *interactionPayload {
+	c.interactionMu.Lock()
+	last, seen := c.lastSentLocalRev[sessionID]
+	localRev := int64(current.Revision)
+	changed := !seen || last != localRev
+	if !force && !changed {
+		c.interactionMu.Unlock()
+		return nil
+	}
+	c.lastSentLocalRev[sessionID] = localRev
+	c.interactionMu.Unlock()
+
+	wireRev := c.interactions.Current(sessionID)
+	if wireRev <= 0 {
+		wireRev = c.interactions.Next(sessionID)
+	} else if changed {
+		wireRev = c.interactions.Next(sessionID)
+	}
+
+	var pending *pendingRequestPayload
+	if p := current.Pending; p != nil {
+		pending = &pendingRequestPayload{ID: p.ID, Type: string(p.Type), Summary: p.Summary}
+	}
+	updatedAt, lastActivityAt := current.UpdatedAt.UTC(), current.LastActivityAt.UTC()
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+	if lastActivityAt.IsZero() {
+		lastActivityAt = updatedAt
+	}
+	return &interactionPayload{
+		State:          string(current.EffectiveState()),
+		Revision:       wireRev,
+		UpdatedAt:      updatedAt,
+		LastActivityAt: lastActivityAt,
+		Pending:        pending,
+		Source:         current.Evidence.Source,
+		Capability: interactionCapabilityPayload{
+			InteractionStateSupported: current.Evidence.Capability.InteractionStateSupported,
+			ApprovalStateSupported:    current.Evidence.Capability.ApprovalStateSupported,
+			PendingSummarySupported:   current.Evidence.Capability.PendingSummarySupported,
+		},
+	}
+}
+
+// forgetInteraction drops interaction wire-revision bookkeeping for a
+// session that has reached a terminal state, mirroring revisions.Forget.
+func (c *Client) forgetInteraction(sessionID string) {
+	c.interactions.Forget(sessionID)
+	c.interactionMu.Lock()
+	delete(c.lastSentLocalRev, sessionID)
+	c.interactionMu.Unlock()
 }
 
 func (c *Client) sendHeartbeat(ctx context.Context, conn *websocket.Conn) error {
@@ -640,18 +746,20 @@ func (c *Client) sendEvent(ctx context.Context, conn *websocket.Conn, info Sessi
 		msgType = msgSessionStopped
 	}
 	payload := sessionPayload{
-		SessionID:  info.SessionID,
-		Provider:   info.Provider,
-		ProjectID:  info.ProjectID,
-		Status:     info.Status,
-		Revision:   rev,
-		OccurredAt: time.Now().UTC(),
+		SessionID:   info.SessionID,
+		Provider:    info.Provider,
+		ProjectID:   info.ProjectID,
+		Status:      info.Status,
+		Revision:    rev,
+		OccurredAt:  time.Now().UTC(),
+		Interaction: c.toInteractionPayload(info.SessionID, info.Interaction, false),
 	}
 	if err := c.writeEnvelope(ctx, conn, msgType, payload); err != nil {
 		return err
 	}
 	if msgType == msgSessionStopped {
 		c.revisions.Forget(info.SessionID)
+		c.forgetInteraction(info.SessionID)
 	}
 	return nil
 }

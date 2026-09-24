@@ -63,22 +63,35 @@ func (p *CodexProvider) BuildCommand(ctx context.Context, cfg bridge.SessionConf
 	if err != nil {
 		return nil, err
 	}
+	if err := applyCodexHomeAuth(cmd); err != nil {
+		return nil, err
+	}
+	return cmd, nil
+}
 
+// applyCodexHomeAuth resolves Codex auth from cmd.Env (see resolveCodexAuth)
+// and rewrites cmd.Env so the child sees only CODEX_HOME pointing at a
+// seeded auth.json, never the raw CODEX_AUTH/CODEX_API_KEY/OPENAI_API_KEY
+// values directly. Shared by every command bridgectl launches that needs
+// real Codex credentials (the interactive CLI and, for the app-server
+// observer mode, both the companion `codex app-server` process and the
+// `codex --remote` TUI process — both need the same resolved auth).
+func applyCodexHomeAuth(cmd *exec.Cmd) error {
 	codexAuthMu.Lock()
 	defer codexAuthMu.Unlock()
 	auth, err := resolveCodexAuth(cmd.Env)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if len(auth.seed) > 0 {
 		if err := os.MkdirAll(auth.home, 0o700); err != nil {
-			return nil, fmt.Errorf("create codex auth directory: %w", err)
+			return fmt.Errorf("create codex auth directory: %w", err)
 		}
 		if err := os.Chmod(auth.home, 0o700); err != nil {
-			return nil, fmt.Errorf("secure codex auth directory: %w", err)
+			return fmt.Errorf("secure codex auth directory: %w", err)
 		}
 		if err := atomicWriteFile(filepath.Join(auth.home, "auth.json"), auth.seed, 0o600); err != nil {
-			return nil, fmt.Errorf("write codex auth file: %w", err)
+			return fmt.Errorf("write codex auth file: %w", err)
 		}
 	}
 	cmd.Env = setEnvValue(cmd.Env, "CODEX_HOME", auth.home)
@@ -88,7 +101,7 @@ func (p *CodexProvider) BuildCommand(ctx context.Context, cfg bridge.SessionConf
 		key, _, _ := strings.Cut(entry, "=")
 		return key == "CODEX_AUTH" || key == "CODEX_API_KEY" || key == "OPENAI_API_KEY"
 	})
-	return cmd, nil
+	return nil
 }
 
 type codexAuthSource struct {

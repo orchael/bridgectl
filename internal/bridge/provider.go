@@ -84,6 +84,15 @@ type SessionInfo struct {
 	ActiveWriterClientID string
 	// ObserverCount is the number of read-only observer clients currently attached.
 	ObserverCount int
+	// Interaction is the session's current authoritative interaction state.
+	// It is a distinct axis from State (runtime lifecycle) and is never
+	// inferred from it; see interaction.go.
+	Interaction Interaction
+	// InteractionCapabilities is the reporting provider's declared
+	// capability for Interaction, duplicated onto SessionInfo so consumers
+	// (doctor, the control client, Bridge) don't need a separate provider
+	// lookup to know how much to trust Interaction.
+	InteractionCapabilities InteractionCapabilities
 }
 
 // ChunkType classifies an OutputChunk's content.
