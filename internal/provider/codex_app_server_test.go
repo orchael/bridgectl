@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"os"
 	"os/exec"
 	"strconv"
 	"testing"
@@ -119,11 +120,18 @@ func TestWaitForPort_RespectsCancellation(t *testing.T) {
 // docs/codex-app-server-observer.md). It never needs OpenAI/ChatGPT
 // credentials: thread/start and an "idle" ThreadStatus are both available
 // locally, before any real model call is attempted. It is skipped, not
-// failed, when `codex` isn't on PATH (e.g. most CI runners).
+// failed, both when `codex` isn't on PATH (e.g. most CI runners) and when
+// no usable credential is resolvable (e.g. a dev machine with the binary
+// installed but never logged in, or a stale/deleted auth.json) — BuildCommand
+// calls applyCodexHomeAuth unconditionally, so without this second check the
+// test would fail rather than skip on exactly that machine shape.
 func TestCodexAppServer_RealBinary_CompanionStartsAndObserverSeesIdle(t *testing.T) {
 	binPath, err := exec.LookPath("codex")
 	if err != nil {
 		t.Skip("codex binary not on PATH; skipping real app-server integration test")
+	}
+	if _, err := resolveCodexAuth(os.Environ()); err != nil {
+		t.Skipf("no usable Codex credential resolvable (%v); skipping real app-server integration test", err)
 	}
 
 	p := newTestCodexAppServerProvider(binPath)
