@@ -84,8 +84,9 @@ const (
 // client reads: enough to learn a thread's id and initial status from
 // thread/start's result or thread/started's notification.
 type threadRef struct {
-	ID     string              `json:"id"`
-	Status threadStatusPayload `json:"status"`
+	Ephemeral bool                `json:"ephemeral"`
+	ID        string              `json:"id"`
+	Status    threadStatusPayload `json:"status"`
 }
 
 type threadStartedParams struct {

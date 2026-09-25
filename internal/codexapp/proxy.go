@@ -26,6 +26,7 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 	updates := make(chan bridge.Interaction, 64)
 	client := &ResponseClient{Updates: updates}
 	taken := false
+	threadRequests := make(map[string]bool)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		client.mu.Lock()
 		if taken {
@@ -62,6 +63,13 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 				if err != nil {
 					return
 				}
+				var request envelope
+				if json.Unmarshal(b, &request) == nil && len(request.ID) > 0 && (request.Method == "thread/start" || request.Method == "thread/resume" || request.Method == "thread/fork") {
+					client.mu.Lock()
+					threadRequests[string(request.ID)] = true
+					slog.Debug("codexapp owner request", "method", request.Method, "rpc_id", string(request.ID))
+					client.mu.Unlock()
+				}
 				if err = conn.Write(relayCtx, typ, b); err != nil {
 					return
 				}
@@ -75,14 +83,37 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 			var env envelope
 			if json.Unmarshal(b, &env) == nil {
 				client.mu.Lock()
-				if env.Method == "" && len(env.Result) > 0 {
+				// The TUI reads historical threads during startup. Only a
+				// response to its own non-ephemeral start/resume/fork operation establishes
+				// session ownership; an unrelated thread/read result must not.
+				if env.Method == "" && threadRequests[string(env.ID)] {
+					delete(threadRequests, string(env.ID))
 					var result threadStartedParams
-					if json.Unmarshal(env.Result, &result) == nil && result.Thread.ID != "" {
+					if json.Unmarshal(env.Result, &result) == nil && result.Thread.ID != "" && !result.Thread.Ephemeral {
+						slog.Debug("codexapp owner binding", "rpc_id", string(env.ID), "thread_id", result.Thread.ID, "status", result.Thread.Status.Type)
+						if client.state.threadID != result.Thread.ID {
+							client.state = observerState{threadID: result.Thread.ID}
+							client.requestID = nil
+							client.questionID = ""
+							client.submitted = false
+						}
 						env.Method = methodThreadStarted
 						env.Params = env.Result
 					}
 				}
-				interaction, emit := handleMessage(&client.state, env, slog.Default())
+				if env.Method == methodThreadStatusChanged || env.Method == methodItemToolRequestUserInput {
+					var meta struct {
+						ThreadID string              `json:"threadId"`
+						Status   threadStatusPayload `json:"status"`
+					}
+					_ = json.Unmarshal(env.Params, &meta)
+					slog.Debug("codexapp thread evidence", "method", env.Method, "thread_id", meta.ThreadID, "owner_thread", client.state.threadID, "status", meta.Status)
+				}
+				var interaction bridge.Interaction
+				var emit bool
+				if client.state.threadID != "" {
+					interaction, emit = handleMessage(&client.state, env, slog.Default())
+				}
 				if env.Method == methodItemToolRequestUserInput {
 					var p toolRequestUserInputParams
 					if json.Unmarshal(env.Params, &p) == nil && p.ThreadID == client.state.threadID && string(client.requestID) != string(env.ID) {

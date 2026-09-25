@@ -13,7 +13,10 @@ Real Codex 0.153.4 testing exposed an MAR-85 gap: a second WebSocket observer
 receives thread status broadcasts but not the TUI owner's pending request.
 The provider now puts a loopback WebSocket relay between the unmodified TUI and
 its companion app-server. It forwards the normal protocol and observes the
-owning connection's request IDs and question IDs. Only one TUI connection may
+owning connection's request IDs and question IDs. The active thread is bound to
+the TUI's own non-ephemeral start/resume/fork RPC response; startup history
+reads and ephemeral background work (such as title generation) cannot select
+or replace it. Only one TUI connection may
 use that relay. Responses are JSON-RPC results for the exact original request,
 using the provider's structured answer map; no terminal bytes or new turns are
 generated. The TUI continues receiving the provider's resolution notification.
@@ -81,3 +84,9 @@ publishes state through `wss://control.bridge.orchael.dev/v1/control`, and waits
 for the Bridge browser to respond. It never answers on the browser's behalf.
 Use Bridge's opt-in `respond.spec.ts` acceptance test on
 `https://bridge.orchael.dev`. Production endpoint defaults are unchanged.
+
+Final repeat after thread-isolation fixes passed on 2026-09-25 with session
+`mar66-live-184693b1-5603-40dc-b8e9-150bd1fd4f8c` and pending request
+`call_6KRaUGsUuZgTnvvoSb0iXNSi`. Real background-thread traffic was present;
+the main session remained selected. The browser response/retry test passed,
+and the Supervisor required provider acknowledgement, idle and one dispatch.

@@ -35,8 +35,21 @@ func TestProxyRequestBoundResponse(t *testing.T) {
 					t.Fatal("relay changed method")
 				}
 			}
-			forward(notif(methodThreadStarted, map[string]any{"thread": map[string]any{"id": "thread", "status": map[string]any{"type": "idle"}}}))
-			<-client.Updates
+			// History can arrive before the owning start result; it cannot
+			// choose the observed session even when it contains a thread.
+			forward(envelope{ID: json.RawMessage(`99`), Result: mustJSON(map[string]any{"thread": map[string]any{"id": "history", "status": map[string]any{"type": "notLoaded"}}})})
+			serverSend(t, tui, envelope{ID: json.RawMessage(`7`), Method: "thread/start", Params: mustJSON(map[string]any{})})
+			_ = serverReadEnvelope(t, upstream)
+			forward(envelope{ID: json.RawMessage(`7`), Result: mustJSON(map[string]any{"thread": map[string]any{"id": "thread", "status": map[string]any{"type": "idle"}}})})
+			initial := <-client.Updates
+			if initial.State != bridge.InteractionIdle {
+				t.Fatalf("history adopted as session: %+v", initial)
+			}
+			// Codex starts ephemeral background threads (e.g. title generation)
+			// on this same connection. They must not replace the user's thread.
+			serverSend(t, tui, envelope{ID: json.RawMessage(`8`), Method: "thread/start", Params: mustJSON(map[string]any{"ephemeral": true})})
+			_ = serverReadEnvelope(t, upstream)
+			forward(envelope{ID: json.RawMessage(`8`), Result: mustJSON(map[string]any{"thread": map[string]any{"id": "background", "ephemeral": true, "status": map[string]any{"type": "idle"}}})})
 			forward(notif(methodThreadStatusChanged, map[string]any{"threadId": "thread", "status": map[string]any{"type": "active", "activeFlags": []string{"waitingOnUserInput"}}}))
 			<-client.Updates
 			questions := []map[string]any{{"id": "question", "question": "Choose a color", "isSecret": kind == "secret"}}

@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,6 +34,14 @@ func TestMAR66BridgeLive(t *testing.T) {
 	if os.Getenv("MAR66_BRIDGE_LIVE") != "1" {
 		t.Skip("requires real Bridge development installation and browser")
 	}
+	trace, err := os.OpenFile("/tmp/mar66-provider-evidence.log", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = trace.Close() }()
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(trace, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(oldLogger)
 	path := os.Getenv("MAR66_CREDENTIAL_FILE")
 	if path == "" {
 		t.Fatal("MAR66_CREDENTIAL_FILE required")
@@ -118,6 +127,15 @@ func TestMAR66BridgeLive(t *testing.T) {
 	if _, err := sup.Detach(sid, "acceptance-bootstrap"); err != nil {
 		t.Fatal(err)
 	}
+	observer, err := sup.Attach(sid, "acceptance-observer", 0, bridge.AttachRoleObserver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for chunk := range observer.Live {
+			_, _ = log.Write(chunk.Payload)
+		}
+	}()
 	t.Logf("real bridgectl session %s; bootstrap writer released", sid)
 	waiting, resumed := false, false
 	previous := ""
