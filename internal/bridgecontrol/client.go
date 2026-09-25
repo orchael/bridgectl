@@ -40,6 +40,8 @@ var minIdleReadTimeout = 30 * time.Second
 // enrollment has no control endpoint/credential, per the "no Bridge
 // configuration means no control connection is attempted" invariant.
 type Config struct {
+	CommandPath string
+	RespondFunc func(context.Context, string, string, string) error
 	// Endpoint is the control-plane WebSocket URL, e.g.
 	// "wss://control.bridge.orchael.dev/v1/control". Taken verbatim from
 	// Bridge's enrollment response; never hard-coded here.
@@ -91,10 +93,13 @@ type queuedNotification struct {
 // hot path; the actual network I/O happens on a single background
 // goroutine started by Start.
 type Client struct {
-	cfg       Config
-	revisions *RevisionStore
-	rng       *rand.Rand
-	rngMu     sync.Mutex
+	commandMu      sync.Mutex
+	organizationID string
+	installationID string
+	cfg            Config
+	revisions      *RevisionStore
+	rng            *rand.Rand
+	rngMu          sync.Mutex
 
 	// interactions allocates bridgecontrol's own restart-durable wire
 	// revision for interaction-state updates, independent of the session
@@ -335,6 +340,10 @@ func (c *Client) connectAndServe(parent context.Context) error {
 	if err != nil {
 		return err
 	}
+	c.commandMu.Lock()
+	c.organizationID = ack.OrganizationID
+	c.installationID = ack.InstallationID
+	c.commandMu.Unlock()
 	c.setStatus(StateConnected, "")
 	c.cfg.Logger.Info("bridgecontrol: connected", "installation_id", ack.InstallationID, "heartbeat_interval_s", ack.HeartbeatIntervalSeconds)
 
@@ -438,6 +447,15 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idleTimeout
 			return
 		}
 		switch env.Type {
+		case "command":
+			var command Command
+			if json.Unmarshal(env.Payload, &command) != nil {
+				continue
+			}
+			result := c.executeCommand(ctx, command)
+			if err := c.writeEnvelope(ctx, conn, "command_result", result); err != nil {
+				return
+			}
 		case msgError:
 			var p errorPayload
 			_ = json.Unmarshal(env.Payload, &p)
@@ -699,9 +717,11 @@ func (c *Client) toInteractionPayload(sessionID string, current bridge.Interacti
 		Pending:        pending,
 		Source:         current.Evidence.Source,
 		Capability: interactionCapabilityPayload{
-			InteractionStateSupported: current.Evidence.Capability.InteractionStateSupported,
-			ApprovalStateSupported:    current.Evidence.Capability.ApprovalStateSupported,
-			PendingSummarySupported:   current.Evidence.Capability.PendingSummarySupported,
+			RemoteResponseSupported:     current.Evidence.Capability.RemoteResponseSupported,
+			StructuredApprovalSupported: current.Evidence.Capability.StructuredApprovalSupported,
+			InteractionStateSupported:   current.Evidence.Capability.InteractionStateSupported,
+			ApprovalStateSupported:      current.Evidence.Capability.ApprovalStateSupported,
+			PendingSummarySupported:     current.Evidence.Capability.PendingSummarySupported,
 		},
 	}
 }

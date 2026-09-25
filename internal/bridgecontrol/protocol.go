@@ -118,9 +118,11 @@ type pendingRequestPayload struct {
 // interactionCapabilityPayload is the wire shape of
 // bridge.InteractionCapabilities.
 type interactionCapabilityPayload struct {
-	InteractionStateSupported bool `json:"interaction_state_supported"`
-	ApprovalStateSupported    bool `json:"approval_state_supported"`
-	PendingSummarySupported   bool `json:"pending_summary_supported"`
+	RemoteResponseSupported     bool `json:"remote_response_supported"`
+	StructuredApprovalSupported bool `json:"structured_approval_supported"`
+	InteractionStateSupported   bool `json:"interaction_state_supported"`
+	ApprovalStateSupported      bool `json:"approval_state_supported"`
+	PendingSummarySupported     bool `json:"pending_summary_supported"`
 }
 
 // interactionPayload is the wire shape of bridge.Interaction. Revision is

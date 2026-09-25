@@ -161,7 +161,8 @@ func TestCodexAppServer_RealBinary_CompanionStartsAndObserverSeesIdle(t *testing
 	if !ok {
 		t.Fatal("companion app-server session was not recorded")
 	}
-	endpoint := "ws://127.0.0.1:" + strconv.Itoa(sess.port)
+	_ = sess
+	endpoint := tuiCmd.Args[2]
 
 	simulateTUIThreadStart(t, endpoint)
 

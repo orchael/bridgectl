@@ -891,6 +891,13 @@ func Start(cfg Config) (*Server, error) {
 					logger.Warn("bridge control: invalid or missing control credential, control disabled")
 				} else {
 					controlClient = bridgecontrol.New(bridgecontrol.Config{
+						CommandPath: filepath.Join(stateDir, "bridge-control-commands"),
+						RespondFunc: func(ctx context.Context, sessionID, pendingID, text string) error {
+							if sup == nil {
+								return bridge.ErrSessionNotFound
+							}
+							return sup.RespondToInput(ctx, sessionID, pendingID, text)
+						},
 						Endpoint:         controlCfg.Endpoint,
 						Credential:       credential.ControlCredential,
 						BridgectlVersion: cfg.Version,

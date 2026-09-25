@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -25,26 +26,37 @@ var Capabilities = bridge.InteractionCapabilities{
 
 const evidenceSource = "codex-app-server"
 
-// dialTimeout/readTimeout bound the observer connection; a companion
-// app-server that never becomes reachable, or one that goes silent, must
-// never hang the session it's attached to.
-const (
-	dialTimeout    = 10 * time.Second
-	idleReadWindow = 60 * time.Second
-)
+const dialTimeout = 10 * time.Second
 
-// Watch connects to a `codex app-server --listen ws://...` instance,
-// completes the initialize handshake, and emits a bridge.Interaction value
-// on the returned channel every time the observed thread's authoritative
-// status changes (see threadStatusToInteraction). It never sends turn/start
-// or an approval/input response — see the package doc comment.
-//
-// The channel is closed when ctx is cancelled or the connection is
-// unrecoverably lost. Watch itself does not retry the WebSocket dial in a
-// loop forever; a single connection attempt is made (the companion process
-// this connects to is started by the same session it observes, so a dial
-// failure or a drop past the point of no return means the session's
-// process group is already going away).
+// ResponseClient shares request identity with the observer's single reader.
+// Responses are JSON-RPC answers to an outstanding request, never turn/start
+// or terminal bytes. The server rejects resolutions of requests already gone.
+type ResponseClient struct {
+	mu         sync.Mutex
+	conn       *websocket.Conn
+	state      observerState
+	requestID  json.RawMessage
+	questionID string
+	submitted  bool
+	closed     bool
+	Updates    <-chan bridge.Interaction
+}
+
+func (c *ResponseClient) Respond(ctx context.Context, pendingID, text string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.state.pending == nil || c.state.pending.ID != pendingID || c.questionID == "" || len(c.requestID) == 0 || c.submitted {
+		return bridge.ErrPendingRequestMismatch
+	}
+	// Burn the request before I/O: an ambiguous network failure is not safe
+	// to retry. Provider evidence, never this write, clears attention.
+	c.submitted = true
+	b := mustJSON(envelope{JSONRPC: "2.0", ID: c.requestID, Result: mustJSON(map[string]any{"answers": map[string]any{c.questionID: map[string]any{"answers": []string{text}}}})})
+	return c.conn.Write(ctx, websocket.MessageText, b)
+}
+
+// Watch provides a read-only secondary status subscription. The provider uses
+// Proxy instead so pending requests are observed on the owning connection.
 func Watch(ctx context.Context, wsURL string, logger *slog.Logger) (<-chan bridge.Interaction, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -75,7 +87,7 @@ func sendInitialize(ctx context.Context, conn *websocket.Conn) error {
 		Method:  methodInitialize,
 		Params: mustJSON(initializeParams{ClientInfo: clientInfo{
 			Name: "bridgectl-observer", Version: "1",
-		}}),
+		}, Capabilities: map[string]bool{"experimentalApi": true}}),
 	}
 	b, err := json.Marshal(req)
 	if err != nil {
@@ -114,6 +126,7 @@ func sendInitialize(ctx context.Context, conn *websocket.Conn) error {
 type observerState struct {
 	threadID string
 	pending  *bridge.PendingRequest
+	status   threadStatusPayload
 }
 
 func runObserver(ctx context.Context, conn *websocket.Conn, out chan<- bridge.Interaction, logger *slog.Logger) {
@@ -121,9 +134,7 @@ func runObserver(ctx context.Context, conn *websocket.Conn, out chan<- bridge.In
 	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 	st := &observerState{}
 	for {
-		readCtx, cancel := context.WithTimeout(ctx, idleReadWindow)
-		_, data, err := conn.Read(readCtx)
-		cancel()
+		_, data, err := conn.Read(ctx)
 		if err != nil {
 			if ctx.Err() == nil {
 				logger.Debug("codexapp: observer connection ended", "error", err)
@@ -193,7 +204,14 @@ func handleMessage(st *observerState, env envelope, logger *slog.Logger) (bridge
 		return bridge.Interaction{}, false
 
 	case methodItemToolRequestUserInput:
+		var p toolRequestUserInputParams
+		if json.Unmarshal(env.Params, &p) != nil || p.ThreadID != st.threadID {
+			return bridge.Interaction{}, false
+		}
 		st.pending = pendingFromUserInput(env)
+		if hasFlag(st.status.ActiveFlags, activeFlagWaitingOnUserInput) {
+			return statusToInteraction(st, st.status), true
+		}
 		return bridge.Interaction{}, false
 
 	default:
@@ -211,6 +229,7 @@ func handleMessage(st *observerState, env envelope, logger *slog.Logger) (bridge
 // evidence that clears Pending — never inferred from anything bridgectl did
 // locally.
 func statusToInteraction(st *observerState, status threadStatusPayload) bridge.Interaction {
+	st.status = status
 	now := time.Now().UTC()
 	interaction := bridge.Interaction{
 		UpdatedAt:      now,
