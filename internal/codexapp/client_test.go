@@ -225,6 +225,7 @@ func TestWatch_ToolRequestUserInput_CarriesQuestionAsSummary(t *testing.T) {
 		ID:     json.RawMessage(`100`),
 		Method: methodItemToolRequestUserInput,
 		Params: mustJSON(toolRequestUserInputParams{
+			ThreadID:  "thread-1",
 			ItemID:    "item-1",
 			Questions: []toolRequestUserInputQuestion{{Text: "Which environment should I target?"}},
 		}),

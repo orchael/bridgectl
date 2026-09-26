@@ -1,6 +1,7 @@
 package bridgecontrol
 
 import (
+	"container/list"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -40,6 +41,9 @@ var minIdleReadTimeout = 30 * time.Second
 // enrollment has no control endpoint/credential, per the "no Bridge
 // configuration means no control connection is attempted" invariant.
 type Config struct {
+	CommandPath  string
+	RespondFunc  func(context.Context, string, string, string) error
+	ApprovalFunc func(context.Context, string, string, string) error
 	// Endpoint is the control-plane WebSocket URL, e.g.
 	// "wss://control.bridge.orchael.dev/v1/control". Taken verbatim from
 	// Bridge's enrollment response; never hard-coded here.
@@ -82,6 +86,7 @@ type Config struct {
 // whether it predates the authoritative snapshot that just superseded it
 // (see drainStalePending).
 type queuedNotification struct {
+	position   *list.Element
 	info       SessionSnapshot
 	enqueuedAt time.Time
 }
@@ -91,10 +96,13 @@ type queuedNotification struct {
 // hot path; the actual network I/O happens on a single background
 // goroutine started by Start.
 type Client struct {
-	cfg       Config
-	revisions *RevisionStore
-	rng       *rand.Rand
-	rngMu     sync.Mutex
+	commandMu      sync.Mutex
+	organizationID string
+	installationID string
+	cfg            Config
+	revisions      *RevisionStore
+	rng            *rand.Rand
+	rngMu          sync.Mutex
 
 	// interactions allocates bridgecontrol's own restart-durable wire
 	// revision for interaction-state updates, independent of the session
@@ -121,8 +129,9 @@ type Client struct {
 	// FIFO eviction — only distinct *sessions* compete for the bounded
 	// eventQueueSize slots (see the overflow handling in Notify), not
 	// individual updates to the same session.
-	mu      sync.Mutex
-	pending map[string]queuedNotification
+	mu           sync.Mutex
+	pending      map[string]queuedNotification
+	pendingOrder list.List
 	// dirty signals serve's select loop that pending has at least one entry
 	// worth draining. Buffered 1: multiple Notify calls between drains
 	// collapse into a single wakeup, which is fine since the wakeup always
@@ -195,22 +204,22 @@ func (c *Client) Start(ctx context.Context) {
 // longer than it takes to send one more snapshot.
 func (c *Client) Notify(info SessionSnapshot) {
 	c.mu.Lock()
-	_, alreadyPending := c.pending[info.SessionID]
+	previous, alreadyPending := c.pending[info.SessionID]
 	if !alreadyPending && len(c.pending) >= eventQueueSize {
-		var oldestID string
-		var oldestAt time.Time
-		first := true
-		for id, item := range c.pending {
-			if first || item.enqueuedAt.Before(oldestAt) {
-				oldestID, oldestAt, first = id, item.enqueuedAt, false
-			}
-		}
+		oldest := c.pendingOrder.Front()
+		oldestID := oldest.Value.(string)
+		c.pendingOrder.Remove(oldest)
 		delete(c.pending, oldestID)
-		c.cfg.Logger.Warn("bridgecontrol: pending notification queue full, evicted oldest session and scheduled reconciliation",
-			"evicted_session_id", oldestID, "new_session_id", info.SessionID)
+		c.cfg.Logger.Warn("bridgecontrol: pending notification queue full, evicted oldest session and scheduled reconciliation", "evicted_session_id", oldestID, "new_session_id", info.SessionID)
 		c.scheduleReconcile()
 	}
-	c.pending[info.SessionID] = queuedNotification{info: info, enqueuedAt: time.Now()}
+	position := previous.position
+	if position != nil {
+		c.pendingOrder.MoveToBack(position)
+	} else {
+		position = c.pendingOrder.PushBack(info.SessionID)
+	}
+	c.pending[info.SessionID] = queuedNotification{info: info, enqueuedAt: time.Now(), position: position}
 	c.mu.Unlock()
 
 	select {
@@ -335,6 +344,10 @@ func (c *Client) connectAndServe(parent context.Context) error {
 	if err != nil {
 		return err
 	}
+	c.commandMu.Lock()
+	c.organizationID = ack.OrganizationID
+	c.installationID = ack.InstallationID
+	c.commandMu.Unlock()
 	c.setStatus(StateConnected, "")
 	c.cfg.Logger.Info("bridgecontrol: connected", "installation_id", ack.InstallationID, "heartbeat_interval_s", ack.HeartbeatIntervalSeconds)
 
@@ -438,6 +451,15 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idleTimeout
 			return
 		}
 		switch env.Type {
+		case "command":
+			var command Command
+			if json.Unmarshal(env.Payload, &command) != nil {
+				continue
+			}
+			result := c.executeCommand(ctx, command)
+			if err := c.writeEnvelope(ctx, conn, "command_result", result); err != nil {
+				return
+			}
 		case msgError:
 			var p errorPayload
 			_ = json.Unmarshal(env.Payload, &p)
@@ -487,9 +509,11 @@ func (c *Client) drainAllPending() []queuedNotification {
 	}
 	out := make([]queuedNotification, 0, len(c.pending))
 	for _, item := range c.pending {
+		item.position = nil
 		out = append(out, item)
 	}
 	c.pending = make(map[string]queuedNotification)
+	c.pendingOrder.Init()
 	return out
 }
 
@@ -517,6 +541,7 @@ func (c *Client) drainStalePending(cutoff time.Time) {
 			c.revisions.Forget(id)
 			c.forgetInteraction(id)
 		}
+		c.pendingOrder.Remove(item.position)
 		delete(c.pending, id)
 	}
 }
@@ -699,9 +724,11 @@ func (c *Client) toInteractionPayload(sessionID string, current bridge.Interacti
 		Pending:        pending,
 		Source:         current.Evidence.Source,
 		Capability: interactionCapabilityPayload{
-			InteractionStateSupported: current.Evidence.Capability.InteractionStateSupported,
-			ApprovalStateSupported:    current.Evidence.Capability.ApprovalStateSupported,
-			PendingSummarySupported:   current.Evidence.Capability.PendingSummarySupported,
+			RemoteResponseSupported:     current.Evidence.Capability.RemoteResponseSupported,
+			StructuredApprovalSupported: current.Evidence.Capability.StructuredApprovalSupported,
+			InteractionStateSupported:   current.Evidence.Capability.InteractionStateSupported,
+			ApprovalStateSupported:      current.Evidence.Capability.ApprovalStateSupported,
+			PendingSummarySupported:     current.Evidence.Capability.PendingSummarySupported,
 		},
 	}
 }

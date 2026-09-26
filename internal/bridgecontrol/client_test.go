@@ -1013,3 +1013,26 @@ func TestClassifyStatus_HandlesNilAndUnknown(t *testing.T) {
 		t.Fatalf("classifyStatus(unrelated) = %v, want StateDisconnected", got)
 	}
 }
+
+func TestNotifyRecencySurvivesCoalescingAndDrain(t *testing.T) {
+	c := newTestClient(t, "ws://unused.invalid/v1/control", "bri_valid", nil)
+	for i := 0; i < eventQueueSize; i++ {
+		c.Notify(SessionSnapshot{SessionID: fmt.Sprintf("s%d", i)})
+	}
+	c.Notify(SessionSnapshot{SessionID: "s0", Status: StatusStopped})
+	c.Notify(SessionSnapshot{SessionID: "new"})
+	if _, ok := c.pending["s1"]; ok {
+		t.Fatal("oldest unrefreshed session retained")
+	}
+	if c.pending["s0"].info.Status != StatusStopped {
+		t.Fatal("coalesced latest update evicted")
+	}
+	c.drainStalePending(time.Now().Add(time.Second))
+	if len(c.pending) != 0 || c.pendingOrder.Len() != 0 {
+		t.Fatal("stale drain left queue ordering entries")
+	}
+	c.Notify(SessionSnapshot{SessionID: "after"})
+	if len(c.drainAllPending()) != 1 || c.pendingOrder.Len() != 0 {
+		t.Fatal("full drain left queue ordering entries")
+	}
+}

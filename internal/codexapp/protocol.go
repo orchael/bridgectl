@@ -1,17 +1,8 @@
-// Package codexapp implements a minimal, read-only client for Codex's
-// app-server JSON-RPC protocol (`codex app-server`), used solely to observe
-// authoritative interaction state (ThreadStatus) for a Codex session bridgectl
-// is otherwise running as an ordinary interactive PTY.
-//
-// This client never sends turn/start, never answers an approval or
-// user-input request, and never controls the session in any way: those
-// remain exactly as they are today, driven by the real `codex` TUI attached
-// to bridgectl's PTY. It exists purely to watch the same app-server
-// instance the TUI is connected to (via `codex --remote`) and translate its
-// ThreadStatus notifications into bridge.Interaction updates. See
-// docs/codex-app-server-observer.md for the full design and the protocol
-// evidence (message shapes, ThreadActiveFlag values) it was verified
-// against using the real `codex app-server` binary.
+// Package codexapp adapts Codex app-server interaction state and request-bound
+// input responses. Proxy observes the real TUI owner connection and answers
+// only an explicitly supported outstanding input request. It never starts a
+// turn or converts approvals into terminal input. Watch remains read-only.
+// See docs/pending-input-response.md for protocol and ownership boundaries.
 package codexapp
 
 import "encoding/json"
@@ -47,7 +38,7 @@ const (
 
 	// Server-to-client requests (approval/input). This client observes them
 	// for stable pending-request identity and a privacy-safe summary, but
-	// never sends a response — the real `codex` TUI (a separate client
+	// are answered only by the request-bound relay or the real `codex` TUI (the owner
 	// connected to the same app-server) is the one actually answering them.
 	methodExecCommandApproval      = "execCommandApproval"
 	methodApplyPatchApproval       = "applyPatchApproval"
@@ -60,7 +51,8 @@ const (
 // initializeParams/clientInfo mirror codex-rs's InitializeParams (verified
 // against the real app-server's response to this exact payload).
 type initializeParams struct {
-	ClientInfo clientInfo `json:"clientInfo"`
+	ClientInfo   clientInfo      `json:"clientInfo"`
+	Capabilities map[string]bool `json:"capabilities,omitempty"`
 }
 type clientInfo struct {
 	Name    string `json:"name"`
@@ -92,8 +84,9 @@ const (
 // client reads: enough to learn a thread's id and initial status from
 // thread/start's result or thread/started's notification.
 type threadRef struct {
-	ID     string              `json:"id"`
-	Status threadStatusPayload `json:"status"`
+	Ephemeral bool                `json:"ephemeral"`
+	ID        string              `json:"id"`
+	Status    threadStatusPayload `json:"status"`
 }
 
 type threadStartedParams struct {
@@ -121,15 +114,13 @@ type applyPatchApprovalParams struct {
 type fileChange struct {
 	Path string `json:"path"`
 }
-type itemApprovalParams struct {
-	ItemID  string   `json:"itemId"`
-	CallID  string   `json:"callId"`
-	Command []string `json:"command"`
-}
 type toolRequestUserInputParams struct {
+	ThreadID  string                         `json:"threadId"`
 	ItemID    string                         `json:"itemId"`
 	Questions []toolRequestUserInputQuestion `json:"questions"`
 }
 type toolRequestUserInputQuestion struct {
-	Text string `json:"text"`
+	ID       string `json:"id"`
+	Text     string `json:"question"`
+	IsSecret bool   `json:"isSecret"`
 }

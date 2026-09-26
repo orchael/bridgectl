@@ -77,6 +77,8 @@ type PendingRequest struct {
 // if every field here were false, which is what makes InteractionUnknown
 // its only honest report.
 type InteractionCapabilities struct {
+	RemoteResponseSupported     bool
+	StructuredApprovalSupported bool
 	// InteractionStateSupported means the provider can authoritatively
 	// distinguish at least Working from Idle/Unknown for its sessions.
 	InteractionStateSupported bool
@@ -154,6 +156,9 @@ func (p *PendingRequest) samePendingIdentity(next *PendingRequest) bool {
 // consumer should be told about: a different State, a different Pending
 // request identity, or the same Pending request with an updated Summary.
 func (i Interaction) changed(next Interaction) bool {
+	if i.Evidence.Capability != next.Evidence.Capability {
+		return true
+	}
 	if i.EffectiveState() != next.EffectiveState() {
 		return true
 	}

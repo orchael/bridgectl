@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -15,22 +14,12 @@ import (
 	"github.com/orchael/bridgectl/internal/codexapp"
 )
 
-// CodexAppServerProvider is an interactive Codex session (a real, unmodified
-// PTY-attached `codex` TUI — the local experience is identical to the plain
-// `codex` provider) that additionally gains authoritative interaction state
-// by pointing that TUI at an out-of-process `codex app-server` instance
-// (`codex --remote ws://127.0.0.1:<port>`) and opening a second, read-only
-// observer connection to the same app-server (internal/codexapp.Watch).
-//
-// The observer never sends turn/start and never answers an approval/input
-// request — it only watches ThreadStatus. Every approval/input decision is
-// still made by whoever is actually attached to the PTY and typing into the
-// real TUI, exactly as with the plain `codex` provider today. This is
-// deliberate: MAR-85 is read-only interaction-state observation, not a new
-// remote-control path (that's MAR-66, explicitly out of scope here).
-//
-// See docs/codex-app-server-observer.md for the protocol evidence this was
-// built against and the reasoning behind this two-process design.
+// CodexAppServerProvider runs the real Codex TUI against a companion
+// app-server. A session-local protocol relay observes the TUI owner's
+// authoritative state and request identities, and can answer a supported
+// pending input request using its original JSON-RPC response mechanism.
+// Supervisor independently enforces writer ownership before any response.
+// See docs/pending-input-response.md for the verified protocol and boundaries.
 type CodexAppServerProvider struct {
 	*CodexProvider
 
@@ -39,8 +28,9 @@ type CodexAppServerProvider struct {
 }
 
 type codexAppServerSession struct {
-	port int
-	cmd  *exec.Cmd
+	port     int
+	cmd      *exec.Cmd
+	observer *codexapp.ResponseClient
 }
 
 // portReadyTimeout bounds how long BuildCommand waits for the companion
@@ -111,8 +101,14 @@ func (p *CodexAppServerProvider) BuildCommand(ctx context.Context, cfg bridge.Se
 		return nil, fmt.Errorf("codex-app-server: companion app-server on %s never became reachable", endpoint)
 	}
 
+	proxyEndpoint, observer, err := codexapp.Proxy(ctx, endpoint)
+	if err != nil {
+		_ = appServerCmd.Process.Kill()
+		_ = appServerCmd.Wait()
+		return nil, err
+	}
 	p.mu.Lock()
-	p.sessions[cfg.SessionID] = &codexAppServerSession{port: port, cmd: appServerCmd}
+	p.sessions[cfg.SessionID] = &codexAppServerSession{port: port, cmd: appServerCmd, observer: observer}
 	p.mu.Unlock()
 	go func() {
 		<-ctx.Done()
@@ -123,7 +119,7 @@ func (p *CodexAppServerProvider) BuildCommand(ctx context.Context, cfg bridge.Se
 		p.mu.Unlock()
 	}()
 
-	tuiCmd := exec.CommandContext(ctx, binPath, "--remote", endpoint)
+	tuiCmd := exec.CommandContext(ctx, binPath, "--remote", proxyEndpoint)
 	tuiCmd.Dir = cfg.RepoPath
 	tuiCmd.Env = append([]string(nil), env...)
 	if err := applyCodexHomeAuth(tuiCmd); err != nil {
@@ -142,8 +138,31 @@ func (p *CodexAppServerProvider) WatchInteraction(ctx context.Context, sessionID
 	if !ok {
 		return nil, fmt.Errorf("codex-app-server: no companion app-server recorded for session %q", sessionID)
 	}
-	endpoint := fmt.Sprintf("ws://127.0.0.1:%d", sess.port)
-	return codexapp.Watch(ctx, endpoint, slog.Default())
+	return sess.observer.Updates, nil
+}
+
+func (p *CodexAppServerProvider) RespondToInput(ctx context.Context, sessionID, pendingID, text string) error {
+	p.mu.Lock()
+	sess := p.sessions[sessionID]
+	var observer *codexapp.ResponseClient
+	if sess != nil {
+		observer = sess.observer
+	}
+	p.mu.Unlock()
+	if observer == nil {
+		return bridge.ErrRemoteResponseUnsupported
+	}
+	return observer.Respond(ctx, pendingID, text)
+}
+
+func (p *CodexAppServerProvider) DecideApproval(ctx context.Context, sessionID, pendingID, decision string) error {
+	p.mu.Lock()
+	sess := p.sessions[sessionID]
+	p.mu.Unlock()
+	if sess == nil {
+		return bridge.ErrRemoteResponseUnsupported
+	}
+	return sess.observer.Decide(ctx, pendingID, decision)
 }
 
 // CompanionEndpoint returns the ws:// URL of sessionID's companion
