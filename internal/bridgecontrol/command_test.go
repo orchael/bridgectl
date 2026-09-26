@@ -128,3 +128,24 @@ func TestMAR66ApprovalReplay(t *testing.T) {
 		t.Fatal("duplicate approval dispatched")
 	}
 }
+
+func TestMAR95InstructionLedger(t *testing.T) {
+	calls := 0
+	cfg := Config{Credential: "key", CommandPath: t.TempDir(), InstructionFunc: func(context.Context, string, string, string) error { calls++; return nil }}
+	c := New(cfg)
+	c.organizationID = "o"
+	c.installationID = "i"
+	cmd := Command{ID: uuid.NewString(), OrganizationID: "o", InstallationID: "i", SessionID: "s", UserID: "u", Action: "instruct", Text: "Do the work", ExpiresAt: time.Now().Add(20 * time.Second)}
+	for i := 0; i < 2; i++ {
+		if got := c.executeCommand(context.Background(), cmd); got.Status != "accepted" {
+			t.Fatal(got)
+		}
+	}
+	if calls != 1 {
+		t.Fatal(calls)
+	}
+	cmd.Text = "different"
+	if got := c.executeCommand(context.Background(), cmd); got.Code != "idempotency_conflict" {
+		t.Fatal(got)
+	}
+}

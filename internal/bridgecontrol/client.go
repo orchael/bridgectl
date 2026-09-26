@@ -41,9 +41,11 @@ var minIdleReadTimeout = 30 * time.Second
 // enrollment has no control endpoint/credential, per the "no Bridge
 // configuration means no control connection is attempted" invariant.
 type Config struct {
-	CommandPath  string
-	RespondFunc  func(context.Context, string, string, string) error
-	ApprovalFunc func(context.Context, string, string, string) error
+	CommandPath     string
+	ObserveFunc     func(string, uint64, int, int) (bridge.ActivityWindow, error)
+	InstructionFunc func(context.Context, string, string, string) error
+	RespondFunc     func(context.Context, string, string, string) error
+	ApprovalFunc    func(context.Context, string, string, string) error
 	// Endpoint is the control-plane WebSocket URL, e.g.
 	// "wss://control.bridge.orchael.dev/v1/control". Taken verbatim from
 	// Bridge's enrollment response; never hard-coded here.
@@ -451,6 +453,15 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idleTimeout
 			return
 		}
 		switch env.Type {
+		case "observe_session":
+			var request ObservationRequest
+			if json.Unmarshal(env.Payload, &request) != nil {
+				continue
+			}
+			result := c.observe(request)
+			if err := c.writeEnvelope(ctx, conn, "session_activity", result); err != nil {
+				return
+			}
 		case "command":
 			var command Command
 			if json.Unmarshal(env.Payload, &command) != nil {
@@ -599,7 +610,8 @@ func (c *Client) sendHello(ctx context.Context, conn *websocket.Conn) error {
 	if len(version) > maxBridgectlVersion {
 		version = version[:maxBridgectlVersion]
 	}
-	return c.writeEnvelope(ctx, conn, msgHello, helloPayload{BridgectlVersion: version})
+	caps, _ := json.Marshal(map[string]bool{"observe_session": c.cfg.ObserveFunc != nil, "send_instruction": c.cfg.InstructionFunc != nil})
+	return c.writeEnvelope(ctx, conn, msgHello, helloPayload{BridgectlVersion: version, Capabilities: caps})
 }
 
 func (c *Client) readHelloAck(ctx context.Context, conn *websocket.Conn) (*helloAckPayload, error) {

@@ -87,3 +87,23 @@ func TestMAR66ApprovalOwnership(t *testing.T) {
 		})
 	}
 }
+
+func (p *responseTestProvider) SendInstruction(context.Context, string, string) error {
+	p.calls++
+	return nil
+}
+func TestMAR95InstructionWriterOwnership(t *testing.T) {
+	for _, writer := range []string{"", "local"} {
+		p := &responseTestProvider{}
+		m := &managedSession{provider: p, info: SessionInfo{State: SessionStateRunning, ActiveWriterClientID: writer}}
+		s := &Supervisor{sessions: map[string]*managedSession{"s": m}}
+		err := s.SendInstruction(context.Background(), "s", "Run tests")
+		if writer != "" {
+			if !errors.Is(err, ErrWriterConflict) || p.calls != 0 {
+				t.Fatal("writer stolen", err)
+			}
+		} else if err != nil || p.calls != 1 {
+			t.Fatal(err)
+		}
+	}
+}

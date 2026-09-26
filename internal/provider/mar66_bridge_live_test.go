@@ -74,13 +74,21 @@ func TestMAR66BridgeLive(t *testing.T) {
 	state := t.TempDir()
 	var sup *bridge.Supervisor
 	var dispatches atomic.Int32
-	client := bridgecontrol.New(bridgecontrol.Config{Endpoint: "wss://control.bridge.orchael.dev/v1/control", Credential: credentials.Token, CommandPath: filepath.Join(state, "commands"), RevisionPath: filepath.Join(state, "revisions"), ApprovalFunc: func(c context.Context, s, p, decision string) error {
-		dispatches.Add(1)
-		return sup.DecideApproval(c, s, p, decision)
-	}, SnapshotFunc: func() []bridgecontrol.SessionSnapshot { return bridgecontrol.ActiveSnapshots(sup.List("")) }, RespondFunc: func(c context.Context, s, p, text string) error {
-		dispatches.Add(1)
-		return sup.RespondToInput(c, s, p, text)
-	}})
+	var instructions atomic.Int32
+	client := bridgecontrol.New(bridgecontrol.Config{Endpoint: "wss://control.bridge.orchael.dev/v1/control", Credential: credentials.Token, CommandPath: filepath.Join(state, "commands"), RevisionPath: filepath.Join(state, "revisions"), ObserveFunc: func(id string, after uint64, events, bytes int) (bridge.ActivityWindow, error) {
+		return sup.ObserveActivity(id, after, events, bytes)
+	},
+		InstructionFunc: func(c context.Context, id, _ string, text string) error {
+			instructions.Add(1)
+			return sup.SendInstruction(c, id, text)
+		},
+		ApprovalFunc: func(c context.Context, s, p, decision string) error {
+			dispatches.Add(1)
+			return sup.DecideApproval(c, s, p, decision)
+		}, SnapshotFunc: func() []bridgecontrol.SessionSnapshot { return bridgecontrol.ActiveSnapshots(sup.List("")) }, RespondFunc: func(c context.Context, s, p, text string) error {
+			dispatches.Add(1)
+			return sup.RespondToInput(c, s, p, text)
+		}})
 	sup = bridge.NewSupervisor(registry, bridge.DefaultPolicy(), 65536, 0, bridge.WithControlObserver(bridgecontrol.NewSupervisorObserver(client)))
 	client.Start(ctx)
 	defer func() {
@@ -178,7 +186,24 @@ func TestMAR66BridgeLive(t *testing.T) {
 		if waiting && approval && os.Getenv("MAR66_APPROVAL_DECISION") == "cancel" && info.Interaction.State == bridge.InteractionIdle && info.Interaction.Pending == nil && dispatches.Load() == 1 {
 			resumed = true
 		}
-		if resumed && info.Interaction.State == bridge.InteractionIdle {
+		if os.Getenv("MAR95_LIVE") == "1" && waiting {
+			window, _ := sup.ObserveActivity(sid, 0, 128, 32768)
+			evidence, _ := json.Marshal(map[string]any{"sessionId": sid, "state": state, "instructions": instructions.Load(), "responses": dispatches.Load(), "activity": window})
+			if err := os.WriteFile("/tmp/mar95-local-evidence.json", evidence, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat("/tmp/mar95-browser-done"); err == nil {
+				if instructions.Load() != 1 || dispatches.Load() != 1 {
+					t.Fatalf("instructions=%d responses=%d", instructions.Load(), dispatches.Load())
+				}
+				if info.Interaction.State != bridge.InteractionIdle {
+					t.Fatal("agent has not finished")
+				}
+				t.Log("MAR95 real instruction dispatched exactly once; local agent finished; browser recovery verified")
+				return
+			}
+		}
+		if resumed && info.Interaction.State == bridge.InteractionIdle && os.Getenv("MAR95_LIVE") != "1" {
 			t.Log("remote response acknowledged by provider; pending cleared; idle")
 			time.Sleep(35 * time.Second) // allow the browser to observe the live transition
 			if dispatches.Load() != 1 {

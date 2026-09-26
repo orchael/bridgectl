@@ -29,18 +29,22 @@ const evidenceSource = "codex-app-server"
 const dialTimeout = 10 * time.Second
 
 // ResponseClient shares request identity with the observer's single reader.
-// Responses are JSON-RPC answers to an outstanding request, never turn/start
-// or terminal bytes. The server rejects resolutions of requests already gone.
+// Pending responses are JSON-RPC answers to an outstanding request. Instruct is
+// a separate explicit operation; no remote operation writes terminal bytes.
 type ResponseClient struct {
-	mu         sync.Mutex
-	conn       *websocket.Conn
-	state      observerState
-	requestID  json.RawMessage
-	questionID string
-	approval   bool
-	submitted  bool
-	closed     bool
-	Updates    <-chan bridge.Interaction
+	lastActivityState  bridge.InteractionStateValue
+	activity           bridge.ActivityBuffer
+	turnID             string
+	instructionResults map[string]chan error
+	mu                 sync.Mutex
+	conn               *websocket.Conn
+	state              observerState
+	requestID          json.RawMessage
+	questionID         string
+	approval           bool
+	submitted          bool
+	closed             bool
+	Updates            <-chan bridge.Interaction
 }
 
 func (c *ResponseClient) Respond(ctx context.Context, pendingID, text string) error {
