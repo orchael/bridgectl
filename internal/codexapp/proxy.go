@@ -54,7 +54,30 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 		client.mu.Lock()
 		client.conn = conn
 		client.mu.Unlock()
-		defer func() { client.mu.Lock(); client.closed = true; client.mu.Unlock() }()
+		defer func() {
+			client.mu.Lock()
+			defer client.mu.Unlock()
+			client.closed = true
+			client.state.pending = nil
+			client.requestID = nil
+			client.questionID = ""
+			client.approval = false
+			// Losing the structured channel invalidates the last live state,
+			// even if the terminal process has not exited yet.
+			next := bridge.Interaction{State: bridge.InteractionUnknown, Evidence: bridge.InteractionEvidence{Source: evidenceSource, Capability: Capabilities}}
+			select {
+			case updates <- next:
+			default:
+				select {
+				case <-updates:
+				default:
+				}
+				select {
+				case updates <- next:
+				default:
+				}
+			}
+		}()
 		relayCtx, stop := context.WithCancel(ctx)
 		defer stop()
 		go func() {

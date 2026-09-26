@@ -4,6 +4,11 @@ title: Go SDK
 
 The Go SDK lives in `pkg/bridgeclient`.
 
+`GetSession` and each `ListSessions` entry include `GetInteraction()`: state,
+source, capability flags, revision, timestamps, and an optional pending request.
+See [Session Status](../guides/session-status.md#consume-status-from-any-client)
+for a complete read example and compatibility behavior.
+
 ```bash
 go get github.com/orchael/bridgectl/pkg/bridgeclient
 ```

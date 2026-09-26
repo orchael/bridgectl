@@ -33,6 +33,7 @@ func newSessionCmd() *cobra.Command {
 		newSessionAttachCmd(),
 		newSessionWatchCmd(),
 		newSessionStopCmd(),
+		newSessionHookCmd(),
 	)
 
 	return cmd
@@ -95,11 +96,15 @@ func newSessionListCmd() *cobra.Command {
 				return resp.Sessions[i].CreatedAt.AsTime().Before(resp.Sessions[j].CreatedAt.AsTime())
 			})
 
-			fmt.Printf("%-36s  %-10s  %-10s  %s\n", "SESSION ID", "PROVIDER", "STATUS", "CREATED")
+			fmt.Printf("%-36s  %-10s  %-10s  %-22s  %s\n", "SESSION ID", "PROVIDER", "STATUS", "INTERACTION", "CREATED")
 			for _, s := range resp.Sessions {
 				status := sessionStatusString(s.Status)
 				created := s.CreatedAt.AsTime().Format("15:04:05")
-				fmt.Printf("%-36s  %-10s  %-10s  %s\n", s.SessionId, s.Provider, status, created)
+				interaction := s.GetInteraction().GetState()
+				if interaction == "" {
+					interaction = "unknown"
+				}
+				fmt.Printf("%-36s  %-10s  %-10s  %-22s  %s\n", s.SessionId, s.Provider, status, interaction, created)
 			}
 			return nil
 		},

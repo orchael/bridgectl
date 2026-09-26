@@ -4,6 +4,9 @@ title: Session Workflow
 
 Sessions are the unit of work in AI Agent Bridge. A session belongs to a project, runs one provider in one repository path, and has a PTY event stream that clients can replay or follow live.
 
+Claude and Codex also report [structured session status](session-status.md),
+independent of terminal attachment, runtime lifecycle, and telemetry collection.
+
 ```mermaid
 sequenceDiagram
   participant Client

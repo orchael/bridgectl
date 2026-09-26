@@ -1,4 +1,4 @@
-> MAR-66 update: the original separate observer below could not receive the real TUI owner's request IDs. The current provider uses an owning-connection relay; see [pending input response](pending-input-response.md) for the current design and response-cycle verification. This document retains the MAR-85 investigation history.
+> Historical investigation: the current `codex` provider enables the owning-connection app-server relay by default; `codex-app-server` remains an alias and `transport: stdio` opts out. See [Session Status](docs/guides/session-status.md) for current usage. The original separate observer below could not receive the real TUI owner's request IDs; see [pending input response](pending-input-response.md) for the relay design.
 
 # Codex app-server interaction-state observer (MAR-85)
 
