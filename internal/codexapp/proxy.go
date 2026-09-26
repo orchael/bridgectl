@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
@@ -89,6 +90,22 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 			var env envelope
 			if json.Unmarshal(b, &env) == nil {
 				client.mu.Lock()
+				// Internal instruction responses never leak into the TUI's RPC namespace.
+				if env.Method == "" && strings.HasPrefix(string(env.ID), `"bridgectl-`) {
+					if ch := client.instructionResults[string(env.ID)]; ch != nil {
+						var resultErr error
+						if env.Error != nil {
+							resultErr = bridge.ErrPendingRequestMismatch
+						}
+						select {
+						case ch <- resultErr:
+						default:
+						}
+					}
+					client.mu.Unlock()
+					continue
+				}
+				client.observeActivityLocked(env)
 				// The TUI reads historical threads during startup. Only a
 				// response to its own non-ephemeral start/resume/fork operation establishes
 				// session ownership; an unrelated thread/read result must not.
@@ -99,6 +116,7 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 						slog.Debug("codexapp owner binding", "rpc_id", string(env.ID), "thread_id", result.Thread.ID, "status", result.Thread.Status.Type)
 						if client.state.threadID != result.Thread.ID {
 							client.state = observerState{threadID: result.Thread.ID}
+							client.turnID = ""
 							client.requestID = nil
 							client.questionID = ""
 							client.approval = false
@@ -180,6 +198,11 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 					}
 				}
 				if emit {
+					if interaction.State != client.lastActivityState {
+						client.lastActivityState = interaction.State
+						label := map[bridge.InteractionStateValue]string{bridge.InteractionWorking: "Working", bridge.InteractionIdle: "Idle", bridge.InteractionWaitingForInput: "Waiting for your answer", bridge.InteractionWaitingForApproval: "Waiting for approval", bridge.InteractionUnknown: "Interaction state unknown"}[interaction.State]
+						client.activity.Append("status", label, time.Now())
+					}
 					interaction.Evidence.Capability.StructuredApprovalSupported = interaction.State == bridge.InteractionWaitingForApproval && interaction.Pending != nil && client.approval && !client.submitted && len(client.requestID) > 0
 					interaction.Evidence.Capability.RemoteResponseSupported = interaction.State == bridge.InteractionWaitingForInput && interaction.Pending != nil && client.questionID != "" && len(client.requestID) > 0 && !client.submitted
 					// Never block the TUI on Bridge consumption. A saturated watcher

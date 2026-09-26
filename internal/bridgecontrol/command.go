@@ -45,7 +45,7 @@ func (c *Client) executeCommand(ctx context.Context, cmd Command) CommandResult 
 	defer c.commandMu.Unlock()
 	result := CommandResult{ID: cmd.ID, Status: "rejected", Code: "invalid_command"}
 	id, err := uuid.Parse(cmd.ID)
-	if err != nil || id.String() != cmd.ID || cmd.UserID == "" || len(cmd.UserID) > 256 || cmd.SessionID == "" || len(cmd.SessionID) > 256 || cmd.PendingRequestID == "" || len(cmd.PendingRequestID) > 256 || !validCommandPayload(cmd) {
+	if err != nil || id.String() != cmd.ID || cmd.UserID == "" || len(cmd.UserID) > 256 || cmd.SessionID == "" || len(cmd.SessionID) > 256 || (cmd.Action != "instruct" && cmd.PendingRequestID == "") || len(cmd.PendingRequestID) > 256 || !validCommandPayload(cmd) {
 		return result
 	}
 	if cmd.OrganizationID != c.organizationID || cmd.InstallationID != c.installationID {
@@ -54,6 +54,9 @@ func (c *Client) executeCommand(ctx context.Context, cmd Command) CommandResult 
 	}
 	dispatch := c.cfg.RespondFunc
 	value := cmd.Text
+	if cmd.Action == "instruct" {
+		dispatch = c.cfg.InstructionFunc
+	}
 	if cmd.Action == "approve" {
 		dispatch = c.cfg.ApprovalFunc
 		value = cmd.Decision
@@ -162,6 +165,9 @@ func writeCommandRecord(path string, record commandRecord, claim bool) error {
 }
 
 func validCommandPayload(cmd Command) bool {
+	if cmd.Action == "instruct" {
+		return cmd.PendingRequestID == "" && cmd.Decision == "" && bridge.ValidateResponse(cmd.Text) == nil
+	}
 	if cmd.Action == "respond" {
 		return cmd.Decision == "" && bridge.ValidateResponse(cmd.Text) == nil
 	}

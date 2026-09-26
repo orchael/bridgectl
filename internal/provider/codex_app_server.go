@@ -217,3 +217,22 @@ func waitForPort(ctx context.Context, host string, port int, timeout time.Durati
 	}
 	return false
 }
+
+func (p *CodexAppServerProvider) ObserveActivity(id string, after uint64, events, bytes int) (bridge.ActivityWindow, error) {
+	p.mu.Lock()
+	sess := p.sessions[id]
+	p.mu.Unlock()
+	if sess == nil {
+		return bridge.ActivityWindow{}, bridge.ErrSessionNotFound
+	}
+	return sess.observer.Observe(after, events, bytes), nil
+}
+func (p *CodexAppServerProvider) SendInstruction(ctx context.Context, id, text string) error {
+	p.mu.Lock()
+	sess := p.sessions[id]
+	p.mu.Unlock()
+	if sess == nil {
+		return bridge.ErrSessionNotFound
+	}
+	return sess.observer.Instruct(ctx, text)
+}
