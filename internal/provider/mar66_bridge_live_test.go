@@ -22,6 +22,9 @@ func (p *liveNoUpdateProvider) BuildCommand(ctx context.Context, cfg bridge.Sess
 	cmd, err := p.CodexAppServerProvider.BuildCommand(ctx, cfg)
 	if err == nil {
 		cmd.Args = append(cmd.Args, "-c", "check_for_update_on_startup=false")
+		if os.Getenv("MAR66_APPROVAL_LIVE") == "1" {
+			cmd.Args = append(cmd.Args, "--ask-for-approval", "on-request", "--sandbox", "read-only")
+		}
 	}
 	return cmd, err
 }
@@ -31,6 +34,11 @@ func (p *liveNoUpdateProvider) BuildCommand(ctx context.Context, cfg bridge.Sess
 // and fails unless provider evidence confirms that a remote response resumed
 // the agent. Credentials and development targets are supplied explicitly.
 func TestMAR66BridgeLive(t *testing.T) {
+	approval := os.Getenv("MAR66_APPROVAL_LIVE") == "1"
+	waitingState := bridge.InteractionWaitingForInput
+	if approval {
+		waitingState = bridge.InteractionWaitingForApproval
+	}
 	if os.Getenv("MAR66_BRIDGE_LIVE") != "1" {
 		t.Skip("requires real Bridge development installation and browser")
 	}
@@ -56,7 +64,7 @@ func TestMAR66BridgeLive(t *testing.T) {
 	if json.Unmarshal(raw, &credentials) != nil || credentials.Token == "" {
 		t.Fatal("control credential required")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	p := &liveNoUpdateProvider{newTestCodexAppServerProvider("codex")}
 	registry := bridge.NewRegistry()
@@ -66,7 +74,10 @@ func TestMAR66BridgeLive(t *testing.T) {
 	state := t.TempDir()
 	var sup *bridge.Supervisor
 	var dispatches atomic.Int32
-	client := bridgecontrol.New(bridgecontrol.Config{Endpoint: "wss://control.bridge.orchael.dev/v1/control", Credential: credentials.Token, CommandPath: filepath.Join(state, "commands"), RevisionPath: filepath.Join(state, "revisions"), SnapshotFunc: func() []bridgecontrol.SessionSnapshot { return bridgecontrol.ActiveSnapshots(sup.List("")) }, RespondFunc: func(c context.Context, s, p, text string) error {
+	client := bridgecontrol.New(bridgecontrol.Config{Endpoint: "wss://control.bridge.orchael.dev/v1/control", Credential: credentials.Token, CommandPath: filepath.Join(state, "commands"), RevisionPath: filepath.Join(state, "revisions"), ApprovalFunc: func(c context.Context, s, p, decision string) error {
+		dispatches.Add(1)
+		return sup.DecideApproval(c, s, p, decision)
+	}, SnapshotFunc: func() []bridgecontrol.SessionSnapshot { return bridgecontrol.ActiveSnapshots(sup.List("")) }, RespondFunc: func(c context.Context, s, p, text string) error {
 		dispatches.Add(1)
 		return sup.RespondToInput(c, s, p, text)
 	}})
@@ -108,9 +119,13 @@ func TestMAR66BridgeLive(t *testing.T) {
 	}
 	send("\r")
 	time.Sleep(2 * time.Second)
-	send("/plan\r")
-	time.Sleep(2 * time.Second)
-	send("\x1b[200~Use request_user_input to ask exactly one question: Should the test marker be BLUE or GREEN? Do not inspect files or execute commands. Wait for my answer.\x1b[201~")
+	if approval {
+		send("\x1b[200~For the Bridge approval acceptance test, call exec_command with cmd exactly printf BLUE, sandbox_permissions require_escalated, and justification May I print BLUE for the Bridge test? Wait for the approval. Do not inspect files or use any other command. After the command is approved or declined, briefly report the result and stop.\x1b[201~")
+	} else {
+		send("/plan\r")
+		time.Sleep(2 * time.Second)
+		send("\x1b[200~Use request_user_input to ask exactly one question: Should the test marker be BLUE or GREEN? Do not inspect files or execute commands. Wait for my answer.\x1b[201~")
+	}
 	time.Sleep(time.Second)
 	send("\r")
 	// Codex defers thread creation until its first prompt. A pasted prompt can
@@ -149,15 +164,18 @@ func TestMAR66BridgeLive(t *testing.T) {
 			t.Logf("provider state=%s pending=%+v", state, info.Interaction.Pending)
 			previous = state
 		}
-		if !waiting && info.Interaction.State == bridge.InteractionWaitingForInput && info.Interaction.Pending != nil {
+		if !waiting && info.Interaction.State == waitingState && info.Interaction.Pending != nil {
 			waiting = true
-			b, _ := json.Marshal(map[string]any{"sessionId": sid, "pendingRequestId": info.Interaction.Pending.ID, "state": "waiting_for_input"})
+			b, _ := json.Marshal(map[string]any{"sessionId": sid, "pendingRequestId": info.Interaction.Pending.ID, "state": string(waitingState), "capability": info.Interaction.Evidence.Capability})
 			if err := os.WriteFile("/tmp/mar66-bridge-live.json", b, 0600); err != nil {
 				t.Fatal(err)
 			}
 			t.Log("waiting for a response through https://bridge.orchael.dev/sessions")
 		}
 		if waiting && info.Interaction.State == bridge.InteractionWorking && info.Interaction.Pending == nil {
+			resumed = true
+		}
+		if waiting && approval && os.Getenv("MAR66_APPROVAL_DECISION") == "cancel" && info.Interaction.State == bridge.InteractionIdle && info.Interaction.Pending == nil && dispatches.Load() == 1 {
 			resumed = true
 		}
 		if resumed && info.Interaction.State == bridge.InteractionIdle {

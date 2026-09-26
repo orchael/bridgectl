@@ -37,6 +37,7 @@ type ResponseClient struct {
 	state      observerState
 	requestID  json.RawMessage
 	questionID string
+	approval   bool
 	submitted  bool
 	closed     bool
 	Updates    <-chan bridge.Interaction
@@ -53,6 +54,20 @@ func (c *ResponseClient) Respond(ctx context.Context, pendingID, text string) er
 	c.submitted = true
 	b := mustJSON(envelope{JSONRPC: "2.0", ID: c.requestID, Result: mustJSON(map[string]any{"answers": map[string]any{c.questionID: map[string]any{"answers": []string{text}}}})})
 	return c.conn.Write(ctx, websocket.MessageText, b)
+}
+
+// Decide answers only an explicitly supported command approval, once.
+func (c *ResponseClient) Decide(ctx context.Context, pendingID, decision string) error {
+	if decision != "accept" && decision != "cancel" {
+		return bridge.ErrInvalidResponse
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || !c.approval || c.state.pending == nil || c.state.pending.ID != pendingID || c.submitted || len(c.requestID) == 0 {
+		return bridge.ErrPendingRequestMismatch
+	}
+	c.submitted = true
+	return c.conn.Write(ctx, websocket.MessageText, mustJSON(envelope{JSONRPC: "2.0", ID: c.requestID, Result: mustJSON(map[string]string{"decision": decision})}))
 }
 
 // Watch provides a read-only secondary status subscription. The provider uses
@@ -191,16 +206,22 @@ func handleMessage(st *observerState, env envelope, logger *slog.Logger) (bridge
 		}
 		return statusToInteraction(st, p.Status), true
 
-	case methodExecCommandApproval, methodItemCommandExecApproval:
+	case methodItemCommandExecApproval, methodItemFileChangeApproval, methodItemPermissionsApproval:
+		var p commandApprovalParams
+		if json.Unmarshal(env.Params, &p) != nil || p.ThreadID != st.threadID {
+			return bridge.Interaction{}, false
+		}
+		st.pending = approvalPending(env, p)
+		if hasFlag(st.status.ActiveFlags, activeFlagWaitingOnApproval) {
+			return statusToInteraction(st, st.status), true
+		}
+		return bridge.Interaction{}, false
+	case methodExecCommandApproval:
 		st.pending = pendingFromExecApproval(env)
 		return bridge.Interaction{}, false // wait for the ThreadStatus that follows
 
-	case methodApplyPatchApproval, methodItemFileChangeApproval:
+	case methodApplyPatchApproval:
 		st.pending = pendingFromApplyPatch(env)
-		return bridge.Interaction{}, false
-
-	case methodItemPermissionsApproval:
-		st.pending = pendingFromGeneric(env, bridge.PendingRequestApproval, "Approval required")
 		return bridge.Interaction{}, false
 
 	case methodItemToolRequestUserInput:
@@ -311,22 +332,6 @@ func pendingFromApplyPatch(env envelope) *bridge.PendingRequest {
 		summary = "Apply changes to: " + truncate(strings.Join(paths, ", "), summaryCap)
 	}
 	return &bridge.PendingRequest{ID: p.CallID, Type: bridge.PendingRequestApproval, Summary: summary}
-}
-
-func pendingFromGeneric(env envelope, typ bridge.PendingRequestType, fallback string) *bridge.PendingRequest {
-	var p itemApprovalParams
-	id := ""
-	if err := json.Unmarshal(env.Params, &p); err == nil {
-		if p.ItemID != "" {
-			id = p.ItemID
-		} else if p.CallID != "" {
-			id = p.CallID
-		}
-	}
-	if id == "" {
-		return nil
-	}
-	return &bridge.PendingRequest{ID: id, Type: typ, Summary: fallback}
 }
 
 func pendingFromUserInput(env envelope) *bridge.PendingRequest {

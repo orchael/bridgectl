@@ -39,7 +39,22 @@ func ValidateResponse(text string) error {
 // operation. Holding the session lock excludes Attach/ClaimWriter/Stop and
 // local writes during dispatch. It never evicts a local writer, even one
 // controlled by the same user. Provider state remains authoritative afterward.
+type PendingApprovalResponder interface {
+	DecideApproval(context.Context, string, string, string) error
+}
+
+func (s *Supervisor) DecideApproval(ctx context.Context, sessionID, pendingID, decision string) error {
+	if decision != "accept" && decision != "cancel" {
+		return ErrInvalidResponse
+	}
+	return s.pendingOperation(ctx, sessionID, pendingID, decision, true)
+}
+
 func (s *Supervisor) RespondToInput(ctx context.Context, sessionID, pendingID, text string) error {
+	return s.pendingOperation(ctx, sessionID, pendingID, text, false)
+}
+
+func (s *Supervisor) pendingOperation(ctx context.Context, sessionID, pendingID, text string, approval bool) error {
 	if err := ValidateResponse(text); err != nil {
 		return err
 	}
@@ -61,8 +76,21 @@ func (s *Supervisor) RespondToInput(ctx context.Context, sessionID, pendingID, t
 		return ErrWriterConflict
 	}
 	i := ms.info.Interaction
-	if pendingID == "" || i.State != InteractionWaitingForInput || i.Pending == nil || i.Pending.Type != PendingRequestInput || i.Pending.ID != pendingID {
+	state, kind := InteractionWaitingForInput, PendingRequestInput
+	if approval {
+		state, kind = InteractionWaitingForApproval, PendingRequestApproval
+	}
+	if pendingID == "" || i.State != state || i.Pending == nil || i.Pending.Type != kind || i.Pending.ID != pendingID {
 		return ErrPendingRequestMismatch
+	}
+	if approval {
+		responder, ok := ms.provider.(PendingApprovalResponder)
+		if !ok || !i.Evidence.Capability.StructuredApprovalSupported {
+			return ErrRemoteResponseUnsupported
+		}
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		return responder.DecideApproval(ctx, sessionID, pendingID, text)
 	}
 	responder, ok := ms.provider.(PendingInputResponder)
 	if !ok {

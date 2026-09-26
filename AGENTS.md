@@ -29,6 +29,20 @@ History follows concise, imperative subjects (for example, `Add gRPC server...`,
 ## Security & Configuration Tips
 Treat `config/bridge.yaml` as local-dev plaintext mode only. For realistic environments, use `config/bridge-dev.yaml` with mTLS and JWT keys from `certs/`. Never commit private keys, tokens, or environment-specific secrets.
 
+## Google login authentication
+
+When logging in with `GOOGLE_` environment variables, use only Google
+Authenticator TOTP generated from the matching OTP secret: `GOOGLE_2FA_SECRET`
+for the primary account or `GOOGLE_SECONDARY_2FA_SECRET` for the secondary account.
+Select the Authenticator/code challenge explicitly. Never use Google Prompt,
+“tap Yes” on a phone, mobile-device approval, push notifications, SMS, or another
+fallback authentication method.
+
+If the matching OTP secret is missing or Google does not offer the Authenticator
+challenge, stop that login attempt and report the blocker. Do not switch to a
+mobile-device approval flow. Never print, log, screenshot, or commit passwords,
+OTP secrets, generated codes, or authenticated session cookies.
+
 ## Installed agent rules
 
 Created by Ballast. Do not edit this section.

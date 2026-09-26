@@ -892,6 +892,12 @@ func Start(cfg Config) (*Server, error) {
 				} else {
 					controlClient = bridgecontrol.New(bridgecontrol.Config{
 						CommandPath: filepath.Join(stateDir, "bridge-control-commands"),
+						ApprovalFunc: func(ctx context.Context, sessionID, pendingID, decision string) error {
+							if sup == nil {
+								return bridge.ErrSessionNotFound
+							}
+							return sup.DecideApproval(ctx, sessionID, pendingID, decision)
+						},
 						RespondFunc: func(ctx context.Context, sessionID, pendingID, text string) error {
 							if sup == nil {
 								return bridge.ErrSessionNotFound

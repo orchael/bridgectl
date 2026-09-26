@@ -155,6 +155,16 @@ func (p *CodexAppServerProvider) RespondToInput(ctx context.Context, sessionID, 
 	return observer.Respond(ctx, pendingID, text)
 }
 
+func (p *CodexAppServerProvider) DecideApproval(ctx context.Context, sessionID, pendingID, decision string) error {
+	p.mu.Lock()
+	sess := p.sessions[sessionID]
+	p.mu.Unlock()
+	if sess == nil {
+		return bridge.ErrRemoteResponseUnsupported
+	}
+	return sess.observer.Decide(ctx, pendingID, decision)
+}
+
 // CompanionEndpoint returns the ws:// URL of sessionID's companion
 // app-server, for diagnostics (e.g. `bridgectl doctor`) or a caller that
 // needs to connect its own additional client to the same instance. Returns

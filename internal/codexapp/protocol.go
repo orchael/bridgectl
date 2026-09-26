@@ -114,11 +114,6 @@ type applyPatchApprovalParams struct {
 type fileChange struct {
 	Path string `json:"path"`
 }
-type itemApprovalParams struct {
-	ItemID  string   `json:"itemId"`
-	CallID  string   `json:"callId"`
-	Command []string `json:"command"`
-}
 type toolRequestUserInputParams struct {
 	ThreadID  string                         `json:"threadId"`
 	ItemID    string                         `json:"itemId"`

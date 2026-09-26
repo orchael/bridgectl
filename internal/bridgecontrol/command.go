@@ -25,6 +25,7 @@ type Command struct {
 	PendingRequestID string    `json:"pending_request_id"`
 	ExpiresAt        time.Time `json:"expires_at"`
 	Text             string    `json:"text"`
+	Decision         string    `json:"decision,omitempty"`
 }
 type CommandResult struct {
 	ID     string `json:"command_id"`
@@ -44,14 +45,20 @@ func (c *Client) executeCommand(ctx context.Context, cmd Command) CommandResult 
 	defer c.commandMu.Unlock()
 	result := CommandResult{ID: cmd.ID, Status: "rejected", Code: "invalid_command"}
 	id, err := uuid.Parse(cmd.ID)
-	if err != nil || id.String() != cmd.ID || cmd.Action != "respond" || cmd.UserID == "" || len(cmd.UserID) > 256 || cmd.SessionID == "" || len(cmd.SessionID) > 256 || cmd.PendingRequestID == "" || len(cmd.PendingRequestID) > 256 || bridge.ValidateResponse(cmd.Text) != nil {
+	if err != nil || id.String() != cmd.ID || cmd.UserID == "" || len(cmd.UserID) > 256 || cmd.SessionID == "" || len(cmd.SessionID) > 256 || cmd.PendingRequestID == "" || len(cmd.PendingRequestID) > 256 || !validCommandPayload(cmd) {
 		return result
 	}
 	if cmd.OrganizationID != c.organizationID || cmd.InstallationID != c.installationID {
 		result.Code = "wrong_installation"
 		return result
 	}
-	if c.cfg.RespondFunc == nil || c.cfg.CommandPath == "" {
+	dispatch := c.cfg.RespondFunc
+	value := cmd.Text
+	if cmd.Action == "approve" {
+		dispatch = c.cfg.ApprovalFunc
+		value = cmd.Decision
+	}
+	if dispatch == nil || c.cfg.CommandPath == "" {
 		result.Code = "unsupported"
 		return result
 	}
@@ -94,7 +101,7 @@ func (c *Client) executeCommand(ctx context.Context, cmd Command) CommandResult 
 		return result
 	}
 	deadline, cancel := context.WithDeadline(ctx, cmd.ExpiresAt)
-	err = c.cfg.RespondFunc(deadline, cmd.SessionID, cmd.PendingRequestID, cmd.Text)
+	err = dispatch(deadline, cmd.SessionID, cmd.PendingRequestID, value)
 	cancel()
 	switch {
 	case err == nil:
@@ -152,4 +159,11 @@ func writeCommandRecord(path string, record commandRecord, claim bool) error {
 	}
 	defer func() { _ = dir.Close() }()
 	return dir.Sync()
+}
+
+func validCommandPayload(cmd Command) bool {
+	if cmd.Action == "respond" {
+		return cmd.Decision == "" && bridge.ValidateResponse(cmd.Text) == nil
+	}
+	return cmd.Action == "approve" && cmd.Text == "" && (cmd.Decision == "accept" || cmd.Decision == "cancel")
 }

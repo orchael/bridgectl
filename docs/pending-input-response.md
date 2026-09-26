@@ -2,9 +2,9 @@
 
 Bridge may send a `respond` command only for an existing pending input request.
 This is not a remote terminal or a generic task-submission API. Plain PTY
-providers and approvals are unsupported. Codex app-server advertises remote
-response only for a captured, current, single, non-secret input question;
-structured approval is false. Multiple-question forms are left for a later
+providers are unsupported. Codex app-server advertises remote response only
+for a captured, current, single, non-secret input question. Structured command
+approvals use the separate bounded decision path described below. Multiple-question forms are left for a later
 typed response interface instead of guessing where one free-form answer belongs.
 
 ## Provider evidence
@@ -44,8 +44,9 @@ Remote failures neither stop the session nor disable direct local input.
 
 The outbound control client's authenticated hello supplies its installation and
 organization scope. A command must match both and carry a user, session,
-pending request, action, UUID command ID and deadline. The only allowed action
-is `respond`; text is at most 16 KiB and excludes terminal control characters.
+pending request, action, UUID command ID and deadline. The allowed actions
+are `respond` and `approve`; response text is at most 16 KiB and excludes
+terminal control characters. Approval carries a decision enum instead of text.
 
 Before invoking Supervisor, the client durably creates and fsyncs a mode-0600
 claim in `bridge-control-commands`. It stores only a credential-keyed HMAC and
@@ -90,3 +91,38 @@ Final repeat after thread-isolation fixes passed on 2026-09-25 with session
 `call_6KRaUGsUuZgTnvvoSb0iXNSi`. Real background-thread traffic was present;
 the main session remained selected. The browser response/retry test passed,
 and the Supervisor required provider acknowledgement, idle and one dispatch.
+
+
+## Second slice: structured command approvals
+
+`Supervisor.DecideApproval` borrows the same unowned writer slot as input
+responses and rejects a local writer conflict. The command adapter accepts only
+`action: "approve"` with empty text and `decision: "accept" | "cancel"`. These
+mean approve once or reject and stop the turn; persistent grants are unsupported.
+The durable ledger binds the decision along with all existing command identities.
+Unknown delivery is never automatically retried, and accepted transport does not
+clear pending state.
+
+The Codex relay supports only complete, bounded command-execution approval
+previews with a working directory. It validates owning thread, turn, item and
+original JSON-RPC request identity; the public pending ID hashes all four.
+Network-specific approvals, additional permission profiles, file changes and
+legacy schemas remain non-actionable. `availableDecisions`, when provided, must
+include both `accept` and `cancel`. The exact original RPC receives a structured
+`{decision}` result; no terminal bytes or new turns are created. A local TUI
+response makes remote submission ineligible before it is forwarded, while local
+operation continues to use Codex's own resolution rules.
+
+Run a real development approval cycle with `MAR66_BRIDGE_LIVE=1`,
+`MAR66_APPROVAL_LIVE=1` and the existing `MAR66_CREDENTIAL_FILE`, then use the Bridge
+approval Playwright test. Set `MAR66_APPROVAL_DECISION=cancel` for the rejection
+cycle; cancellation may transition straight to idle. Credentials must not be
+printed or committed. Unsupported approval requests remain locally actionable.
+
+The 2026-09-26 real Bridge browser acceptance exercised both `accept` and
+`cancel` with Codex 0.153.4. Sessions `mar66-live-6d5895fd-212a-4bc0-9406-f19a4d450b62`
+and `mar66-live-44729ab3-85df-4a69-996d-085ebe3b3e82` respectively reached
+waiting-for-approval, received the remote decision, and emitted authoritative
+working/idle transitions. Both harness runs passed and asserted one dispatch
+including the browser's identical-command retry. See the paired Bridge PR #18
+for UI/audit evidence; bridgectl PR #254 contains the provider path.

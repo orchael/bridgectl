@@ -97,3 +97,34 @@ func TestMAR66BoundedErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestMAR66ApprovalReplay(t *testing.T) {
+	calls := 0
+	cfg := Config{Credential: "key", CommandPath: t.TempDir(), ApprovalFunc: func(context.Context, string, string, string) error { calls++; return nil }}
+	c := New(cfg)
+	c.organizationID = "o"
+	c.installationID = "i"
+	cmd := Command{ID: uuid.NewString(), OrganizationID: "o", InstallationID: "i", SessionID: "s", UserID: "u", Action: "approve", PendingRequestID: "rpc", Decision: "cancel", ExpiresAt: time.Now().Add(20 * time.Second)}
+	for i := 0; i < 2; i++ {
+		if got := c.executeCommand(context.Background(), cmd); got.Status != "accepted" {
+			t.Fatal(got)
+		}
+	}
+	restarted := New(cfg)
+	restarted.organizationID = "o"
+	restarted.installationID = "i"
+	if got := restarted.executeCommand(context.Background(), cmd); got.Status != "accepted" {
+		t.Fatal(got)
+	}
+	cmd.Decision = "accept"
+	if got := c.executeCommand(context.Background(), cmd); got.Code != "idempotency_conflict" {
+		t.Fatal(got)
+	}
+	cmd.Decision = "acceptForSession"
+	if got := c.executeCommand(context.Background(), cmd); got.Code != "invalid_command" {
+		t.Fatal(got)
+	}
+	if calls != 1 {
+		t.Fatal("duplicate approval dispatched")
+	}
+}

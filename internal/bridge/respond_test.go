@@ -50,3 +50,40 @@ func TestMAR66RespondValidationAndAcknowledgement(t *testing.T) {
 		})
 	}
 }
+
+func (p *responseTestProvider) DecideApproval(context.Context, string, string, string) error {
+	p.calls++
+	return nil
+}
+func TestMAR66ApprovalOwnership(t *testing.T) {
+	for _, kind := range []string{"accepted", "writer", "stale", "stopped", "unsupported", "input", "invalid"} {
+		t.Run(kind, func(t *testing.T) {
+			p := &responseTestProvider{}
+			m := &managedSession{provider: p, info: SessionInfo{State: SessionStateRunning, Interaction: Interaction{State: InteractionWaitingForApproval, Pending: &PendingRequest{ID: "rpc", Type: PendingRequestApproval}, Evidence: InteractionEvidence{Capability: InteractionCapabilities{StructuredApprovalSupported: true}}}}}
+			id, decision := "rpc", "accept"
+			switch kind {
+			case "writer":
+				m.info.ActiveWriterClientID = "local"
+			case "stale":
+				id = "old"
+			case "stopped":
+				m.info.State = SessionStateStopped
+			case "unsupported":
+				m.info.Interaction.Evidence.Capability.StructuredApprovalSupported = false
+			case "input":
+				m.info.Interaction.State = InteractionWaitingForInput
+			case "invalid":
+				decision = "acceptForSession"
+			}
+			s := &Supervisor{sessions: map[string]*managedSession{"s": m}}
+			err := s.DecideApproval(context.Background(), "s", id, decision)
+			if kind == "accepted" {
+				if err != nil || p.calls != 1 || m.info.Interaction.Pending == nil {
+					t.Fatal("approval must preserve pending", err)
+				}
+			} else if err == nil || p.calls != 0 {
+				t.Fatal("unsafe approval dispatched")
+			}
+		})
+	}
+}
