@@ -552,6 +552,7 @@ func sessionInfoToProto(info *bridge.SessionInfo) *bridgev1.GetSessionResponse {
 		Rows:                 info.Rows,
 		ActiveWriterClientId: info.ActiveWriterClientID,
 		ObserverCount:        int32(info.ObserverCount),
+		Interaction:          interactionToProto(info.Interaction),
 	}
 	if !info.StoppedAt.IsZero() {
 		resp.StoppedAt = timestamppb.New(info.StoppedAt)

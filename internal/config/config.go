@@ -283,7 +283,8 @@ type ProviderConfig struct {
 	// is unavailable at session start time. At most 2 entries are allowed.
 	Fallbacks []string `yaml:"fallbacks"`
 	// Transport selects the provider transport backend. Supported values are
-	// "" (default PTY/stdio), and "opencode_server" (headless OpenCode HTTP/SSE).
+	// "" (native provider with structured reporting where supported),
+	// "stdio" (plain PTY/stdio), and "opencode_server" (OpenCode HTTP/SSE).
 	Transport string `yaml:"transport"`
 	// Hostname is the address to bind the OpenCode server to. Only used when
 	// Transport is "opencode_server". Defaults to "127.0.0.1".
@@ -722,10 +723,10 @@ func validate(cfg *Config) error {
 		}
 		if provider.Transport != "" {
 			switch provider.Transport {
-			case "opencode_server":
+			case "opencode_server", "stdio":
 				// valid
 			default:
-				return fmt.Errorf("config: providers.%s.transport must be one of: opencode_server; got %q", name, provider.Transport)
+				return fmt.Errorf("config: providers.%s.transport must be one of: stdio, opencode_server; got %q", name, provider.Transport)
 			}
 		}
 		if provider.PortRange != "" {

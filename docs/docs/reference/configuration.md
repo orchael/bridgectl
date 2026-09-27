@@ -61,6 +61,7 @@ allowed_paths:
 | `input.max_size_bytes` | Maximum input payload accepted per write. |
 | `providers.<name>.binary` | Provider executable. |
 | `providers.<name>.args` | Arguments prepended when starting the provider. |
+| `providers.<name>.transport` | Omit for native Claude/Codex structured reporting; `stdio` explicitly disables it; `opencode_server` selects OpenCode HTTP/SSE. |
 | `providers.<name>.required_env` | Environment variables required before the provider is considered healthy. |
 | `telemetry.source_id` | Stable bridge identity; generated privately when empty. |
 | `telemetry.actor_id`, `telemetry.source_label` | Optional descriptive labels, not authenticated identities. |
@@ -72,6 +73,10 @@ allowed_paths:
 
 See [Interaction Telemetry](../guides/telemetry.md) for collector operation,
 privacy behavior, and complete-capture configuration.
+
+See [Session Status](../guides/session-status.md) for Claude hooks, Codex
+app-server observation, and compatibility settings. Status reporting does not
+require telemetry to be enabled.
 
 ## Provider Fallbacks
 

@@ -6,7 +6,9 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,28 +64,14 @@ func (p *CodexAppServerProvider) PromptPattern() *regexp.Regexp {
 // like any other interactive provider. The companion is torn down when ctx
 // (the session's own context) is cancelled, whatever the reason.
 func (p *CodexAppServerProvider) BuildCommand(ctx context.Context, cfg bridge.SessionConfig) (*exec.Cmd, error) {
-	binPath, err := resolveBinaryPath(p.Binary(), "")
-	if err != nil {
-		return nil, fmt.Errorf("%w: resolve binary %q: %v", bridge.ErrProviderUnavailable, p.Binary(), err)
-	}
-
 	port, err := freeLocalPort()
 	if err != nil {
 		return nil, fmt.Errorf("codex-app-server: find a free port: %w", err)
 	}
 	endpoint := fmt.Sprintf("ws://127.0.0.1:%d", port)
 
-	env := cfg.Env
-	if env == nil {
-		env = FilterEnv(os.Environ())
-	} else {
-		env = append([]string(nil), env...)
-	}
-
-	appServerCmd := exec.CommandContext(ctx, binPath, "app-server", "--listen", endpoint)
-	appServerCmd.Dir = cfg.RepoPath
-	appServerCmd.Env = env
-	if err := applyCodexHomeAuth(appServerCmd); err != nil {
+	appServerCmd, tuiCmd, err := p.launchCommands(ctx, cfg, endpoint)
+	if err != nil {
 		return nil, err
 	}
 	if logFile, logErr := os.CreateTemp("", "bridgectl-codex-appserver-*.log"); logErr == nil {
@@ -119,13 +107,55 @@ func (p *CodexAppServerProvider) BuildCommand(ctx context.Context, cfg bridge.Se
 		p.mu.Unlock()
 	}()
 
-	tuiCmd := exec.CommandContext(ctx, binPath, "--remote", proxyEndpoint)
-	tuiCmd.Dir = cfg.RepoPath
-	tuiCmd.Env = append([]string(nil), env...)
-	if err := applyCodexHomeAuth(tuiCmd); err != nil {
-		return nil, err
-	}
+	// Insert before user arguments (which may include a positional prompt,
+	// resume/fork subcommand, or -- end-of-options delimiter).
+	prefix := codexLauncherPrefix(tuiCmd)
+	tuiCmd.Args = append(append(append([]string(nil), tuiCmd.Args[:prefix]...), "--remote", proxyEndpoint), tuiCmd.Args[prefix:]...)
 	return tuiCmd, nil
+}
+
+func codexLauncherPrefix(cmd *exec.Cmd) int {
+	name := strings.TrimSuffix(filepath.Base(cmd.Path), ".exe")
+	if (name == "node" || name == "nodejs") && len(cmd.Args) > 1 && !strings.HasPrefix(cmd.Args[1], "-") {
+		return 2
+	}
+	return 1
+}
+
+// Preserve the configured executable, launcher script, CLI arguments, options,
+// cwd and authentication when enabling the observer for the ordinary provider.
+func (p *CodexAppServerProvider) launchCommands(ctx context.Context, cfg bridge.SessionConfig, endpoint string) (*exec.Cmd, *exec.Cmd, error) {
+	tui, err := p.CodexProvider.BuildCommand(ctx, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	prefix := codexLauncherPrefix(tui)
+	args := tui.Args[prefix:]
+	companionArgs := append([]string(nil), tui.Args[1:prefix]...)
+	companionArgs = append(companionArgs, "app-server", "--listen", endpoint)
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if arg == "--remote" || strings.HasPrefix(arg, "--remote=") {
+			return nil, nil, fmt.Errorf("codex structured reporting owns --remote; use transport: stdio for an external app server")
+		}
+		switch {
+		case arg == "-c" || arg == "--config" || arg == "--enable" || arg == "--disable":
+			if i+1 >= len(args) {
+				return nil, nil, fmt.Errorf("codex %s requires a value", arg)
+			}
+			companionArgs = append(companionArgs, arg, args[i+1])
+			i++
+		case arg == "--strict-config" || strings.HasPrefix(arg, "--config=") || strings.HasPrefix(arg, "--enable=") || strings.HasPrefix(arg, "--disable="):
+			companionArgs = append(companionArgs, arg)
+		}
+	}
+	app := exec.CommandContext(ctx, tui.Path, companionArgs...)
+	app.Dir = tui.Dir
+	app.Env = append([]string(nil), tui.Env...)
+	return app, tui, nil
 }
 
 // WatchInteraction implements bridge.InteractionWatcher. It is only ever
@@ -216,4 +246,23 @@ func waitForPort(ctx context.Context, host string, port int, timeout time.Durati
 		}
 	}
 	return false
+}
+
+func (p *CodexAppServerProvider) ObserveActivity(id string, after uint64, events, bytes int) (bridge.ActivityWindow, error) {
+	p.mu.Lock()
+	sess := p.sessions[id]
+	p.mu.Unlock()
+	if sess == nil {
+		return bridge.ActivityWindow{}, bridge.ErrSessionNotFound
+	}
+	return sess.observer.Observe(after, events, bytes), nil
+}
+func (p *CodexAppServerProvider) SendInstruction(ctx context.Context, id, text string) error {
+	p.mu.Lock()
+	sess := p.sessions[id]
+	p.mu.Unlock()
+	if sess == nil {
+		return bridge.ErrSessionNotFound
+	}
+	return sess.observer.Instruct(ctx, text)
 }

@@ -9,6 +9,11 @@ A standalone gRPC daemon and SDK that manages AI agent subprocess lifecycles and
 
 Supported providers: **Claude**, **Codex**, **OpenCode**, **Gemini**
 
+Claude and Codex expose structured working, waiting, and idle status through
+`bridgectl session list` and the public Go/gRPC API. This works without a hosted
+service or telemetry. See [session status](docs/docs/guides/session-status.md)
+for setup, provider signals, compatibility mode, and troubleshooting.
+
 ---
 
 ## How It Works

@@ -66,6 +66,13 @@ bridgectl client renew
 
 ## Session Commands
 
+`session list` displays runtime `STATUS` and provider `INTERACTION` separately.
+Claude and Codex enable structured reporting by default. See
+[Session Status](../guides/session-status.md) for the states and capabilities.
+The automatically configured `session report-claude-hook --config <private-file>`
+helper accepts Claude hook JSON on stdin and reports only metadata to the local
+session observer; it does not grant permissions or answer questions.
+
 ```bash
 bridgectl session list
 bridgectl session watch <session-id>

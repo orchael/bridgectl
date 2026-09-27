@@ -140,6 +140,35 @@ message GetSessionResponse {
   int32 observer_count = 17;
   // repo_path is the working directory the agent session is running in.
   string repo_path = 18;
+  // Structured provider state, independent of process lifecycle and attachment.
+  SessionInteraction interaction = 19;
+}
+
+message SessionInteraction {
+  // unknown, working, waiting_for_input, waiting_for_approval, or idle.
+  string state = 1;
+  uint64 revision = 2;
+  google.protobuf.Timestamp updated_at = 3;
+  google.protobuf.Timestamp last_activity_at = 4;
+  PendingInteractionRequest pending_request = 5;
+  string source = 6;
+  InteractionCapability capability = 7;
+}
+
+message PendingInteractionRequest {
+  string id = 1;
+  // input or approval. Identity remains stable until the request changes.
+  string type = 2;
+  // Optional structured summary; never terminal output or transcript text.
+  string summary = 3;
+}
+
+message InteractionCapability {
+  bool interaction_state_supported = 1;
+  bool approval_state_supported = 2;
+  bool pending_summary_supported = 3;
+  bool remote_response_supported = 4;
+  bool structured_approval_supported = 5;
 }
 
 message ListSessionsRequest {

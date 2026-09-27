@@ -610,8 +610,8 @@ func Start(cfg Config) (*Server, error) {
 			ProviderRoot:   providerRoot,
 		}
 		var p bridge.Provider
-		switch {
-		case pc.Transport == "opencode_server":
+		switch pc.Transport {
+		case "opencode_server":
 			osCfg := provider.OpenCodeServerConfig{
 				ProviderID:     id,
 				Binary:         pc.Binary,
@@ -632,12 +632,8 @@ func Start(cfg Config) (*Server, error) {
 				osCfg.PortRangeEnd = end
 			}
 			p = provider.NewOpenCodeServerProvider(osCfg)
-		case id == "codex":
-			p = provider.NewCodexProvider(sc)
-		case id == "codex-app-server":
-			p = provider.NewCodexAppServerProvider(sc)
 		default:
-			p = provider.NewStdioProvider(sc)
+			p = sessionProvider(sc, pc.Transport)
 		}
 		if err := registry.Register(p); err != nil {
 			logger.Warn("skip config provider", "provider", id, "error", err)
@@ -683,15 +679,7 @@ func Start(cfg Config) (*Server, error) {
 			RequiredEnv:    pd.RequiredEnv,
 			StreamJSON:     pd.StreamJSON,
 		}
-		var p bridge.Provider
-		switch pd.ID {
-		case "codex":
-			p = provider.NewCodexProvider(sc)
-		case "codex-app-server":
-			p = provider.NewCodexAppServerProvider(sc)
-		default:
-			p = provider.NewStdioProvider(sc)
-		}
+		p := sessionProvider(sc, "")
 		if err := registry.Register(p); err != nil {
 			logger.Warn("skip provider", "provider", pd.ID, "error", err)
 			continue
@@ -891,7 +879,20 @@ func Start(cfg Config) (*Server, error) {
 					logger.Warn("bridge control: invalid or missing control credential, control disabled")
 				} else {
 					controlClient = bridgecontrol.New(bridgecontrol.Config{
-						CommandPath: filepath.Join(stateDir, "bridge-control-commands"),
+						TerminalSupervisor: func() *bridge.Supervisor { return sup },
+						CommandPath:        filepath.Join(stateDir, "bridge-control-commands"),
+						ObserveFunc: func(id string, after uint64, events, bytes int) (bridge.ActivityWindow, error) {
+							if sup == nil {
+								return bridge.ActivityWindow{}, bridge.ErrSessionNotFound
+							}
+							return sup.ObserveActivity(id, after, events, bytes)
+						},
+						InstructionFunc: func(ctx context.Context, id, _ string, text string) error {
+							if sup == nil {
+								return bridge.ErrSessionNotFound
+							}
+							return sup.SendInstruction(ctx, id, text)
+						},
 						ApprovalFunc: func(ctx context.Context, sessionID, pendingID, decision string) error {
 							if sup == nil {
 								return bridge.ErrSessionNotFound
@@ -1811,15 +1812,8 @@ func knownProviders() []providerDef {
 			PromptPattern:  `(?m)(>\s*$|›)`,
 		},
 		{
-			// codex-app-server is an opt-in variant of the plain "codex"
-			// interactive session above: the same PTY-attached TUI, plus
-			// authoritative interaction state (MAR-85) via a read-only
-			// observer connection to a companion `codex app-server`
-			// instance. It is never auto-selected in place of "codex" —
-			// detectProviders only auto-registers it when the "codex"
-			// binary is on PATH, same as the plain provider, and a session
-			// must explicitly request provider "codex-app-server" to use
-			// it. See internal/provider/codex_app_server.go.
+			// Compatibility alias: ordinary codex also uses structured
+			// app-server reporting. transport: stdio explicitly opts out.
 			ID:             "codex-app-server",
 			Binary:         "codex",
 			Args:           nil,

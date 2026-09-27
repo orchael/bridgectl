@@ -1,7 +1,7 @@
 // Package codexapp adapts Codex app-server interaction state and request-bound
-// input responses. Proxy observes the real TUI owner connection and answers
-// only an explicitly supported outstanding input request. It never starts a
-// turn or converts approvals into terminal input. Watch remains read-only.
+// input responses and explicit instructions. Proxy observes the real TUI owner
+// connection; pending replies stay request-bound, while explicit instructions
+// use turn/start or turn/steer on that existing thread. Watch remains read-only.
 // See docs/pending-input-response.md for protocol and ownership boundaries.
 package codexapp
 

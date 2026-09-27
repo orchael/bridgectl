@@ -2,6 +2,10 @@
 title: Interaction Telemetry
 ---
 
+Telemetry collects analytics and inferred question/answer events. Live
+[session status](session-status.md) is a separate structured-provider feature;
+it works without telemetry and does not infer waits from this event stream.
+
 Telemetry is opt-in. The bridge writes redacted events to a bounded local
 outbox before it streams immutable segments to the collector over gRPC. The
 collector durably writes the same segment format to its Docker volume and can
