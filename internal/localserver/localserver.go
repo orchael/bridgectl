@@ -879,7 +879,8 @@ func Start(cfg Config) (*Server, error) {
 					logger.Warn("bridge control: invalid or missing control credential, control disabled")
 				} else {
 					controlClient = bridgecontrol.New(bridgecontrol.Config{
-						CommandPath: filepath.Join(stateDir, "bridge-control-commands"),
+						TerminalSupervisor: func() *bridge.Supervisor { return sup },
+						CommandPath:        filepath.Join(stateDir, "bridge-control-commands"),
 						ObserveFunc: func(id string, after uint64, events, bytes int) (bridge.ActivityWindow, error) {
 							if sup == nil {
 								return bridge.ActivityWindow{}, bridge.ErrSessionNotFound

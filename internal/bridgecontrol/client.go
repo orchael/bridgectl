@@ -41,11 +41,12 @@ var minIdleReadTimeout = 30 * time.Second
 // enrollment has no control endpoint/credential, per the "no Bridge
 // configuration means no control connection is attempted" invariant.
 type Config struct {
-	CommandPath     string
-	ObserveFunc     func(string, uint64, int, int) (bridge.ActivityWindow, error)
-	InstructionFunc func(context.Context, string, string, string) error
-	RespondFunc     func(context.Context, string, string, string) error
-	ApprovalFunc    func(context.Context, string, string, string) error
+	TerminalSupervisor func() *bridge.Supervisor
+	CommandPath        string
+	ObserveFunc        func(string, uint64, int, int) (bridge.ActivityWindow, error)
+	InstructionFunc    func(context.Context, string, string, string) error
+	RespondFunc        func(context.Context, string, string, string) error
+	ApprovalFunc       func(context.Context, string, string, string) error
 	// Endpoint is the control-plane WebSocket URL, e.g.
 	// "wss://control.bridge.orchael.dev/v1/control". Taken verbatim from
 	// Bridge's enrollment response; never hard-coded here.
@@ -426,6 +427,8 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, heartbeatInter
 // Each read is individually bounded by idleTimeout so a peer that stops
 // responding entirely (rather than closing cleanly) is still detected.
 func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idleTimeout time.Duration, errCh chan<- error) {
+	terminals := &terminalManager{supervisor: c.cfg.TerminalSupervisor, ttl: 15 * time.Second}
+	defer terminals.close()
 	for {
 		rctx, cancel := context.WithTimeout(ctx, idleTimeout)
 		_, data, err := conn.Read(rctx)
@@ -453,6 +456,18 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idleTimeout
 			return
 		}
 		switch env.Type {
+		case "terminal_request":
+			var request TerminalRequest
+			if json.Unmarshal(env.Payload, &request) != nil {
+				continue
+			}
+			result := TerminalResult{ID: request.ID, Code: "invalid_request"}
+			if request.OrganizationID == c.organizationID && request.InstallationID == c.installationID {
+				result = terminals.handle(request)
+			}
+			if err := c.writeEnvelope(ctx, conn, "terminal_result", result); err != nil {
+				return
+			}
 		case "observe_session":
 			var request ObservationRequest
 			if json.Unmarshal(env.Payload, &request) != nil {
@@ -610,7 +625,7 @@ func (c *Client) sendHello(ctx context.Context, conn *websocket.Conn) error {
 	if len(version) > maxBridgectlVersion {
 		version = version[:maxBridgectlVersion]
 	}
-	caps, _ := json.Marshal(map[string]bool{"observe_session": c.cfg.ObserveFunc != nil, "send_instruction": c.cfg.InstructionFunc != nil})
+	caps, _ := json.Marshal(map[string]bool{"terminal_session": c.cfg.TerminalSupervisor != nil, "observe_session": c.cfg.ObserveFunc != nil, "send_instruction": c.cfg.InstructionFunc != nil})
 	return c.writeEnvelope(ctx, conn, msgHello, helloPayload{BridgectlVersion: version, Capabilities: caps})
 }
 

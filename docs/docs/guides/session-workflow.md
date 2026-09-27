@@ -7,6 +7,9 @@ Sessions are the unit of work in AI Agent Bridge. A session belongs to a project
 Claude and Codex also report [structured session status](session-status.md),
 independent of terminal attachment, runtime lifecycle, and telemetry collection.
 
+See [Terminal Watch and Attach](terminal-control.md) for browser roles, replay,
+writer leases, and the optional outbound terminal protocol.
+
 ```mermaid
 sequenceDiagram
   participant Client
