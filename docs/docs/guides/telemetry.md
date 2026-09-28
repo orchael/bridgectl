@@ -24,6 +24,43 @@ flowchart LR
 
 ## Collect derived question telemetry
 
+### Isolated local Bridge/S3 smoke test
+
+The repository-root `config.yaml` sends full redacted interaction events to
+`https://bridge.orchael.dev` and uses enrollment credentials in
+`/tmp/bridgectl-telemetry-test`. Start the Bridge stack with its S3 configuration
+first. From the bridgectl repository root:
+
+```bash
+make build-cli
+export BRIDGECTL_STATE_DIR=/tmp/bridgectl-telemetry-test
+install -d -m 700 "$BRIDGECTL_STATE_DIR"
+# Seed login's config discovery so it cannot fall back to your normal config.
+# Keep an existing test enrollment config if this is a repeated run.
+test -e "$BRIDGECTL_STATE_DIR/bridge.yaml" || (umask 077; cp config.yaml "$BRIDGECTL_STATE_DIR/bridge.yaml")
+bin/bridgectl login --bridge https://bridge.orchael.dev
+bin/bridgectl server start --config ./config.yaml --log-level info
+```
+
+In a second terminal, from the same repository root:
+
+```bash
+export BRIDGECTL_STATE_DIR=/tmp/bridgectl-telemetry-test
+bin/bridgectl run --provider echo .
+```
+
+Type a short test message and press Enter. Wait a few seconds for delivery and
+check the Bridge S3 prefix for new JSON objects containing `user_input` and
+`provider_output`. Press **Ctrl-]** to detach. Use the same state-directory
+export for `whoami`, `doctor`, `session list`, and `server stop`; otherwise those
+commands target your normal installation. The daemon reads the repository config
+explicitly; login updates only the seeded config and credentials in `/tmp`.
+State includes the socket, enrollment, and telemetry spool.
+If `/tmp` is cleared, repeat enrollment. This small test does not resolve the
+known full-capture and upload-batching limitations.
+
+### Standalone collector configuration
+
 ```yaml
 telemetry:
   enabled: true
