@@ -1,0 +1,25 @@
+# Local Bridge/S3 smoke test. Run every command with:
+# export BRIDGECTL_STATE_DIR=/tmp/bridgectl-telemetry-test
+# Start explicitly with: bin/bridgectl server start --config ./config.yaml
+# No AWS credentials belong here; only the Bridge API accesses S3.
+security:
+  transport:
+    mode: local
+
+telemetry:
+  enabled: true
+  collector_url: https://bridge.orchael.dev/v1/telemetry/segments
+  collector_credential_file: /tmp/bridgectl-telemetry-test/bridge-credentials.json
+  kinds: [all]
+  include_redacted_text: true
+  flush_interval: 30s
+  retry_interval: 1s
+  max_segment_bytes: 10485760
+  max_disk_space: 100MB
+
+control:
+  endpoint: wss://control.bridge.orchael.dev/v1/control
+  credential_file: /tmp/bridgectl-telemetry-test/bridge-credentials.json
+
+repo_setup:
+  enabled: false

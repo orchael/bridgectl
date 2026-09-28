@@ -50,6 +50,7 @@ func NewLiveCollectorForSource(sink Sink, queueSize int, includeRedactedText boo
 func NewLiveCollectorWithIdentity(sink Sink, queueSize int, includeRedactedText bool, identity LiveIdentity, onError func(error), kinds ...EventKind) *LiveCollector {
 	contextSink := &sessionContextSink{sink: sink, discover: DiscoverSessionContext}
 	async := NewAsyncSink(contextSink, queueSize, onError)
+	async.setCapturePolicy(kinds, includeRedactedText)
 	filtered := NewFilteredSink(async, kinds...)
 	return &LiveCollector{
 		analyzer:    NewAnalyzer(filtered, nil, WithIncludeRedactedText(includeRedactedText)),

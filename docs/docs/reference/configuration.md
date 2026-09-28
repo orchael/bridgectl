@@ -67,7 +67,7 @@ allowed_paths:
 | `telemetry.actor_id`, `telemetry.source_label` | Optional descriptive labels, not authenticated identities. |
 | `telemetry.identity_key_file` | Private 32-byte HMAC key used for machine, directory, and repository pseudonyms. |
 | `telemetry.kinds` | Retained event kinds; `[all]` enables the full redacted interaction stream. |
-| `telemetry.flush_interval` | Maximum age of an active segment before sealing; defaults to `10s`. |
+| `telemetry.flush_interval` | Maximum age of an active segment before sealing; defaults to `30s`. |
 | `telemetry.max_disk_space` | Bounded local spool budget; defaults to `1GB`. |
 | `allowed_paths` | Parent paths under which sessions may run. |
 
@@ -142,3 +142,10 @@ bin/bridgectl server start --db-path ~/.config/bridgectl/sessions.db
 ```
 
 On restart, terminal session history can be replayed as terminal history.
+
+Telemetry completeness checkpoints are automatic; no extra configuration is needed.
+They report the selected capture policy and delivery losses. HTTPS upload batching
+is independently capped at 1 MiB per request and 1,000 records. The local
+`max_segment_bytes` limit remains 10 MiB by default; the repository smoke-test
+`config.yaml` now uses that same limit. See [Telemetry](../guides/telemetry.md) for
+checkpoint scope, fragment reconstruction, and retry behavior.

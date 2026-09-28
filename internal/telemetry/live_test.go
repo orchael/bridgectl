@@ -29,7 +29,7 @@ func TestLiveCollectorFramesProviderFixtures(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			events := sink.snapshot()
+			events := capturedEvents(sink.snapshot())
 			if len(events) != 4 {
 				t.Fatalf("events=%+v, want lifecycle/question/answer/lifecycle", events)
 			}
@@ -56,7 +56,7 @@ func TestLiveCollectorDeduplicatesRedrawAndCanOmitText(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	events := sink.snapshot()
+	events := capturedEvents(sink.snapshot())
 	questions := 0
 	for _, event := range events {
 		if event.Kind == EventQuestion {
@@ -86,7 +86,7 @@ func TestLiveCollectorFiltersEventKindsBeforeQueueing(t *testing.T) {
 	if err := collector.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	events := sink.snapshot()
+	events := capturedEvents(sink.snapshot())
 	if len(events) != 2 || events[0].Kind != EventQuestion || events[1].Kind != EventAnswer || events[0].Sequence != 1 || events[1].Sequence != 2 {
 		t.Fatalf("filtered events=%+v", events)
 	}
@@ -111,7 +111,7 @@ func TestLiveCollectorCapturesFullBidirectionalInteraction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	events := sink.snapshot()
+	events := capturedEvents(sink.snapshot())
 	if len(events) != 7 {
 		t.Fatalf("events=%+v, want four provider chunks, user input, question, and answer", events)
 	}
@@ -169,7 +169,7 @@ func TestLiveCollectorReassemblesSplitUTF8AndSecrets(t *testing.T) {
 	if err := collector.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	events := sink.snapshot()
+	events := capturedEvents(sink.snapshot())
 	joined := ""
 	var sawEuro, sawInput, sawRedaction bool
 	for _, event := range events {
@@ -193,7 +193,7 @@ func TestLiveCollectorKeepsMultilineTerminalControlsPrivate(t *testing.T) {
 	if err := collector.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	events := sink.snapshot()
+	events := capturedEvents(sink.snapshot())
 	if len(events) != 1 || events[0].Kind != EventProviderOutput || events[0].Text != "beforeafter\n" {
 		t.Fatalf("terminal payload leaked or split a question: %+v", events)
 	}
@@ -208,7 +208,7 @@ func TestLiveCollectorPreservesRecordsAfterInvalidUTF8(t *testing.T) {
 	if err := collector.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	events := sink.snapshot()
+	events := capturedEvents(sink.snapshot())
 	if len(events) != 2 || events[0].OmittedReason != OmittedInvalidUTF8 || events[0].ByteCount != 2 || events[1].Text != "recoverable output\n" {
 		t.Fatalf("invalid record discarded a recoverable valid record: %+v", events)
 	}
@@ -226,7 +226,7 @@ func TestLiveCollectorRetainsLongValidInteraction(t *testing.T) {
 	if err := collector.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	events := sink.snapshot()
+	events := capturedEvents(sink.snapshot())
 	if len(events) != 1 || events[0].Text != content || events[0].OmittedReason != "" {
 		t.Fatalf("long interaction was not retained: %+v", events)
 	}
@@ -242,7 +242,7 @@ func TestLiveCollectorBoundsOversizedUnterminatedInteraction(t *testing.T) {
 	if err := collector.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	events := sink.snapshot()
+	events := capturedEvents(sink.snapshot())
 	if len(events) != 1 || events[0].Text != "" || events[0].OmittedReason != OmittedBufferLimit || events[0].ByteCount != len(content) || events[0].ContentHash == "" {
 		t.Fatalf("oversized interaction was not bounded with explicit metadata: %+v", events)
 	}
@@ -312,7 +312,7 @@ func TestLiveCollectorContextDiscoveryDoesNotBlockSessionIO(t *testing.T) {
 	if err := collector.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	events := sink.snapshot()
+	events := capturedEvents(sink.snapshot())
 	if len(events) != 4 || events[0].Kind != EventSessionStarted || events[1].Kind != EventSessionContext || events[2].Kind != EventProviderOutput || events[3].Kind != EventSessionEnded || events[1].Context == nil {
 		t.Fatalf("discovery changed lifecycle/event order: %+v", events)
 	}
@@ -358,4 +358,16 @@ func TestFramerDoesNotTreatANSIPrivateMarkerAsQuestion(t *testing.T) {
 	if len(frames) != 2 || !strings.Contains(frames[0], "ready") || frames[1] != "Proceed?" {
 		t.Fatalf("frames=%q", frames)
 	}
+}
+
+// Capture assertions concern sequenced data. Checkpoint content and loss
+// reporting are covered separately in completeness_test.go.
+func capturedEvents(events []Event) []Event {
+	var captured []Event
+	for _, event := range events {
+		if event.Kind != EventTelemetryCheckpoint {
+			captured = append(captured, event)
+		}
+	}
+	return captured
 }

@@ -778,7 +778,7 @@ func Start(cfg Config) (*Server, error) {
 				}
 				return nil, fmt.Errorf("invalid telemetry collector credential")
 			}
-			eventSink = telemetry.NewHTTPForwardingSink(segmentSpool, telemetryCfg.CollectorURL, credential.CollectorCredential, cfg.Version, config.ParseDuration(telemetryCfg.FlushInterval, time.Second), config.ParseDuration(telemetryCfg.RetryInterval, time.Second), func(err error) { logger.Warn("telemetry delivery", "error", err) })
+			eventSink = telemetry.NewHTTPForwardingSink(segmentSpool, telemetryCfg.CollectorURL, credential.CollectorCredential, cfg.Version, config.ParseDuration(telemetryCfg.FlushInterval, telemetry.DefaultFlushInterval), config.ParseDuration(telemetryCfg.RetryInterval, time.Second), func(err error) { logger.Warn("telemetry delivery", "error", err) })
 			destination = "https_collector"
 		} else if telemetryCfg.CollectorTarget != "" {
 			var transportCredentials credentials.TransportCredentials
@@ -824,14 +824,14 @@ func Start(cfg Config) (*Server, error) {
 				segmentSpool,
 				bridgev1.NewTelemetryCollectorServiceClient(conn),
 				conn,
-				config.ParseDuration(telemetryCfg.FlushInterval, time.Second),
+				config.ParseDuration(telemetryCfg.FlushInterval, telemetry.DefaultFlushInterval),
 				config.ParseDuration(telemetryCfg.RetryInterval, time.Second),
 				func(err error) { logger.Warn("telemetry delivery", "error", err) },
 			)
 			destination = "grpc_collector"
 		} else {
 			eventSink = telemetry.NewLocalSpoolingSink(segmentSpool,
-				config.ParseDuration(telemetryCfg.FlushInterval, 10*time.Second),
+				config.ParseDuration(telemetryCfg.FlushInterval, telemetry.DefaultFlushInterval),
 				func(err error) { logger.Warn("telemetry local flush", "error", err) },
 			)
 		}

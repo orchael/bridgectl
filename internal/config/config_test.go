@@ -40,8 +40,8 @@ sessions:
 	if cfg.Telemetry.Enabled || cfg.Telemetry.QueueSize <= 0 || cfg.Telemetry.RollingWindow == "" {
 		t.Fatalf("unexpected telemetry defaults: %+v", cfg.Telemetry)
 	}
-	if cfg.Telemetry.FlushInterval != "10s" {
-		t.Fatalf("Telemetry.FlushInterval=%q, want 10s", cfg.Telemetry.FlushInterval)
+	if cfg.Telemetry.FlushInterval != "30s" {
+		t.Fatalf("Telemetry.FlushInterval=%q, want 30s", cfg.Telemetry.FlushInterval)
 	}
 	if len(cfg.Telemetry.Kinds) != 5 || cfg.Telemetry.MaxSegmentBytes != 10<<20 || cfg.Telemetry.MaxDiskSpace != "1GB" {
 		t.Fatalf("unexpected telemetry retention defaults: %+v", cfg.Telemetry)
