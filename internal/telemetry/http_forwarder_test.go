@@ -165,7 +165,7 @@ func TestHTTPForwardingSinkRecordFailsAfterClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(202) }))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { ackTelemetryRequest(w, r) }))
 	defer server.Close()
 	sink := NewHTTPForwardingSink(spool, server.URL, "brc_test-credential", "1.2.3", time.Hour, time.Hour, func(error) {})
 	if err := sink.Close(context.Background()); err != nil {
@@ -206,7 +206,7 @@ func TestHTTPForwardingSinkDeliversWithAuthorizationHeader(t *testing.T) {
 	var gotAuth atomic.Value
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth.Store(r.Header.Get("Authorization"))
-		w.WriteHeader(http.StatusAccepted)
+		ackTelemetryRequest(w, r)
 	}))
 	defer server.Close()
 
@@ -235,7 +235,7 @@ func TestHTTPForwardingSinkRetainsSegmentOnNon2xxAndRetries(t *testing.T) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		w.WriteHeader(http.StatusAccepted)
+		ackTelemetryRequest(w, r)
 	}))
 	defer server.Close()
 
@@ -275,7 +275,7 @@ func TestHTTPForwardingSinkCloseCancelsInFlightUpload(t *testing.T) {
 	unblock := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-unblock
-		w.WriteHeader(http.StatusAccepted)
+		ackTelemetryRequest(w, r)
 	}))
 	defer func() {
 		close(unblock)
@@ -381,4 +381,16 @@ func TestHTTPForwardingSinkErrorIncludesBridgeErrorCodeNotRawBody(t *testing.T) 
 	if strings.Contains(gotErr.Error(), "brc_should-not-be-logged") {
 		t.Fatalf("error must not include the raw response body: %v", gotErr)
 	}
+}
+
+func ackTelemetryRequest(w http.ResponseWriter, r *http.Request) {
+	var env struct {
+		SegmentID string `json:"segment_id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&env)
+	ackTelemetryID(w, env.SegmentID)
+}
+func ackTelemetryID(w http.ResponseWriter, id string) {
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]string{"segment_id": id, "status": "accepted", "storage": "s3", "object_key": "dev/" + id})
 }

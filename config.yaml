@@ -14,7 +14,7 @@ telemetry:
   include_redacted_text: true
   flush_interval: 30s
   retry_interval: 1s
-  max_segment_bytes: 65536
+  max_segment_bytes: 10485760
   max_disk_space: 100MB
 
 control:

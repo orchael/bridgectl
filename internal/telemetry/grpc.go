@@ -92,7 +92,7 @@ func (s *GRPCCollectorServer) validateJSONL(data []byte) error {
 		if err := validateCollectorEvent(event); err != nil {
 			return err
 		}
-		if len(s.kinds) > 0 && !s.kinds[event.Kind] {
+		if event.Kind != EventTelemetryCheckpoint && len(s.kinds) > 0 && !s.kinds[event.Kind] {
 			return errors.New("event kind is not enabled")
 		}
 		count++
@@ -116,7 +116,7 @@ func validateCollectorEvent(event Event) error {
 	if event.SessionID == "" {
 		return errors.New("missing session ID")
 	}
-	if event.Sequence == 0 {
+	if event.Sequence == 0 && event.Kind != EventTelemetryCheckpoint {
 		return errors.New("missing sequence")
 	}
 	if event.SchemaVersion == 2 && event.SourceID == "" {
@@ -134,7 +134,21 @@ func validateCollectorEvent(event Event) error {
 	if event.Kind != EventSessionContext && event.Context != nil {
 		return errors.New("session context metadata is only valid on session_context events")
 	}
+	if event.Kind != EventTelemetryCheckpoint && event.Completeness != nil {
+		return errors.New("completeness metadata is only valid on telemetry_checkpoint events")
+	}
 	switch event.Kind {
+	case EventTelemetryCheckpoint:
+		c := event.Completeness
+		if event.SchemaVersion != 2 || event.Sequence != 0 || c == nil || c.QueueDroppedEvents > c.AttemptedEvents || c.SinkFailedEvents > c.AttemptedEvents-c.QueueDroppedEvents || c.OmittedEvents > c.AttemptedEvents || event.Text != "" {
+			return errors.New("invalid completeness checkpoint")
+		}
+		for _, kind := range c.CaptureKinds {
+			if !validEventKind(kind) || kind == EventTelemetryCheckpoint {
+				return errors.New("invalid capture policy")
+			}
+		}
+		return nil
 	case EventSessionContext:
 		if event.SchemaVersion != 2 || event.Context == nil || !validSessionContext(event.ActorID, *event.Context) {
 			return errors.New("invalid session context metadata")

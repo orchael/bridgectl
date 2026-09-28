@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 var (
@@ -24,6 +25,12 @@ type AsyncSink struct {
 	dropped  atomic.Uint64
 	failures atomic.Uint64
 
+	sessions       map[sessionIdentity]*completenessState
+	captureKinds   []EventKind
+	includeText    bool
+	checkpointWake chan struct{}
+	checkpointErr  error
+
 	downstreamCloseOnce sync.Once
 	downstreamCloseErr  error
 }
@@ -34,6 +41,7 @@ func NewAsyncSink(sink Sink, queueSize int, onError func(error)) *AsyncSink {
 	}
 	s := &AsyncSink{
 		sink: sink, queue: make(chan Event, queueSize), done: make(chan struct{}), onError: onError,
+		sessions: make(map[sessionIdentity]*completenessState), checkpointWake: make(chan struct{}, 1),
 	}
 	go s.run()
 	return s
@@ -41,30 +49,66 @@ func NewAsyncSink(sink Sink, queueSize int, onError func(error)) *AsyncSink {
 
 func (s *AsyncSink) run() {
 	defer close(s.done)
-	for event := range s.queue {
-		if s.sink == nil {
-			continue
-		}
-		if err := s.sink.Record(event); err != nil {
-			s.failures.Add(1)
-			if s.onError != nil {
-				s.onError(err)
+	ticker := time.NewTicker(DefaultFlushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case event, ok := <-s.queue:
+			if !ok {
+				s.checkpointErr = s.flushCheckpoints(false)
+				return
 			}
+			var err error
+			if s.sink != nil {
+				err = s.sink.Record(event)
+			}
+			s.mu.Lock()
+			if state := s.sessions[eventKey(event)]; state != nil {
+				state.processed++
+				state.revision++
+				if err != nil {
+					state.stats.SinkFailedEvents++
+				}
+			}
+			s.mu.Unlock()
+			if err != nil {
+				s.failures.Add(1)
+				if s.onError != nil {
+					s.onError(err)
+				}
+			}
+			_ = s.flushCheckpoints(true)
+		case <-s.checkpointWake:
+			_ = s.flushCheckpoints(true)
+		case <-ticker.C:
+			_ = s.flushCheckpoints(false)
 		}
 	}
 }
 
 func (s *AsyncSink) Record(event Event) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.closed {
 		return ErrSinkClosed
+	}
+	state := s.completenessLocked(event)
+	if state != nil {
+		state.stats.AttemptedEvents++
+		state.stats.LastSequence = max(state.stats.LastSequence, event.Sequence)
+		if event.OmittedReason != "" {
+			state.stats.OmittedEvents++
+		}
 	}
 	select {
 	case s.queue <- event:
 		return nil
 	default:
 		s.dropped.Add(1)
+		if state != nil {
+			state.stats.QueueDroppedEvents++
+		}
+		s.wakeCheckpoint()
 		return ErrQueueFull
 	}
 }
@@ -87,7 +131,7 @@ func (s *AsyncSink) Close(ctx context.Context) error {
 				s.downstreamCloseErr = closer.Close(ctx)
 			}
 		})
-		return s.downstreamCloseErr
+		return errors.Join(s.checkpointErr, s.downstreamCloseErr)
 	case <-ctx.Done():
 		return ctx.Err()
 	}

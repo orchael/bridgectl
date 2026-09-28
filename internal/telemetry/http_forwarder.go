@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,13 @@ import (
 )
 
 const httpForwarderMaxBackoff = 30 * time.Second
+
+// Only data-specific 4xx rejections can be skipped to avoid head-of-line
+// blocking. Authentication failures, outages and rate limits stop the pass.
+type telemetryBatchRejection struct{ err error }
+
+func (e *telemetryBatchRejection) Error() string { return e.err.Error() }
+func (e *telemetryBatchRejection) Unwrap() error { return e.err }
 
 // HTTPForwardingSink delivers the existing normalized JSONL spool to Bridge's
 // HTTPS collector. The credential is held only in memory and is never logged.
@@ -97,50 +105,85 @@ func (s *HTTPForwardingSink) upload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var failures []error
 	for _, seg := range segs {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(failures, err)...)
+		}
 		data, err := s.spool.Read(seg.ID)
 		if err != nil {
-			return err
+			failures = append(failures, err)
+			continue
 		}
-		payload, err := bridgeEnvelope(seg.ID, data, s.version)
+		batches, err := bridgeBatches(seg.ID, data, s.version)
 		if err != nil {
-			return err
+			failures = append(failures, fmt.Errorf("segment %s: %w", seg.ID, err))
+			continue
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint, bytes.NewReader(payload))
-		if err != nil {
-			return err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+s.credential)
-		resp, err := s.client.Do(req)
-		if err != nil {
-			return err
-		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		_ = resp.Body.Close()
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			// Extract only Bridge's well-known structured error code, never
-			// the raw response body: a malicious or misconfigured endpoint
-			// could otherwise get its response (which might reflect request
-			// headers, including the brc_ credential) written into local
-			// delivery logs. Bridge's own error responses are always
-			// {"error":"<code>"}, so this still makes persistent failures
-			// like unsupported_event_schema diagnosable.
-			var parsed struct {
-				Error string `json:"error"`
+		accepted := true
+		for _, batch := range batches {
+			if err := s.uploadBatch(ctx, batch); err != nil {
+				accepted = false
+				failures = append(failures, fmt.Errorf("batch %s: %w", batch.ID, err))
+				var rejection *telemetryBatchRejection
+				if !errors.As(err, &rejection) {
+					return errors.Join(failures...)
+				}
 			}
-			_ = json.Unmarshal(body, &parsed)
-			if parsed.Error != "" {
-				return fmt.Errorf("telemetry upload returned HTTP %d: %s", resp.StatusCode, parsed.Error)
+		}
+		// Retain the immutable parent until every child is acknowledged. Replaying
+		// accepted children is safe and avoids a second, crash-sensitive receipt log.
+		if accepted {
+			if err := s.spool.Remove(seg.ID); err != nil {
+				failures = append(failures, err)
 			}
-			return fmt.Errorf("telemetry upload returned HTTP %d", resp.StatusCode)
 		}
-		if err := s.spool.Remove(seg.ID); err != nil {
-			return err
+	}
+	return errors.Join(failures...)
+}
+
+func (s *HTTPForwardingSink) uploadBatch(ctx context.Context, batch bridgeBatch) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint, bytes.NewReader(batch.Body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.credential)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return err
+	}
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	_ = resp.Body.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var parsed struct {
+			Error string `json:"error"`
 		}
+		_ = json.Unmarshal(body, &parsed)
+		err := fmt.Errorf("telemetry upload returned HTTP %d", resp.StatusCode)
+		if parsed.Error != "" {
+			err = fmt.Errorf("telemetry upload returned HTTP %d: %s", resp.StatusCode, parsed.Error)
+		}
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != 401 && resp.StatusCode != 403 && resp.StatusCode != 408 && resp.StatusCode != 429 {
+			return &telemetryBatchRejection{err: err}
+		}
+		return err
+	}
+	var receipt struct {
+		SegmentID string `json:"segment_id"`
+		Status    string `json:"status"`
+		Storage   string `json:"storage"`
+		ObjectKey string `json:"object_key"`
+	}
+	if json.Unmarshal(body, &receipt) != nil || receipt.SegmentID != batch.ID || (receipt.Status != "accepted" && receipt.Status != "already_accepted") || receipt.Storage != "s3" || receipt.ObjectKey == "" {
+		return fmt.Errorf("telemetry upload missing matching S3 receipt")
 	}
 	return nil
 }
+
 func (s *HTTPForwardingSink) Close(ctx context.Context) error {
 	s.mu.Lock()
 	if !s.closed {
@@ -167,6 +210,9 @@ func bridgeEnvelope(id string, jsonl []byte, collectorVersion string) ([]byte, e
 			return nil, err
 		}
 		payload := map[string]any{"schema_version": e.SchemaVersion, "sequence": e.Sequence}
+		if e.Completeness != nil {
+			payload["completeness"] = e.Completeness
+		}
 		if e.Class != "" {
 			payload["class"] = e.Class
 		}

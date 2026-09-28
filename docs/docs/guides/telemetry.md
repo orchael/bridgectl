@@ -56,16 +56,17 @@ export for `whoami`, `doctor`, `session list`, and `server stop`; otherwise thos
 commands target your normal installation. The daemon reads the repository config
 explicitly; login updates only the seeded config and credentials in `/tmp`.
 State includes the socket, enrollment, and telemetry spool.
-If `/tmp` is cleared, repeat enrollment. This small test does not resolve the
-known full-capture and upload-batching limitations.
+If `/tmp` is cleared, repeat enrollment. Completeness is measured for the configured capture policy; provider activity
+that has no capture hook is outside that scope.
 
 ### Delivery defaults and inspecting Bridge objects
 
 Telemetry defaults to a 30-second flush interval; an explicit `flush_interval`
 overrides it. This reduces small uploads while allowing roughly 30 seconds of
 delivery delay under normal conditions. Shutdown also attempts a final flush.
-The local Bridge test keeps its 64 KiB segment limit; batching must still respect
-Bridge's 1 MiB HTTP request and 1,000-event limits.
+The local Bridge test uses the default 10 MiB local segment limit. HTTPS delivery
+splits sealed segments into requests of at most 1 MiB (including the JSON envelope)
+and 1,000 events. Local segment size no longer needs to match Bridge's HTTP limit.
 
 Bridge stores new uploads as `.json.gz` objects. To read one:
 
@@ -77,6 +78,51 @@ aws s3 cp 's3://orchael-bridge-telemetry-819363892004/<object-key>.json.gz' - \
 Existing `.json` objects remain readable with `aws s3 cp ... - | jq .`.
 This compression is in the Bridge HTTPS ingestion path; the standalone gRPC
 collector's JSONL storage format is unchanged.
+
+### Completeness checkpoints and delivery recovery
+
+Completeness tracking is on by default. The collector emits `telemetry_checkpoint`
+events about every 30 seconds after queued events drain, at a session end, and on
+graceful shutdown. These use sequence zero and bypass the bounded event queue.
+Their `completeness` payload records the selected-event count and last sequence,
+queue drops, downstream write failures, content omissions, observed start/end
+boundaries, selected kinds, and whether redacted text capture is enabled. Filtered
+lifecycle boundaries are still tracked. Checkpoints do not consume data sequence
+numbers. An empty `capture_kinds` list means all kinds.
+
+Checkpoints reach Bridge and S3 through the same durable spool as other events.
+They let an audit detect a dropped final event, even with no later sequence gap.
+The Bridge repository provides `scripts/telemetry_completeness.py` to audit a local
+S3 mirror; see its `docs/telemetry-ingestion-v1.md` for the command. The audit checks
+object checksums, deduplicates retries, reconstructs fragments, and reports
+`complete`, `incomplete`, `open`, or `unverified` per organization/source/session.
+It prints counters and missing ranges, never conversation text.
+
+“Complete” means all events selected by the recorded policy are present, with
+observed start/end boundaries and no known drops, failures, omissions, or conflicts.
+It does not prove capture of uninstrumented provider activity. A crash before the
+final checkpoint leaves the session open or unverified. A missing object may still
+be pending locally; re-sync after successful delivery before diagnosing permanent
+loss. Spool eviction appears as gaps when a checkpoint or later events survive;
+if every record for a session is lost, the audit cannot discover that session.
+
+HTTP batches have content-derived IDs and preserve each original event ID.
+Oversized individual events become `telemetry_fragment` records containing indexed
+base64 chunks of the exact normalized event plus its SHA-256. Readers must verify
+and reassemble every chunk before counting an event. No text is truncated to fit.
+A local record must still fit `max_segment_bytes`; write failures are counted in
+checkpoints. The 10 MiB default accommodates the live capture buffer and JSON escaping.
+
+The collector removes a local segment only after **every** child batch receives a
+matching Bridge S3 receipt. Failed parents remain queued; retries can replay already
+accepted children safely. Content changes (including a collector version upgrade)
+produce different batch IDs, while stable event IDs allow logical deduplication.
+Data-specific rejections do not prevent unrelated pending segments from being
+attempted. Authentication errors, connection failures, rate limits, and server
+outages stop the pass and trigger backoff.
+Checkpoint write failures are retried while running and returned on shutdown.
+Upgrade standalone gRPC collectors alongside clients to accept the new checkpoint
+kind; older collectors reject it.
 
 ### Standalone collector configuration
 

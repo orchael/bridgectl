@@ -4,7 +4,7 @@ import "sync"
 
 func validEventKind(kind EventKind) bool {
 	switch kind {
-	case EventSessionStarted, EventSessionContext, EventProviderOutput, EventUserInput, EventQuestion, EventAnswer, EventSessionEnded:
+	case EventSessionStarted, EventSessionContext, EventProviderOutput, EventUserInput, EventQuestion, EventAnswer, EventSessionEnded, EventTelemetryCheckpoint:
 		return true
 	default:
 		return false
@@ -40,6 +40,9 @@ func (s *FilteredSink) Record(event Event) error {
 			defer delete(s.sequence, key)
 		}
 		if _, ok := s.allowed[event.Kind]; !ok {
+			if tracker, ok := s.sink.(interface{ observeLifecycle(Event) }); ok {
+				tracker.observeLifecycle(event)
+			}
 			return nil
 		}
 		s.sequence[key]++

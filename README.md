@@ -243,6 +243,12 @@ authenticate bridge clients. Keep the collector behind an operator-managed
 network ACL or authenticated proxy. Native tenant/actor authentication is
 tracked in [orchael/bridge#5](https://github.com/orchael/bridge/issues/5).
 
+Completeness checkpoints are enabled by default and record capture scope, event
+counts, and delivery losses. HTTPS batches respect Bridge's 1 MiB/1,000-record
+limits, with lossless fragments for oversized events and matching S3 receipts
+required before deleting local data. See the [telemetry guide](docs/docs/guides/telemetry.md#completeness-checkpoints-and-delivery-recovery)
+for audit and recovery details.
+
 The bridge always writes redacted events to its bounded local spool before
 streaming them. The collector acknowledges a segment only after it is durably
 synced to the collector-owned volume. If the collector is unavailable, the
