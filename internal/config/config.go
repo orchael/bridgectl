@@ -505,7 +505,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Telemetry.RollingWindow = "168h"
 	}
 	if cfg.Telemetry.FlushInterval == "" {
-		cfg.Telemetry.FlushInterval = "10s"
+		cfg.Telemetry.FlushInterval = telemetry.DefaultFlushInterval.String()
 	}
 	if cfg.Telemetry.RetryInterval == "" {
 		cfg.Telemetry.RetryInterval = "1s"

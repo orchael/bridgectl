@@ -141,7 +141,7 @@ telemetry:
   kinds: ["question", "answer"]
   queue_size: 1024
   rolling_window: "168h"
-  flush_interval: "10s"
+  flush_interval: "30s"
   retry_interval: "1s"
   max_segment_bytes: 10485760
   max_disk_space: 1GB

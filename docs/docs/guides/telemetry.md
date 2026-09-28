@@ -49,8 +49,8 @@ export BRIDGECTL_STATE_DIR=/tmp/bridgectl-telemetry-test
 bin/bridgectl run --provider echo .
 ```
 
-Type a short test message and press Enter. Wait a few seconds for delivery and
-check the Bridge S3 prefix for new JSON objects containing `user_input` and
+Type a short test message and press Enter. Wait at least 30 seconds for delivery and
+check the Bridge S3 prefix for new gzip-compressed JSON objects containing `user_input` and
 `provider_output`. Press **Ctrl-]** to detach. Use the same state-directory
 export for `whoami`, `doctor`, `session list`, and `server stop`; otherwise those
 commands target your normal installation. The daemon reads the repository config
@@ -58,6 +58,25 @@ explicitly; login updates only the seeded config and credentials in `/tmp`.
 State includes the socket, enrollment, and telemetry spool.
 If `/tmp` is cleared, repeat enrollment. This small test does not resolve the
 known full-capture and upload-batching limitations.
+
+### Delivery defaults and inspecting Bridge objects
+
+Telemetry defaults to a 30-second flush interval; an explicit `flush_interval`
+overrides it. This reduces small uploads while allowing roughly 30 seconds of
+delivery delay under normal conditions. Shutdown also attempts a final flush.
+The local Bridge test keeps its 64 KiB segment limit; batching must still respect
+Bridge's 1 MiB HTTP request and 1,000-event limits.
+
+Bridge stores new uploads as `.json.gz` objects. To read one:
+
+```bash
+aws s3 cp 's3://orchael-bridge-telemetry-819363892004/<object-key>.json.gz' - \
+  --region us-east-1 | gzip -dc | jq .
+```
+
+Existing `.json` objects remain readable with `aws s3 cp ... - | jq .`.
+This compression is in the Bridge HTTPS ingestion path; the standalone gRPC
+collector's JSONL storage format is unchanged.
 
 ### Standalone collector configuration
 
@@ -68,7 +87,7 @@ telemetry:
   collector_insecure: true
   kinds: [session_started, session_context, question, answer, session_ended]
   include_redacted_text: true
-  flush_interval: 10s
+  flush_interval: 30s
   max_disk_space: 1GB
 ```
 

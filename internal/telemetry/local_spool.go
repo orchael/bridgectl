@@ -6,6 +6,9 @@ import (
 	"time"
 )
 
+// DefaultFlushInterval balances delivery latency against small-object overhead.
+const DefaultFlushInterval = 30 * time.Second
+
 // LocalSpoolingSink owns timed sealing for local-only telemetry. Persistence
 // callers run behind AsyncSink; sealed segments are safe for concurrent reports.
 type LocalSpoolingSink struct {
@@ -18,7 +21,7 @@ type LocalSpoolingSink struct {
 
 func NewLocalSpoolingSink(spool *SegmentSpool, flushInterval time.Duration, onError func(error)) *LocalSpoolingSink {
 	if flushInterval <= 0 {
-		flushInterval = 10 * time.Second
+		flushInterval = DefaultFlushInterval
 	}
 	sink := &LocalSpoolingSink{spool: spool, stop: make(chan struct{}), done: make(chan struct{})}
 	go func() {

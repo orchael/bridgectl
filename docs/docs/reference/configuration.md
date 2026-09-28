@@ -67,7 +67,7 @@ allowed_paths:
 | `telemetry.actor_id`, `telemetry.source_label` | Optional descriptive labels, not authenticated identities. |
 | `telemetry.identity_key_file` | Private 32-byte HMAC key used for machine, directory, and repository pseudonyms. |
 | `telemetry.kinds` | Retained event kinds; `[all]` enables the full redacted interaction stream. |
-| `telemetry.flush_interval` | Maximum age of an active segment before sealing; defaults to `10s`. |
+| `telemetry.flush_interval` | Maximum age of an active segment before sealing; defaults to `30s`. |
 | `telemetry.max_disk_space` | Bounded local spool budget; defaults to `1GB`. |
 | `allowed_paths` | Parent paths under which sessions may run. |
 

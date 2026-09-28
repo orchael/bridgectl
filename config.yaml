@@ -12,7 +12,7 @@ telemetry:
   collector_credential_file: /tmp/bridgectl-telemetry-test/bridge-credentials.json
   kinds: [all]
   include_redacted_text: true
-  flush_interval: 2s
+  flush_interval: 30s
   retry_interval: 1s
   max_segment_bytes: 65536
   max_disk_space: 100MB

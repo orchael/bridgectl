@@ -53,7 +53,7 @@ func (s *HTTPForwardingSink) Record(event Event) error {
 // collector more often than the backoff intends.
 func NewHTTPForwardingSink(spool *SegmentSpool, endpoint, credential, collectorVersion string, flushInterval, retryInterval time.Duration, onError func(error)) *HTTPForwardingSink {
 	if flushInterval <= 0 {
-		flushInterval = 10 * time.Second
+		flushInterval = DefaultFlushInterval
 	}
 	if retryInterval <= 0 {
 		retryInterval = time.Second
