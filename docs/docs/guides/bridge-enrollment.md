@@ -4,7 +4,15 @@ Bridge is optional. A bridgectl installation remains fully usable in standalone 
 
 ## Log in
 
-The production default is `https://bridge.orchael.com`. Development and end-to-end testing can select the development service explicitly:
+The production default is `https://bridge.orchael.com`. With v1.4.0 or newer:
+
+```sh
+bridgectl login https://bridge.orchael.com
+```
+
+The positional URL and `--bridge` are equivalent explicit selectors; use only
+one. Either overrides the environment and saved enrollment URL. Development
+and end-to-end testing can select the development service explicitly:
 
 ```sh
 BRIDGECTL_BRIDGE_URL=https://bridge.orchael.dev bridgectl login
@@ -29,6 +37,17 @@ BRIDGECTL_ORGANIZATION="Acme Inc" bridgectl login
 After approval, bridgectl stores enrollment metadata in `bridge-enrollment.json` and the telemetry-only `brc_` credential in `bridge-credentials.json` beneath the bridgectl state directory. Both files are restricted to the current user. The credential is never printed or included in `whoami` or `doctor` output.
 
 Login writes Bridge telemetry settings only when an explicit telemetry collector URL is not already configured. Existing standalone telemetry settings therefore remain authoritative.
+
+Enrollment also configures the returned outbound WSS control endpoint and a
+separate `bri_` control credential. No inbound port, Tailscale or step-ca setup
+is required for Bridge-managed operation. Existing explicitly configured direct
+listeners remain supported. If the daemon is already running, restart it to
+load the new settings; there is no login-triggered hot reload. Restart before
+starting work because the ai-desktop systemd unit stops its process group.
+If no daemon is running, the next `bridgectl run` starts it with the enrollment.
+
+See [production ai-desktop setup](production-bridge.md) for the exact upgrade
+and first-acceptance commands.
 
 ## Status and logout
 

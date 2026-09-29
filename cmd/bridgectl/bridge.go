@@ -404,7 +404,20 @@ func newBridgeLoginCmd() *cobra.Command {
 	var bridge string
 	var organization string
 	var force bool
-	cmd := &cobra.Command{Use: "login", Short: "Log into Bridge and enroll this installation", RunE: func(cmd *cobra.Command, _ []string) error { return runBridgeLogin(cmd, bridge, organization, force) }}
+	cmd := &cobra.Command{
+		Use: "login [bridge-url]", Short: "Log into Bridge and enroll this installation",
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			origin := bridge
+			if len(args) == 1 {
+				if cmd.Flags().Changed("bridge") {
+					return errors.New("specify either bridge-url or --bridge, not both")
+				}
+				origin = args[0]
+			}
+			return runBridgeLogin(cmd, origin, organization, force)
+		},
+	}
 	cmd.Flags().StringVar(&bridge, "bridge", "", "Bridge HTTPS origin")
 	cmd.Flags().StringVar(&organization, "organization", "", "default organization name to request")
 	cmd.Flags().BoolVar(&force, "force", false, "replace an existing enrollment")
@@ -487,6 +500,7 @@ func runBridgeLogin(cmd *cobra.Command, bridge, organization string, force bool)
 				return err
 			}
 			_, _ = fmt.Fprintln(out, "✓ Bridge authorization complete\n✓ Installation registered\n✓ Organization selected\n✓ Telemetry configured")
+			_, _ = fmt.Fprintln(out, "Restart an already-running bridgectl server to load the enrollment configuration.")
 			return nil
 		}
 		switch derr.Error {
