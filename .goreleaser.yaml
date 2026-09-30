@@ -73,7 +73,31 @@ homebrew_casks:
 
         brew install node@24
 
-      To run the daemon at login, see the launchd plist documented in the README.
+      To run the bridge server at login, install the launchd agent:
+
+        bridgectl server install-agent --start
+
+      The agent is generated from this binary's real path and inherits the PATH
+      of the shell you run it from, so it finds node and the provider CLIs.
+      Logs go to ~/Library/Logs/bridgectl/. Remove it with:
+
+        bridgectl server uninstall-agent
+
+    # Homebrew cannot install a launchd agent itself -- the cask "service"
+    # stanza installs macOS Service bundles into ~/Library/Services, not
+    # LaunchAgents -- and auto-starting a daemon on install would be
+    # inappropriate anyway. The agent is opt-in through the command above;
+    # these stanzas make `brew uninstall` and `brew uninstall --zap` clean up
+    # after it.
+    uninstall:
+      launchctl:
+        - com.orchael.bridgectl
+    zap:
+      launchctl:
+        - com.orchael.bridgectl
+      trash:
+        - ~/Library/LaunchAgents/com.orchael.bridgectl.plist
+        - ~/Library/Logs/bridgectl
 
 changelog:
   sort: asc

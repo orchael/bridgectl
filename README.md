@@ -335,12 +335,22 @@ brew install node@24
 **Run the daemon at login (optional):**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/orchael/bridgectl/main/packaging/com.orchael.bridgectl.plist \
-  -o ~/Library/LaunchAgents/com.orchael.bridgectl.plist
-launchctl load ~/Library/LaunchAgents/com.orchael.bridgectl.plist
+bridgectl server install-agent --start
 ```
 
-The plist runs `bridgectl server start` and logs to `/tmp/bridgectl.log` and `/tmp/bridgectl.err`. It expects the binary at `/usr/local/bin/bridgectl`; on Apple Silicon, Homebrew links casks into `/opt/homebrew/bin`, so either edit the `ProgramArguments` path to match `$(brew --prefix)/bin/bridgectl` or symlink it.
+This writes a launchd user agent to `~/Library/LaunchAgents/com.orchael.bridgectl.plist`. The agent points at the absolute path of the `bridgectl` binary you ran the command with, so it is correct for Homebrew on Apple Silicon (`/opt/homebrew`), Homebrew on Intel (`/usr/local`), and manual installs alike.
+
+It also copies the `PATH` of the shell you run it from into the plist. That matters: launchd gives agents a minimal `PATH`, and the server resolves `node` and the provider CLIs through `PATH` — without this the daemon starts but every session fails with `node not found on PATH`. Run the command from a shell where `node --version` works.
+
+Logs go to `~/Library/Logs/bridgectl/bridgectl.log` and `bridgectl.err`. Omit `--start` to write the plist without loading it.
+
+To remove the agent:
+
+```bash
+bridgectl server uninstall-agent
+```
+
+`brew uninstall bridgectl` unloads the agent too, and `brew uninstall --zap bridgectl` additionally deletes the plist and the logs.
 
 Unsigned local builds remain available via `make build-cli` — see [Build and install](#2-build-and-install).
 
