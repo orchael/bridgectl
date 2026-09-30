@@ -178,11 +178,20 @@ func newLaunchAgentSpec(exePath, home, currentPath string) (launchAgentSpec, err
 	}, nil
 }
 
+// Injection points for tests. The command bodies are gated on macOS and shell
+// out to launchctl, neither of which is reachable on a Linux CI runner, so they
+// are indirected the same way internal/config/node.go indirects exec.LookPath.
+var (
+	currentGOOS            = runtime.GOOS
+	bootstrapLaunchAgentFn = bootstrapLaunchAgent
+	bootoutLaunchAgentFn   = bootoutLaunchAgent
+)
+
 // errLaunchAgentUnsupported explains why the command is a no-op off macOS.
 func errLaunchAgentUnsupported() error {
 	return fmt.Errorf(
 		"launch agents are macOS-only (this is %s); on Linux install the systemd user unit from packaging/bridge.user.service",
-		runtime.GOOS,
+		currentGOOS,
 	)
 }
 
@@ -201,7 +210,7 @@ this from, which is how the server finds node and the provider CLIs.
 
 Logs are written to ~/Library/Logs/bridgectl/.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if runtime.GOOS != "darwin" {
+			if currentGOOS != "darwin" {
 				return errLaunchAgentUnsupported()
 			}
 
@@ -246,7 +255,7 @@ Logs are written to ~/Library/Logs/bridgectl/.`,
 				return nil
 			}
 
-			if err := bootstrapLaunchAgent(plistPath); err != nil {
+			if err := bootstrapLaunchAgentFn(plistPath); err != nil {
 				return err
 			}
 
@@ -265,7 +274,7 @@ func newServerUninstallAgentCmd() *cobra.Command {
 		Use:   "uninstall-agent",
 		Short: "Remove the macOS launchd agent for the bridge server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if runtime.GOOS != "darwin" {
+			if currentGOOS != "darwin" {
 				return errLaunchAgentUnsupported()
 			}
 
@@ -282,7 +291,7 @@ func newServerUninstallAgentCmd() *cobra.Command {
 
 			// Booting out a job that is not loaded is not an error worth
 			// failing on; the plist removal below is what matters.
-			_ = bootoutLaunchAgent()
+			_ = bootoutLaunchAgentFn()
 
 			if err := os.Remove(plistPath); err != nil {
 				return fmt.Errorf("remove %s: %w", plistPath, err)

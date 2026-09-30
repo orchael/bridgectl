@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"encoding/xml"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
 
@@ -198,4 +202,174 @@ func TestLaunchAgentPaths(t *testing.T) {
 		launchAgentPlistPath("/Users/example"),
 	)
 	require.Equal(t, "/Users/example/Library/Logs/bridgectl", launchAgentLogDir("/Users/example"))
+}
+
+// withDarwin makes the command bodies reachable on a Linux CI runner and
+// replaces the launchctl calls, which must never run during tests.
+func withDarwin(t *testing.T) (bootstrapped *[]string, bootedOut *int) {
+	t.Helper()
+
+	origGOOS, origBootstrap, origBootout := currentGOOS, bootstrapLaunchAgentFn, bootoutLaunchAgentFn
+	t.Cleanup(func() {
+		currentGOOS = origGOOS
+		bootstrapLaunchAgentFn = origBootstrap
+		bootoutLaunchAgentFn = origBootout
+	})
+
+	calls := []string{}
+	boots := 0
+	currentGOOS = "darwin"
+	bootstrapLaunchAgentFn = func(plistPath string) error {
+		calls = append(calls, plistPath)
+		return nil
+	}
+	bootoutLaunchAgentFn = func() error {
+		boots++
+		return nil
+	}
+
+	return &calls, &boots
+}
+
+func runCmd(t *testing.T, cmd *cobra.Command, args ...string) (string, error) {
+	t.Helper()
+
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+
+	return out.String(), err
+}
+
+func TestInstallAgentRefusesOffMacOS(t *testing.T) {
+	origGOOS := currentGOOS
+	t.Cleanup(func() { currentGOOS = origGOOS })
+	currentGOOS = "linux"
+
+	_, err := runCmd(t, newServerInstallAgentCmd())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "macOS-only")
+	require.Contains(t, err.Error(), "packaging/bridge.user.service")
+
+	_, err = runCmd(t, newServerUninstallAgentCmd())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "macOS-only")
+}
+
+func TestInstallAgentWritesPlistAndLogDirectory(t *testing.T) {
+	bootstrapped, _ := withDarwin(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	out, err := runCmd(t, newServerInstallAgentCmd())
+	require.NoError(t, err)
+
+	plistPath := launchAgentPlistPath(home)
+	require.FileExists(t, plistPath)
+	require.DirExists(t, launchAgentLogDir(home))
+	require.Contains(t, out, plistPath)
+
+	// Without --start the agent is written but never loaded.
+	require.Empty(t, *bootstrapped)
+	require.Contains(t, out, "launchctl bootstrap")
+
+	info, err := os.Stat(plistPath)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o644), info.Mode().Perm())
+
+	body, err := os.ReadFile(plistPath)
+	require.NoError(t, err)
+	require.Contains(t, string(body), "<key>Label</key>")
+	require.Contains(t, string(body), launchAgentLabel)
+}
+
+func TestInstallAgentStartLoadsTheAgent(t *testing.T) {
+	bootstrapped, _ := withDarwin(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	out, err := runCmd(t, newServerInstallAgentCmd(), "--start")
+	require.NoError(t, err)
+	require.Equal(t, []string{launchAgentPlistPath(home)}, *bootstrapped)
+	require.Contains(t, out, "Agent loaded")
+}
+
+func TestInstallAgentSurfacesBootstrapFailure(t *testing.T) {
+	withDarwin(t)
+	bootstrapLaunchAgentFn = func(string) error { return errors.New("Load failed: 5: Input/output error") }
+	t.Setenv("HOME", t.TempDir())
+
+	_, err := runCmd(t, newServerInstallAgentCmd(), "--start")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Load failed")
+}
+
+func TestUninstallAgentWhenNothingInstalled(t *testing.T) {
+	_, bootedOut := withDarwin(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	out, err := runCmd(t, newServerUninstallAgentCmd())
+	require.NoError(t, err)
+	require.Contains(t, out, "No launch agent installed")
+
+	// Nothing to boot out, so launchctl must not be invoked at all.
+	require.Zero(t, *bootedOut)
+}
+
+func TestUninstallAgentRemovesPlistAndKeepsLogs(t *testing.T) {
+	_, bootedOut := withDarwin(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	_, err := runCmd(t, newServerInstallAgentCmd())
+	require.NoError(t, err)
+
+	logMarker := filepath.Join(launchAgentLogDir(home), "bridgectl.log")
+	require.NoError(t, os.WriteFile(logMarker, []byte("prior output\n"), 0o600))
+
+	out, err := runCmd(t, newServerUninstallAgentCmd())
+	require.NoError(t, err)
+	require.NoFileExists(t, launchAgentPlistPath(home))
+	require.Equal(t, 1, *bootedOut)
+
+	// Logs are deliberately preserved; brew --zap is what deletes them.
+	require.FileExists(t, logMarker)
+	require.Contains(t, out, "left in place")
+}
+
+func TestNewLaunchAgentSpecFallsBackWhenPathCannotBeResolved(t *testing.T) {
+	t.Parallel()
+
+	// A path that does not exist still yields a usable spec: EvalSymlinks fails
+	// and the caller's value is kept rather than aborting the install.
+	missing := filepath.Join(t.TempDir(), "not-installed", "bridgectl")
+
+	spec, err := newLaunchAgentSpec(missing, "/Users/example", "/usr/bin")
+	require.NoError(t, err)
+	require.Equal(t, missing, spec.Program)
+}
+
+func TestNewLaunchAgentSpecMakesRelativePathsAbsolute(t *testing.T) {
+	// Not parallel: Chdir mutates process state.
+	dir := t.TempDir()
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(resolvedDir, "bridgectl"), []byte("#!/bin/sh\n"), 0o755))
+	t.Chdir(resolvedDir)
+
+	spec, err := newLaunchAgentSpec("bridgectl", "/Users/example", "/usr/bin")
+	require.NoError(t, err)
+
+	// launchd rejects a relative ProgramArguments entry.
+	require.True(t, filepath.IsAbs(spec.Program), "program path must be absolute, got %q", spec.Program)
+	require.Equal(t, filepath.Join(resolvedDir, "bridgectl"), spec.Program)
+}
+
+func TestLaunchctlDomainTargetsTheCurrentUser(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "gui/"+strconv.Itoa(os.Getuid()), launchctlDomain())
 }
