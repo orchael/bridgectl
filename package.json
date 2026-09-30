@@ -1,6 +1,7 @@
 {
   "name": "bridgectl",
   "private": true,
+  "license": "MIT",
   "packageManager": "pnpm@11.22.0",
   "description": "Pinned local AI agent CLIs for bridgectl",
   "engines": {
