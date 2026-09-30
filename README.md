@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/orchael/bridgectl/actions/workflows/ci.yml/badge.svg)](https://github.com/orchael/bridgectl/actions/workflows/ci.yml)
 [![Publish](https://github.com/orchael/bridgectl/actions/workflows/publish.yml/badge.svg)](https://github.com/orchael/bridgectl/actions/workflows/publish.yml)
+[![Publish CLI](https://github.com/orchael/bridgectl/actions/workflows/publish-cli.yml/badge.svg)](https://github.com/orchael/bridgectl/actions/workflows/publish-cli.yml)
 [![License](https://img.shields.io/github/license/orchael/bridgectl)](LICENSE)
 [![GitHub Release](https://img.shields.io/github/v/release/orchael/bridgectl)](https://github.com/orchael/bridgectl/releases)
 
@@ -314,6 +315,36 @@ make smoke
 
 This validates the repo Dockerfile and Compose stack by starting the bridge in Docker and running an authenticated gRPC health check.
 It also verifies config-driven provider fallback by requesting a deliberately unavailable smoke provider and asserting the configured fallback provider is selected.
+
+### macOS Install (Homebrew)
+
+Supported on Apple Silicon and Intel Macs.
+
+```bash
+brew install orchael/bridgectl/bridgectl
+```
+
+The released binaries are signed with a Developer ID certificate and notarized by Apple, so they run without a Gatekeeper prompt.
+
+Homebrew does **not** install the provider CLIs or their runtime. `bridgectl` launches `claude`, `codex`, `gemini`, and `opencode` through Node.js 24, so install that separately:
+
+```bash
+brew install node@24
+```
+
+**Run the daemon at login (optional):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/orchael/bridgectl/main/packaging/com.orchael.bridgectl.plist \
+  -o ~/Library/LaunchAgents/com.orchael.bridgectl.plist
+launchctl load ~/Library/LaunchAgents/com.orchael.bridgectl.plist
+```
+
+The plist runs `bridgectl server start` and logs to `/tmp/bridgectl.log` and `/tmp/bridgectl.err`. It expects the binary at `/usr/local/bin/bridgectl`; on Apple Silicon, Homebrew links casks into `/opt/homebrew/bin`, so either edit the `ProgramArguments` path to match `$(brew --prefix)/bin/bridgectl` or symlink it.
+
+Unsigned local builds remain available via `make build-cli` — see [Build and install](#2-build-and-install).
+
+**Windows** is not yet supported natively (tracked in [#259](https://github.com/orchael/bridgectl/issues/259)). Use Docker Desktop with `ghcr.io/orchael/bridgectl`, or WSL2 with the Ubuntu package below.
 
 ### Ubuntu Package Install
 
