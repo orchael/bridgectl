@@ -57,8 +57,7 @@ homebrew_casks:
       - bridgectl
     homepage: https://github.com/orchael/bridgectl
     description: gRPC daemon and SDK that manages AI agent subprocess lifecycles over a PTY transport
-    # No license: the repository has no LICENSE file yet. Add one and set this
-    # field once the project's license is decided.
+    license: MIT
     repository:
       owner: orchael
       name: homebrew-bridgectl
