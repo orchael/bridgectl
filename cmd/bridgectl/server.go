@@ -71,6 +71,8 @@ func newServerCmd() *cobra.Command {
 		newServerStopCmd(),
 		newServerIssueClientCmd(),
 		newServerRenewCertCmd(),
+		newServerInstallAgentCmd(),
+		newServerUninstallAgentCmd(),
 	)
 
 	return cmd
