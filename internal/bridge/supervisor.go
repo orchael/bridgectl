@@ -366,10 +366,13 @@ func (s *Supervisor) cleanupLoop() {
 }
 
 // reapIdleSessions stops sessions that have had no attached client and no
-// activity for longer than idleTimeout. Attached sessions are never reaped
-// here, even if idle, so a session someone is actively watching is never
-// killed out from under them; this only cleans up orphaned sessions left
-// running in the background (e.g. from repeated `session start` retries).
+// activity for longer than idleTimeout. Sessions with a writer attached
+// transition to SessionStateAttached and are skipped by the state check
+// below, but a read-only AttachRoleObserver client leaves the state at
+// SessionStateRunning, so the observers check is required too — otherwise a
+// session someone is actively watching (just not driving) could be killed
+// out from under them. This only cleans up orphaned sessions left running in
+// the background (e.g. from repeated `session start` retries).
 func (s *Supervisor) reapIdleSessions() {
 	if s.idleTimeout <= 0 {
 		return
@@ -378,7 +381,7 @@ func (s *Supervisor) reapIdleSessions() {
 	s.mu.RLock()
 	for id, ms := range s.sessions {
 		ms.mu.Lock()
-		if ms.info.State == SessionStateRunning && time.Since(ms.lastActivity) > s.idleTimeout {
+		if ms.info.State == SessionStateRunning && len(ms.observers) == 0 && time.Since(ms.lastActivity) > s.idleTimeout {
 			idle = append(idle, id)
 		}
 		ms.mu.Unlock()

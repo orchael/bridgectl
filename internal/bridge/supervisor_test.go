@@ -213,9 +213,25 @@ func TestSupervisorReapIdleSessions(t *testing.T) {
 		t.Fatalf("Attach idle-attached: %v", err)
 	}
 
-	// Force both sessions idle past idleTimeout by backdating lastActivity directly.
+	if _, err := supervisor.Start(context.Background(), SessionConfig{
+		ProjectID: "project-a",
+		SessionID: "idle-observed",
+		RepoPath:  t.TempDir(),
+		Options:   map[string]string{"provider": "fake"},
+	}); err != nil {
+		t.Fatalf("Start idle-observed: %v", err)
+	}
+	// AttachRoleObserver leaves the session in SessionStateRunning (only a
+	// writer attach transitions it to SessionStateAttached), so this covers
+	// the case a plain state check would miss: a read-only observer watching
+	// an otherwise-idle session.
+	if _, err := supervisor.Attach("idle-observed", "client-c", 0, AttachRoleObserver); err != nil {
+		t.Fatalf("Attach idle-observed: %v", err)
+	}
+
+	// Force all three sessions idle past idleTimeout by backdating lastActivity directly.
 	supervisor.mu.RLock()
-	for _, id := range []string{"idle-orphan", "idle-attached"} {
+	for _, id := range []string{"idle-orphan", "idle-attached", "idle-observed"} {
 		ms := supervisor.sessions[id]
 		ms.mu.Lock()
 		ms.lastActivity = time.Now().Add(-2 * idleTimeout)
@@ -244,6 +260,22 @@ func TestSupervisorReapIdleSessions(t *testing.T) {
 		t.Fatalf("Stop idle-attached: %v", err)
 	}
 	waitForStopped(t, supervisor, "idle-attached")
+
+	// idle-observed has a read-only observer and must also survive the reap.
+	info, err = supervisor.Get("idle-observed")
+	if err != nil {
+		t.Fatalf("Get idle-observed: %v", err)
+	}
+	if info.ExitRecorded {
+		t.Fatalf("idle-observed session was reaped while an observer was attached")
+	}
+	if _, err := supervisor.Detach("idle-observed", "client-c"); err != nil {
+		t.Fatalf("Detach idle-observed: %v", err)
+	}
+	if err := supervisor.Stop("idle-observed", true); err != nil {
+		t.Fatalf("Stop idle-observed: %v", err)
+	}
+	waitForStopped(t, supervisor, "idle-observed")
 }
 
 func TestSupervisorNilEnvUsesProviderHealth(t *testing.T) {
