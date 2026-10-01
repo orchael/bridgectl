@@ -76,3 +76,4 @@ examples/web/web
 .claude/worktrees/
 /bridgectl
 test-results/
+.dev/
