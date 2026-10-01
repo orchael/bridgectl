@@ -524,6 +524,55 @@ func TestHasExplicitServerListen(t *testing.T) {
 	}
 }
 
+func TestExplicitLogging(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantLevel  string
+		wantFormat string
+	}{
+		{name: "missing", body: "providers: {}\n", wantLevel: "", wantFormat: ""},
+		{name: "set", body: "logging:\n  level: \"debug\"\n  format: \"json\"\n", wantLevel: "debug", wantFormat: "json"},
+		{name: "level only", body: "logging:\n  level: \"warn\"\n", wantLevel: "warn", wantFormat: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "bridge.yaml")
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			level, format, err := ExplicitLogging(path)
+			if err != nil {
+				t.Fatalf("ExplicitLogging: %v", err)
+			}
+			if level != tc.wantLevel {
+				t.Fatalf("level=%q want %q", level, tc.wantLevel)
+			}
+			if format != tc.wantFormat {
+				t.Fatalf("format=%q want %q", format, tc.wantFormat)
+			}
+		})
+	}
+
+	// Load's "info"/"json" defaults must not leak into ExplicitLogging, since
+	// callers rely on it to distinguish "the user set this" from "Load filled
+	// in a default".
+	path := filepath.Join(t.TempDir(), "bridge.yaml")
+	if err := os.WriteFile(path, []byte("providers: {}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	level, format, err := ExplicitLogging(path)
+	if err != nil {
+		t.Fatalf("ExplicitLogging: %v", err)
+	}
+	if level != "" || format != "" {
+		t.Fatalf("ExplicitLogging after Load = (%q, %q), want empty", level, format)
+	}
+}
+
 func TestLoadStepCAClients(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bridge.yaml")

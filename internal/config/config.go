@@ -358,6 +358,28 @@ func HasExplicitServerListen(path string) (bool, error) {
 	return raw.Server.Listen != nil && strings.TrimSpace(*raw.Server.Listen) != "", nil
 }
 
+// ExplicitLogging reports the logging.level and logging.format values exactly
+// as set in a YAML config file, before Load applies its "info"/"json"
+// defaults. This lets callers distinguish "the user configured this" from
+// "Load filled in a default", so a CLI flag default doesn't silently shadow
+// a value the user actually set in the file.
+func ExplicitLogging(path string) (level, format string, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", fmt.Errorf("read config: %w", err)
+	}
+	var raw struct {
+		Logging struct {
+			Level  string `yaml:"level"`
+			Format string `yaml:"format"`
+		} `yaml:"logging"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return "", "", fmt.Errorf("parse config: %w", err)
+	}
+	return raw.Logging.Level, raw.Logging.Format, nil
+}
+
 // ParseDuration is a helper that parses a duration string with a fallback.
 func ParseDuration(s string, fallback time.Duration) time.Duration {
 	if s == "" {
@@ -454,7 +476,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Sessions.StopGracePeriod = "10s"
 	}
 	if cfg.Sessions.IdleTimeout == "" {
-		cfg.Sessions.IdleTimeout = "30m"
+		cfg.Sessions.IdleTimeout = "24h"
 	}
 	if cfg.Sessions.MaxSubscribersPerSession == 0 {
 		cfg.Sessions.MaxSubscribersPerSession = 10
