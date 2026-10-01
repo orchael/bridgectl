@@ -1,0 +1,44 @@
+# Development server for working on bridgectl on a machine that may already
+# run the packaged bridgectl service. The Makefile supplies an isolated
+# BRIDGECTL_STATE_DIR, and this config intentionally omits server.listen so the
+# dev server uses its own Unix socket instead of competing for port 9445.
+feature_flags:
+  provider_fallbacks: true
+
+repo_setup:
+  enabled: true
+  config_path: ".bridgectl.yaml"
+  default_timeout: "2m"
+  max_timeout: "15m"
+
+sessions:
+  max_per_project: 5
+  max_global: 20
+  idle_timeout: "30m"
+  stop_grace_period: "10s"
+  event_buffer_size: 8388608
+
+providers:
+  claude:
+    binary: "./node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+    args: ["--verbose"]
+    startup_timeout: "60s"
+    startup_probe: "prompt"
+    required_env: ["CLAUDE_CODE_OAUTH_TOKEN"]
+    fallbacks: ["codex"]
+    prompt_pattern: "(?m)(❯|>\\s*$)"
+  codex:
+    binary: "node"
+    args: ["./node_modules/@openai/codex/bin/codex.js"]
+    startup_timeout: "60s"
+    startup_probe: "output"
+    prompt_pattern: "(?m)(>\\s*$|›)"
+
+allowed_paths:
+  - "/home"
+  - "/workspace"
+  - "/tmp"
+
+logging:
+  level: "info"
+  format: "text"

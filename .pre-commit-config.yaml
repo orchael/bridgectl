@@ -27,7 +27,7 @@ repos:
 
       - id: goimports
         name: goimports
-        entry: goimports -w
+        entry: ./scripts/goimports.sh -w
         language: system
         types: [go]
         exclude: ^gen/

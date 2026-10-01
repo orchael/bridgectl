@@ -1,4 +1,4 @@
-.PHONY: build proto tools test test-telemetry-e2e test-telemetry-s3-e2e test-e2e test-e2e-live-telemetry test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down reset logs up-local down-local reset-local logs-local up-collector down-collector reset-collector ps-collector logs-collector up-step-ca down-step-ca reset-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
+.PHONY: dev-server-start dev-server-stop dev-server-status dev-server-logs dev-claude dev-codex dev-check dev-session-claude dev-session-codex build proto tools test test-telemetry-e2e test-telemetry-s3-e2e test-e2e test-e2e-live-telemetry test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down reset logs up-local down-local reset-local logs-local up-collector down-collector reset-collector ps-collector logs-collector up-step-ca down-step-ca reset-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
 
 BIN_DIR := bin
 GOIMPORTS_VERSION ?= v0.44.0
@@ -10,7 +10,6 @@ LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 GO_BUILD_FLAGS ?= -buildvcs=false
 GO_BUILD_ENV = GOCACHE="$${GOCACHE:-/tmp/go-build}" GOMODCACHE="$${GOMODCACHE:-/tmp/go-mod}"
 CONFIG ?= config/bridge.yaml
-DEV_CONFIG ?= config/bridge-dev.yaml
 CHAT_TARGET ?= bridge.local:9445
 CHAT_PROVIDER ?= claude
 CHAT_PROJECT ?= dev
@@ -24,6 +23,108 @@ build: proto
 build-cli:
 	@mkdir -p $(BIN_DIR)
 	$(GO_BUILD_ENV) go build $(GO_BUILD_FLAGS) $(LDFLAGS) -o $(BRIDGE_CLI) ./cmd/bridgectl
+
+# Repository-local development. Keep this state separate from ~/.config/bridgectl
+# so a packaged/system bridgectl daemon can continue serving the desktop.
+DEV_STATE_DIR ?= $(CURDIR)/.dev/bridgectl
+DEV_CONFIG ?= $(CURDIR)/config/bridge-repo-dev.yaml
+DEV_LOG ?= $(CURDIR)/.dev/bridgectl-server.log
+DEV_REPO ?= $(CURDIR)
+DEV_BRIDGECTL = BRIDGECTL_STATE_DIR="$(DEV_STATE_DIR)" "$(CURDIR)/$(BRIDGE_CLI)"
+
+dev-server-start: build
+	@mkdir -p "$(DEV_STATE_DIR)" "$(dir $(DEV_LOG))"
+	@if $(DEV_BRIDGECTL) server status 2>/dev/null | grep -q "Server: running"; then \
+		echo "Repository-local bridgectl server is already running."; \
+	else \
+		echo "Starting repository-local bridgectl with isolated state: $(DEV_STATE_DIR)"; \
+		$(LOAD_AGENTS_ENV); \
+		nohup env BRIDGECTL_STATE_DIR="$(DEV_STATE_DIR)" "$(CURDIR)/$(BRIDGE_CLI)" server start --config "$(DEV_CONFIG)" >"$(DEV_LOG)" 2>&1 & \
+		for i in 1 2 3 4 5 6 7 8 9 10; do \
+			sleep 0.2; \
+			if $(DEV_BRIDGECTL) server status 2>/dev/null | grep -q "Server: running"; then exit 0; fi; \
+		done; \
+		echo "Repository-local server failed to start. See $(DEV_LOG)" >&2; \
+		tail -n 50 "$(DEV_LOG)" >&2 || true; \
+		exit 1; \
+	fi
+
+dev-server-stop: build
+	@if $(DEV_BRIDGECTL) server status 2>/dev/null | grep -q "Server: running"; then \
+		$(DEV_BRIDGECTL) server stop; \
+	else \
+		echo "Repository-local bridgectl server is not running."; \
+	fi
+
+dev-server-status: build
+	@echo "Repository-local binary: $(CURDIR)/$(BRIDGE_CLI)"
+	@echo "Repository-local state:  $(DEV_STATE_DIR)"
+	@$(DEV_BRIDGECTL) server status
+	@printf "System binary:           "; command -v bridgectl 2>/dev/null || echo "not installed"
+	@if command -v bridgectl >/dev/null 2>&1; then bridgectl server status || true; fi
+
+dev-server-logs:
+	@touch "$(DEV_LOG)"
+	@tail -f "$(DEV_LOG)"
+
+# Escape hatches: use the provider CLIs directly, with no bridgectl process.
+# agents.env holds desktop agent credentials (CODEX_AUTH, CLAUDE_CODE_OAUTH_TOKEN, ...)
+# in the same KEY='value' shell-sourceable format the packaged service reads.
+AGENTS_ENV_FILE ?= $(HOME)/.config/bridgectl/agents.env
+LOAD_AGENTS_ENV = if [ -f "$(AGENTS_ENV_FILE)" ]; then set -a; . "$(AGENTS_ENV_FILE)"; set +a; fi
+
+# The real `codex` binary has no idea what CODEX_AUTH means; only bridgectl's
+# daemon (internal/provider/codex.go) knows how to turn it into an auth.json.
+# Replicate that default-home + bootstrap step here so this escape hatch reads
+# the same account credentials the installed bridgectl service already uses,
+# instead of silently falling back to codex's own ~/.codex default.
+CODEX_HOME_DEFAULT ?= $(HOME)/.config/bridgectl/codex-home
+SETUP_CODEX_HOME = \
+	if [ -z "$$CODEX_HOME" ]; then export CODEX_HOME="$(CODEX_HOME_DEFAULT)"; fi; \
+	if [ -n "$$CODEX_AUTH" ] && [ ! -s "$$CODEX_HOME/auth.json" ]; then \
+		mkdir -p "$$CODEX_HOME" && chmod 700 "$$CODEX_HOME"; \
+		umask 077 && printf '%s' "$$CODEX_AUTH" > "$$CODEX_HOME/auth.json"; \
+	fi
+
+dev-claude:
+	@command -v claude >/dev/null 2>&1 || { echo "claude is not on PATH" >&2; exit 1; }
+	@$(LOAD_AGENTS_ENV); \
+	if [ -z "$$CLAUDE_CODE_OAUTH_TOKEN" ]; then \
+		echo "CLAUDE_CODE_OAUTH_TOKEN must be set (export it, or add it to $(AGENTS_ENV_FILE))" >&2; \
+		exit 1; \
+	fi; \
+	cd "$(DEV_REPO)" && claude
+
+dev-codex:
+	@command -v codex >/dev/null 2>&1 || { echo "codex is not on PATH" >&2; exit 1; }
+	@$(LOAD_AGENTS_ENV); \
+	if [ -z "$$CODEX_AUTH" ] && [ ! -s "$${CODEX_HOME:-$(CODEX_HOME_DEFAULT)}/auth.json" ]; then \
+		echo "CODEX_AUTH must be set (export it, or add it to $(AGENTS_ENV_FILE)), unless $${CODEX_HOME:-$(CODEX_HOME_DEFAULT)}/auth.json already exists" >&2; \
+		exit 1; \
+	fi; \
+	$(SETUP_CODEX_HOME); cd "$(DEV_REPO)" && codex
+
+# dev-session-claude/dev-session-codex only need the pinned CLIs that the
+# codex/claude provider configs in config/bridge-repo-dev.yaml point at
+# (./node_modules/@openai/codex, ./node_modules/@anthropic-ai/claude-code) —
+# that config intentionally runs the dev server on its own Unix socket with
+# no TLS listener, so dev-certs/setup-hosts (dev-setup's other steps) are
+# not required here. Checking for the CLIs directly, instead of depending
+# on dev-setup, keeps dev-session-* fast and quiet on every run; without
+# this check, session start would silently fail 15s later with "companion
+# app-server ... never became reachable" instead of explaining that the
+# agent CLIs were never installed.
+dev-check:
+	@if [ ! -x node_modules/.bin/claude ] || [ ! -x node_modules/.bin/codex ]; then \
+		echo "AI agent CLIs not found under node_modules/.bin — run 'make dev-setup' first." >&2; \
+		exit 1; \
+	fi
+
+dev-session-claude: dev-server-start dev-check
+	$(DEV_BRIDGECTL) session start --provider claude "$(DEV_REPO)"
+
+dev-session-codex: dev-server-start dev-check
+	$(DEV_BRIDGECTL) session start --provider codex "$(DEV_REPO)"
 
 .PHONY: deps setup
 setup:
@@ -72,13 +173,21 @@ tools:
 	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(shell go list -m -f '{{.Version}}' google.golang.org/grpc/cmd/protoc-gen-go-grpc)
 
 PROTOC_INCLUDE ?= $(shell if command -v brew >/dev/null 2>&1; then brew --prefix; else printf /usr; fi)/include
+# go install puts protoc-gen-go/protoc-gen-go-grpc here; it may not be on PATH
+# yet in the current shell even though `make deps` already installed them
+# (e.g. PATH was only updated in ~/.bashrc after this shell started). Rather
+# than making the developer source their shell, just add it to PATH for this
+# one protoc invocation and only fail if that still doesn't find the plugins.
+GO_TOOL_BIN = $(shell tool_bin=$$(go env GOBIN); if [ -z "$$tool_bin" ]; then tool_bin=$$(go env GOPATH | cut -d: -f1)/bin; fi; printf '%s' "$$tool_bin")
 proto:
-	protoc \
+	@command -v protoc >/dev/null 2>&1 || { echo "protoc is not installed. Run 'make deps' to install it." >&2; exit 1; }
+	@PATH="$(GO_TOOL_BIN):$$PATH" protoc \
 		--proto_path=proto \
 		--proto_path=$(PROTOC_INCLUDE) \
 		--go_out=gen --go_opt=paths=source_relative \
 		--go-grpc_out=gen --go-grpc_opt=paths=source_relative \
-		bridge/v1/bridge.proto
+		bridge/v1/bridge.proto \
+	|| { echo "proto generation failed. If protoc-gen-go or protoc-gen-go-grpc are missing, run 'make deps' to install them." >&2; exit 1; }
 
 test:
 	./scripts/test-go.sh
@@ -194,7 +303,7 @@ agents-setup:
 
 fmt:
 	gofmt -s -w $(shell find . -name '*.go' -not -path './gen/*' -not -path './node_modules/*')
-	goimports -w $(shell find . -name '*.go' -not -path './gen/*' -not -path './node_modules/*')
+	./scripts/goimports.sh -w $(shell find . -name '*.go' -not -path './gen/*' -not -path './node_modules/*')
 
 smoke:
 	./scripts/with_env_secrets.sh ./scripts/smoke.sh
