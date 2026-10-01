@@ -18,9 +18,29 @@ fi
 # (via `make dev-setup`), so it runs on every session start. Without this guard
 # it would mint a brand-new CA and reissue every cert each time, which is both
 # wasteful and prints a wall of irrelevant output ahead of the actual session.
-if [ -f "$CERTS_DIR/ca.crt" ]; then
+#
+# Check every artifact this script produces, not just ca.crt: if a prior run
+# failed partway through (e.g. after `init` but before `issue`/`bundle`/
+# `jwt-keygen`), ca.crt alone would exist and this would skip regeneration,
+# leaving the rest permanently missing.
+EXPECTED_FILES=(
+    "$CERTS_DIR/ca.crt" "$CERTS_DIR/ca.key"
+    "$CERTS_DIR/bridge.local.crt" "$CERTS_DIR/bridge.local.key"
+    "$CERTS_DIR/dev-client.crt" "$CERTS_DIR/dev-client.key"
+    "$CERTS_DIR/ca-bundle.crt"
+    "$CERTS_DIR/jwt-signing.pub" "$CERTS_DIR/jwt-signing.key"
+)
+present=0
+for f in "${EXPECTED_FILES[@]}"; do
+    [ -f "$f" ] && present=$((present + 1))
+done
+if [ "$present" -eq "${#EXPECTED_FILES[@]}" ]; then
     echo "==> Dev certificates already exist in $CERTS_DIR — skipping (remove the directory to regenerate)"
     exit 0
+elif [ "$present" -gt 0 ]; then
+    echo "==> $CERTS_DIR has a partial certificate set ($present/${#EXPECTED_FILES[@]} expected files)." >&2
+    echo "    A prior run likely failed partway through. Remove $CERTS_DIR and rerun to regenerate." >&2
+    exit 1
 fi
 
 echo "==> Generating dev certificates in $CERTS_DIR"

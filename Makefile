@@ -1,4 +1,4 @@
-.PHONY: dev-server-start dev-server-stop dev-server-status dev-server-logs set-env-vars dev-claude dev-codex dev-check dev-session-claude dev-session-codex build proto tools test test-telemetry-e2e test-telemetry-s3-e2e test-e2e test-e2e-live-telemetry test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down reset logs up-local down-local reset-local logs-local up-collector down-collector reset-collector ps-collector logs-collector up-step-ca down-step-ca reset-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
+.PHONY: dev-server-start dev-server-stop dev-server-status dev-server-logs dev-claude dev-codex dev-check dev-session-claude dev-session-codex build proto tools test test-telemetry-e2e test-telemetry-s3-e2e test-e2e test-e2e-live-telemetry test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down reset logs up-local down-local reset-local logs-local up-collector down-collector reset-collector ps-collector logs-collector up-step-ca down-step-ca reset-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
 
 BIN_DIR := bin
 GOIMPORTS_VERSION ?= v0.44.0
@@ -38,6 +38,7 @@ dev-server-start: build
 		echo "Repository-local bridgectl server is already running."; \
 	else \
 		echo "Starting repository-local bridgectl with isolated state: $(DEV_STATE_DIR)"; \
+		$(LOAD_AGENTS_ENV); \
 		nohup env BRIDGECTL_STATE_DIR="$(DEV_STATE_DIR)" "$(CURDIR)/$(BRIDGE_CLI)" server start --config "$(DEV_CONFIG)" >"$(DEV_LOG)" 2>&1 & \
 		for i in 1 2 3 4 5 6 7 8 9 10; do \
 			sleep 0.2; \
@@ -85,20 +86,23 @@ SETUP_CODEX_HOME = \
 		umask 077 && printf '%s' "$$CODEX_AUTH" > "$$CODEX_HOME/auth.json"; \
 	fi
 
-set-env-vars:
-	@$(LOAD_AGENTS_ENV); \
-	if [ -z "$$CODEX_AUTH" ] || [ -z "$$CLAUDE_CODE_OAUTH_TOKEN" ]; then \
-		echo "CODEX_AUTH and CLAUDE_CODE_OAUTH_TOKEN must both be set (export them, or add them to $(AGENTS_ENV_FILE))" >&2; \
-		exit 1; \
-	fi
-
-dev-claude: set-env-vars
+dev-claude:
 	@command -v claude >/dev/null 2>&1 || { echo "claude is not on PATH" >&2; exit 1; }
-	@$(LOAD_AGENTS_ENV); cd "$(DEV_REPO)" && claude
+	@$(LOAD_AGENTS_ENV); \
+	if [ -z "$$CLAUDE_CODE_OAUTH_TOKEN" ]; then \
+		echo "CLAUDE_CODE_OAUTH_TOKEN must be set (export it, or add it to $(AGENTS_ENV_FILE))" >&2; \
+		exit 1; \
+	fi; \
+	cd "$(DEV_REPO)" && claude
 
-dev-codex: set-env-vars
+dev-codex:
 	@command -v codex >/dev/null 2>&1 || { echo "codex is not on PATH" >&2; exit 1; }
-	@$(LOAD_AGENTS_ENV); $(SETUP_CODEX_HOME); cd "$(DEV_REPO)" && codex
+	@$(LOAD_AGENTS_ENV); \
+	if [ -z "$$CODEX_AUTH" ] && [ ! -s "$${CODEX_HOME:-$(CODEX_HOME_DEFAULT)}/auth.json" ]; then \
+		echo "CODEX_AUTH must be set (export it, or add it to $(AGENTS_ENV_FILE)), unless $${CODEX_HOME:-$(CODEX_HOME_DEFAULT)}/auth.json already exists" >&2; \
+		exit 1; \
+	fi; \
+	$(SETUP_CODEX_HOME); cd "$(DEV_REPO)" && codex
 
 # dev-session-claude/dev-session-codex only need the pinned CLIs that the
 # codex/claude provider configs in config/bridge-repo-dev.yaml point at

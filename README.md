@@ -116,7 +116,7 @@ A development machine can keep its packaged/system bridgectl service running whi
 
 ```bash
 # Build the repository binary. This never replaces /usr/bin/bridgectl.
-make dev-build
+make build
 
 # Compare the isolated development server with the installed server.
 make dev-server-status
