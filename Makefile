@@ -1,4 +1,4 @@
-.PHONY: dev-server-start dev-server-stop dev-server-status dev-server-logs set-env-vars dev-claude dev-codex dev-session-claude dev-session-codex build proto tools test test-telemetry-e2e test-telemetry-s3-e2e test-e2e test-e2e-live-telemetry test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down reset logs up-local down-local reset-local logs-local up-collector down-collector reset-collector ps-collector logs-collector up-step-ca down-step-ca reset-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
+.PHONY: dev-server-start dev-server-stop dev-server-status dev-server-logs set-env-vars dev-claude dev-codex dev-check dev-session-claude dev-session-codex build proto tools test test-telemetry-e2e test-telemetry-s3-e2e test-e2e test-e2e-live-telemetry test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down reset logs up-local down-local reset-local logs-local up-collector down-collector reset-collector ps-collector logs-collector up-step-ca down-step-ca reset-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
 
 BIN_DIR := bin
 GOIMPORTS_VERSION ?= v0.44.0
@@ -100,17 +100,26 @@ dev-codex: set-env-vars
 	@command -v codex >/dev/null 2>&1 || { echo "codex is not on PATH" >&2; exit 1; }
 	@$(LOAD_AGENTS_ENV); $(SETUP_CODEX_HOME); cd "$(DEV_REPO)" && codex
 
-# dev-setup's agents-setup step installs the pinned CLIs that the
+# dev-session-claude/dev-session-codex only need the pinned CLIs that the
 # codex/claude provider configs in config/bridge-repo-dev.yaml point at
-# (./node_modules/@openai/codex, ./node_modules/@anthropic-ai/claude-code).
-# Without it, session start silently fails 15s later with "companion
+# (./node_modules/@openai/codex, ./node_modules/@anthropic-ai/claude-code) —
+# that config intentionally runs the dev server on its own Unix socket with
+# no TLS listener, so dev-certs/setup-hosts (dev-setup's other steps) are
+# not required here. Checking for the CLIs directly, instead of depending
+# on dev-setup, keeps dev-session-* fast and quiet on every run; without
+# this check, session start would silently fail 15s later with "companion
 # app-server ... never became reachable" instead of explaining that the
-# agent CLIs were never installed. dev-certs and setup-hosts (dev-setup's
-# other steps) are idempotent, so this is cheap on repeat invocations.
-dev-session-claude: dev-server-start dev-setup
+# agent CLIs were never installed.
+dev-check:
+	@if [ ! -x node_modules/.bin/claude ] || [ ! -x node_modules/.bin/codex ]; then \
+		echo "AI agent CLIs not found under node_modules/.bin — run 'make dev-setup' first." >&2; \
+		exit 1; \
+	fi
+
+dev-session-claude: dev-server-start dev-check
 	$(DEV_BRIDGECTL) session start --provider claude "$(DEV_REPO)"
 
-dev-session-codex: dev-server-start dev-setup
+dev-session-codex: dev-server-start dev-check
 	$(DEV_BRIDGECTL) session start --provider codex "$(DEV_REPO)"
 
 .PHONY: deps setup
@@ -290,7 +299,7 @@ agents-setup:
 
 fmt:
 	gofmt -s -w $(shell find . -name '*.go' -not -path './gen/*' -not -path './node_modules/*')
-	goimports -w $(shell find . -name '*.go' -not -path './gen/*' -not -path './node_modules/*')
+	./scripts/goimports.sh -w $(shell find . -name '*.go' -not -path './gen/*' -not -path './node_modules/*')
 
 smoke:
 	./scripts/with_env_secrets.sh ./scripts/smoke.sh
