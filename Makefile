@@ -1,4 +1,4 @@
-.PHONY: dev-build dev-server-start dev-server-stop dev-server-status dev-server-logs dev-claude dev-codex dev-session-claude dev-session-codex build proto tools test test-telemetry-e2e test-telemetry-s3-e2e test-e2e test-e2e-live-telemetry test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down reset logs up-local down-local reset-local logs-local up-collector down-collector reset-collector ps-collector logs-collector up-step-ca down-step-ca reset-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
+.PHONY: dev-build dev-server-start dev-server-stop dev-server-status dev-server-logs set-env-vars dev-claude dev-codex dev-session-claude dev-session-codex build proto tools test test-telemetry-e2e test-telemetry-s3-e2e test-e2e test-e2e-live-telemetry test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down reset logs up-local down-local reset-local logs-local up-collector down-collector reset-collector ps-collector logs-collector up-step-ca down-step-ca reset-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
 
 BIN_DIR := bin
 GOIMPORTS_VERSION ?= v0.44.0
@@ -72,13 +72,38 @@ dev-server-logs:
 	@tail -f "$(DEV_LOG)"
 
 # Escape hatches: use the provider CLIs directly, with no bridgectl process.
-dev-claude:
-	@command -v claude >/dev/null 2>&1 || { echo "claude is not on PATH" >&2; exit 1; }
-	cd "$(DEV_REPO)" && claude
+# agents.env holds desktop agent credentials (CODEX_AUTH, CLAUDE_CODE_OAUTH_TOKEN, ...)
+# in the same KEY='value' shell-sourceable format the packaged service reads.
+AGENTS_ENV_FILE ?= $(HOME)/.config/bridgectl/agents.env
+LOAD_AGENTS_ENV = if [ -f "$(AGENTS_ENV_FILE)" ]; then set -a; . "$(AGENTS_ENV_FILE)"; set +a; fi
 
-dev-codex:
+# The real `codex` binary has no idea what CODEX_AUTH means; only bridgectl's
+# daemon (internal/provider/codex.go) knows how to turn it into an auth.json.
+# Replicate that default-home + bootstrap step here so this escape hatch reads
+# the same account credentials the installed bridgectl service already uses,
+# instead of silently falling back to codex's own ~/.codex default.
+CODEX_HOME_DEFAULT ?= $(HOME)/.config/bridgectl/codex-home
+SETUP_CODEX_HOME = \
+	if [ -z "$$CODEX_HOME" ]; then export CODEX_HOME="$(CODEX_HOME_DEFAULT)"; fi; \
+	if [ -n "$$CODEX_AUTH" ] && [ ! -s "$$CODEX_HOME/auth.json" ]; then \
+		mkdir -p "$$CODEX_HOME" && chmod 700 "$$CODEX_HOME"; \
+		umask 077 && printf '%s' "$$CODEX_AUTH" > "$$CODEX_HOME/auth.json"; \
+	fi
+
+set-env-vars:
+	@$(LOAD_AGENTS_ENV); \
+	if [ -z "$$CODEX_AUTH" ] || [ -z "$$CLAUDE_CODE_OAUTH_TOKEN" ]; then \
+		echo "CODEX_AUTH and CLAUDE_CODE_OAUTH_TOKEN must both be set (export them, or add them to $(AGENTS_ENV_FILE))" >&2; \
+		exit 1; \
+	fi
+
+dev-claude: set-env-vars
+	@command -v claude >/dev/null 2>&1 || { echo "claude is not on PATH" >&2; exit 1; }
+	@$(LOAD_AGENTS_ENV); cd "$(DEV_REPO)" && claude
+
+dev-codex: set-env-vars
 	@command -v codex >/dev/null 2>&1 || { echo "codex is not on PATH" >&2; exit 1; }
-	cd "$(DEV_REPO)" && codex
+	@$(LOAD_AGENTS_ENV); $(SETUP_CODEX_HOME); cd "$(DEV_REPO)" && codex
 
 # Exercise the local build rather than whichever bridgectl is installed on PATH.
 dev-session-claude: dev-server-start
