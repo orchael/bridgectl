@@ -454,7 +454,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Sessions.StopGracePeriod = "10s"
 	}
 	if cfg.Sessions.IdleTimeout == "" {
-		cfg.Sessions.IdleTimeout = "30m"
+		cfg.Sessions.IdleTimeout = "24h"
 	}
 	if cfg.Sessions.MaxSubscribersPerSession == 0 {
 		cfg.Sessions.MaxSubscribersPerSession = 10

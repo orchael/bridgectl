@@ -326,7 +326,7 @@ type Config struct {
 	EventBufferSize int
 
 	// IdleTimeout overrides the session idle-timeout. Zero uses the
-	// default (30 minutes).
+	// default (24 hours).
 	IdleTimeout time.Duration
 
 	// Explicit TLS cert paths. When set, these override auto-PKI generation
@@ -527,7 +527,7 @@ func Start(cfg Config) (*Server, error) {
 		cfg.EventBufferSize = 8 << 20
 	}
 	if cfg.IdleTimeout <= 0 {
-		cfg.IdleTimeout = 30 * time.Minute
+		cfg.IdleTimeout = 24 * time.Hour
 	}
 	if cfg.RepoSetupEnabled != nil {
 		repoSetupEnabled = *cfg.RepoSetupEnabled

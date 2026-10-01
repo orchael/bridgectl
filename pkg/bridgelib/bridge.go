@@ -78,7 +78,7 @@ func New(cfg Config) (*Bridge, error) {
 		policy.MaxGlobal = 20
 	}
 	if cfg.IdleTimeout == 0 {
-		cfg.IdleTimeout = 30 * time.Minute
+		cfg.IdleTimeout = 24 * time.Hour
 	}
 	if cfg.OutputBufferBytes == 0 {
 		cfg.OutputBufferBytes = 8 << 20
