@@ -93,3 +93,20 @@ A `superseded` close (Bridge's generation-fencing evicting an older connection f
 ## Deferred
 
 Remote start/stop/input (MAR-66), PTY output streaming, an Answer/Approve command path back to the session, and MCP control are later milestones. Commands must eventually route through existing Supervisor/session APIs rather than duplicate lifecycle logic. On the interaction-state side specifically: Codex `app-server` protocol integration (the real path to authoritative Codex waiting/approval signal), Claude's permission/control-request protocol (for `waiting_for_approval` on `claude-chat`), and OpenCode SSE event mapping (`TODO(#108)`) are all explicitly out of scope for this change — see the "Interaction state (MAR-85)" section above for exactly what's wired today versus what each of those would require.
+
+## Enrollment activation and Codex resume
+
+Login sends a same-user reload request through `enrollment-reload.json` in the
+state directory after saving enrollment. The daemon applies only telemetry and
+control settings and acknowledges the request ID in `enrollment-reload-result.json`.
+Both files are private (0600) and contain no credentials. Startup ignores requests
+left by an earlier daemon. Reload closes previous reporting clients before opening
+replacements, preserves provider sessions, and publishes a fresh session snapshot.
+Login waits up to 20 seconds for activation and the authenticated control connection;
+a saved enrollment alone is not reported as a connected installation.
+
+The Codex relay accepts separate picker and reconnect WebSockets. RPC request IDs
+are scoped to each connection. A successful non-ephemeral `thread/start`,
+`thread/resume`, or `thread/fork` response selects the owner connection. History
+queries and disconnection of an auxiliary client cannot change the owner's pending
+approval or response destination.

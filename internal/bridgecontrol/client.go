@@ -297,7 +297,15 @@ func (c *Client) setStatus(state State, lastErr string) {
 	if c.cfg.StatusPath == "" {
 		return
 	}
-	st := Status{State: state, InstallationID: c.cfg.InstallationID, LastError: lastErr, UpdatedAt: time.Now().UTC()}
+	// The server's hello_ack is authoritative; startup configuration may
+	// omit the installation ID or refer to a previous enrollment.
+	c.commandMu.Lock()
+	installationID := c.installationID
+	c.commandMu.Unlock()
+	if installationID == "" {
+		installationID = c.cfg.InstallationID
+	}
+	st := Status{State: state, InstallationID: installationID, LastError: lastErr, UpdatedAt: time.Now().UTC()}
 	if err := WriteStatus(c.cfg.StatusPath, st); err != nil {
 		c.cfg.Logger.Warn("bridgecontrol: failed to persist status", "error", err)
 	}
