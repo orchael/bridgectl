@@ -360,11 +360,33 @@ func (s *Supervisor) cleanupLoop() {
 		case <-s.done:
 			return
 		case <-ticker.C:
-			// No-op: sessions are only stopped explicitly via Stop() or
-			// when the supervisor shuts down via Close(). The idle timeout
-			// field is retained for future use but does not reap running
-			// or attached sessions.
+			s.reapIdleSessions()
 		}
+	}
+}
+
+// reapIdleSessions stops sessions that have had no attached client and no
+// activity for longer than idleTimeout. Attached sessions are never reaped
+// here, even if idle, so a session someone is actively watching is never
+// killed out from under them; this only cleans up orphaned sessions left
+// running in the background (e.g. from repeated `session start` retries).
+func (s *Supervisor) reapIdleSessions() {
+	if s.idleTimeout <= 0 {
+		return
+	}
+	var idle []string
+	s.mu.RLock()
+	for id, ms := range s.sessions {
+		ms.mu.Lock()
+		if ms.info.State == SessionStateRunning && time.Since(ms.lastActivity) > s.idleTimeout {
+			idle = append(idle, id)
+		}
+		ms.mu.Unlock()
+	}
+	s.mu.RUnlock()
+	for _, id := range idle {
+		slog.Info("reaping idle session", "session_id", id, "idle_timeout", s.idleTimeout)
+		_ = s.Stop(id, false)
 	}
 }
 

@@ -182,6 +182,70 @@ func TestSupervisorSessionLifecycle(t *testing.T) {
 	waitForStopped(t, supervisor, "session-a")
 }
 
+func TestSupervisorReapIdleSessions(t *testing.T) {
+	registry := NewRegistry()
+	if err := registry.Register(&testProvider{id: "fake"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	const idleTimeout = 50 * time.Millisecond
+	supervisor := NewSupervisor(registry, DefaultPolicy(), 1024, idleTimeout)
+	defer supervisor.Close()
+
+	if _, err := supervisor.Start(context.Background(), SessionConfig{
+		ProjectID: "project-a",
+		SessionID: "idle-orphan",
+		RepoPath:  t.TempDir(),
+		Options:   map[string]string{"provider": "fake"},
+	}); err != nil {
+		t.Fatalf("Start idle-orphan: %v", err)
+	}
+
+	if _, err := supervisor.Start(context.Background(), SessionConfig{
+		ProjectID: "project-a",
+		SessionID: "idle-attached",
+		RepoPath:  t.TempDir(),
+		Options:   map[string]string{"provider": "fake"},
+	}); err != nil {
+		t.Fatalf("Start idle-attached: %v", err)
+	}
+	if _, err := supervisor.Attach("idle-attached", "client-b", 0, AttachRoleWriter); err != nil {
+		t.Fatalf("Attach idle-attached: %v", err)
+	}
+
+	// Force both sessions idle past idleTimeout by backdating lastActivity directly.
+	supervisor.mu.RLock()
+	for _, id := range []string{"idle-orphan", "idle-attached"} {
+		ms := supervisor.sessions[id]
+		ms.mu.Lock()
+		ms.lastActivity = time.Now().Add(-2 * idleTimeout)
+		ms.mu.Unlock()
+	}
+	supervisor.mu.RUnlock()
+
+	supervisor.reapIdleSessions()
+
+	// idle-orphan has no attached client and should be reaped.
+	waitForStopped(t, supervisor, "idle-orphan")
+
+	// idle-attached is actively attached and must survive the reap even though idle.
+	time.Sleep(100 * time.Millisecond)
+	info, err := supervisor.Get("idle-attached")
+	if err != nil {
+		t.Fatalf("Get idle-attached: %v", err)
+	}
+	if info.ExitRecorded {
+		t.Fatalf("idle-attached session was reaped while attached")
+	}
+	if _, err := supervisor.Detach("idle-attached", "client-b"); err != nil {
+		t.Fatalf("Detach idle-attached: %v", err)
+	}
+	if err := supervisor.Stop("idle-attached", true); err != nil {
+		t.Fatalf("Stop idle-attached: %v", err)
+	}
+	waitForStopped(t, supervisor, "idle-attached")
+}
+
 func TestSupervisorNilEnvUsesProviderHealth(t *testing.T) {
 	registry := NewRegistry()
 	if err := registry.Register(&nilEnvProvider{testProvider: testProvider{id: "nil-env"}}); err != nil {
