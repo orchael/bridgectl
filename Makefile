@@ -1,4 +1,4 @@
-.PHONY: dev-build dev-server-start dev-server-stop dev-server-status dev-server-logs set-env-vars dev-claude dev-codex dev-session-claude dev-session-codex build proto tools test test-telemetry-e2e test-telemetry-s3-e2e test-e2e test-e2e-live-telemetry test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down reset logs up-local down-local reset-local logs-local up-collector down-collector reset-collector ps-collector logs-collector up-step-ca down-step-ca reset-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
+.PHONY: dev-server-start dev-server-stop dev-server-status dev-server-logs set-env-vars dev-claude dev-codex dev-session-claude dev-session-codex build proto tools test test-telemetry-e2e test-telemetry-s3-e2e test-e2e test-e2e-live-telemetry test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down reset logs up-local down-local reset-local logs-local up-collector down-collector reset-collector ps-collector logs-collector up-step-ca down-step-ca reset-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
 
 BIN_DIR := bin
 GOIMPORTS_VERSION ?= v0.44.0
@@ -10,7 +10,6 @@ LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 GO_BUILD_FLAGS ?= -buildvcs=false
 GO_BUILD_ENV = GOCACHE="$${GOCACHE:-/tmp/go-build}" GOMODCACHE="$${GOMODCACHE:-/tmp/go-mod}"
 CONFIG ?= config/bridge.yaml
-DEV_CONFIG ?= config/bridge-dev.yaml
 CHAT_TARGET ?= bridge.local:9445
 CHAT_PROVIDER ?= claude
 CHAT_PROJECT ?= dev
@@ -33,11 +32,7 @@ DEV_LOG ?= $(CURDIR)/.dev/bridgectl-server.log
 DEV_REPO ?= $(CURDIR)
 DEV_BRIDGECTL = BRIDGECTL_STATE_DIR="$(DEV_STATE_DIR)" "$(CURDIR)/$(BRIDGE_CLI)"
 
-dev-build: build-cli
-	@echo "Local bridgectl: $(CURDIR)/$(BRIDGE_CLI)"
-	@echo "System bridgectl remains untouched: $(command -v bridgectl 2>/dev/null || echo not-installed)"
-
-dev-server-start: dev-build
+dev-server-start: build
 	@mkdir -p "$(DEV_STATE_DIR)" "$(dir $(DEV_LOG))"
 	@if $(DEV_BRIDGECTL) server status 2>/dev/null | grep -q "Server: running"; then \
 		echo "Repository-local bridgectl server is already running."; \
@@ -53,14 +48,14 @@ dev-server-start: dev-build
 		exit 1; \
 	fi
 
-dev-server-stop: dev-build
+dev-server-stop: build
 	@if $(DEV_BRIDGECTL) server status 2>/dev/null | grep -q "Server: running"; then \
 		$(DEV_BRIDGECTL) server stop; \
 	else \
 		echo "Repository-local bridgectl server is not running."; \
 	fi
 
-dev-server-status: dev-build
+dev-server-status: build
 	@echo "Repository-local binary: $(CURDIR)/$(BRIDGE_CLI)"
 	@echo "Repository-local state:  $(DEV_STATE_DIR)"
 	@$(DEV_BRIDGECTL) server status
@@ -105,11 +100,17 @@ dev-codex: set-env-vars
 	@command -v codex >/dev/null 2>&1 || { echo "codex is not on PATH" >&2; exit 1; }
 	@$(LOAD_AGENTS_ENV); $(SETUP_CODEX_HOME); cd "$(DEV_REPO)" && codex
 
-# Exercise the local build rather than whichever bridgectl is installed on PATH.
-dev-session-claude: dev-server-start
+# dev-setup's agents-setup step installs the pinned CLIs that the
+# codex/claude provider configs in config/bridge-repo-dev.yaml point at
+# (./node_modules/@openai/codex, ./node_modules/@anthropic-ai/claude-code).
+# Without it, session start silently fails 15s later with "companion
+# app-server ... never became reachable" instead of explaining that the
+# agent CLIs were never installed. dev-certs and setup-hosts (dev-setup's
+# other steps) are idempotent, so this is cheap on repeat invocations.
+dev-session-claude: dev-server-start dev-setup
 	$(DEV_BRIDGECTL) session start --provider claude "$(DEV_REPO)"
 
-dev-session-codex: dev-server-start
+dev-session-codex: dev-server-start dev-setup
 	$(DEV_BRIDGECTL) session start --provider codex "$(DEV_REPO)"
 
 .PHONY: deps setup
@@ -159,13 +160,21 @@ tools:
 	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(shell go list -m -f '{{.Version}}' google.golang.org/grpc/cmd/protoc-gen-go-grpc)
 
 PROTOC_INCLUDE ?= $(shell if command -v brew >/dev/null 2>&1; then brew --prefix; else printf /usr; fi)/include
+# go install puts protoc-gen-go/protoc-gen-go-grpc here; it may not be on PATH
+# yet in the current shell even though `make deps` already installed them
+# (e.g. PATH was only updated in ~/.bashrc after this shell started). Rather
+# than making the developer source their shell, just add it to PATH for this
+# one protoc invocation and only fail if that still doesn't find the plugins.
+GO_TOOL_BIN = $(shell tool_bin=$$(go env GOBIN); if [ -z "$$tool_bin" ]; then tool_bin=$$(go env GOPATH | cut -d: -f1)/bin; fi; printf '%s' "$$tool_bin")
 proto:
-	protoc \
+	@command -v protoc >/dev/null 2>&1 || { echo "protoc is not installed. Run 'make deps' to install it." >&2; exit 1; }
+	@PATH="$(GO_TOOL_BIN):$$PATH" protoc \
 		--proto_path=proto \
 		--proto_path=$(PROTOC_INCLUDE) \
 		--go_out=gen --go_opt=paths=source_relative \
 		--go-grpc_out=gen --go-grpc_opt=paths=source_relative \
-		bridge/v1/bridge.proto
+		bridge/v1/bridge.proto \
+	|| { echo "proto generation failed. If protoc-gen-go or protoc-gen-go-grpc are missing, run 'make deps' to install them." >&2; exit 1; }
 
 test:
 	./scripts/test-go.sh

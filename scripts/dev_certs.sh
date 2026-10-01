@@ -14,6 +14,15 @@ if [ ! -x "$CA_BIN" ]; then
     exit 1
 fi
 
+# Idempotent: this script is a prerequisite of dev-session-claude/dev-session-codex
+# (via `make dev-setup`), so it runs on every session start. Without this guard
+# it would mint a brand-new CA and reissue every cert each time, which is both
+# wasteful and prints a wall of irrelevant output ahead of the actual session.
+if [ -f "$CERTS_DIR/ca.crt" ]; then
+    echo "==> Dev certificates already exist in $CERTS_DIR — skipping (remove the directory to regenerate)"
+    exit 0
+fi
+
 echo "==> Generating dev certificates in $CERTS_DIR"
 
 # 1. Initialize bridge CA
