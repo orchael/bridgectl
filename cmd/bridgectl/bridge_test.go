@@ -384,11 +384,11 @@ func TestDefaultOrganizationPrecedence(t *testing.T) {
 
 func TestAuthorizeRequestBodyIncludesRequestedOrganization(t *testing.T) {
 	t.Setenv("BRIDGECTL_ORGANIZATION", "")
-	body := authorizeRequestBody("")
+	body := authorizeRequestBody("", "test-server")
 	if _, ok := body["requested_organization"]; ok {
 		t.Fatalf("expected requested_organization omitted when empty, got %v", body)
 	}
-	body = authorizeRequestBody("Acme Inc")
+	body = authorizeRequestBody("Acme Inc", "test-server")
 	if body["requested_organization"] != "Acme Inc" {
 		t.Fatalf("expected requested_organization=Acme Inc, got %v", body)
 	}
@@ -623,5 +623,39 @@ func TestPollDeviceTokenTerminalErrorIsReturned(t *testing.T) {
 		if derr == nil || derr.Error != code {
 			t.Fatalf("%s: unexpected derr: %+v", code, derr)
 		}
+	}
+}
+
+
+func TestInstallationNamePrecedence(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := os.WriteFile(filepath.Join(dir, "bridge.yaml"), []byte("name: config-server\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := installationName("explicit-server"); got != "explicit-server" {
+		t.Fatalf("explicit name precedence: %q", got)
+	}
+	if got := installationName(""); got != "config-server" {
+		t.Fatalf("config name precedence: %q", got)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "bridge.yaml"), []byte("name: \"\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := installationName(""); strings.TrimSpace(got) == "" {
+		t.Fatal("expected hostname or bridgectl fallback")
+	}
+}
+
+func TestBridgeLoginFlags(t *testing.T) {
+	cmd := newBridgeLoginCmd()
+	if cmd.Flags().Lookup("name") == nil {
+		t.Fatal("expected --name flag")
+	}
+	if cmd.Flags().Lookup("no-browser") == nil {
+		t.Fatal("expected --no-browser flag")
 	}
 }
