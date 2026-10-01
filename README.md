@@ -721,3 +721,18 @@ Add the base64 output as `APT_REPO_GPG_PRIVATE_KEY_B64` in **Settings → Secret
 ## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
+
+
+## Session resource management
+
+Long-lived AI sessions require resource supervision so abandoned agents cannot starve
+the host. The planned resource supervisor uses Linux cgroup v2 to isolate each agent
+process tree, hibernate idle sessions, enforce a machine reserve, and queue work under
+pressure. The baseline target is a **2 vCPU / 8 GiB RAM** host.
+
+**Windows:** resource-supervised bridgectl sessions must run inside **WSL2** so Linux
+cgroup v2 controls are available. Native Windows processes cannot participate in the
+cgroup-based supervisor.
+
+See [Session Resource Supervisor](plans/session-resource-supervisor.md) for the design,
+defaults, lifecycle, and required tests.
