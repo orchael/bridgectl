@@ -18,6 +18,9 @@ import (
 
 // Config is the top-level bridge daemon configuration.
 type Config struct {
+	// Name is the human-friendly server name used when enrolling with Bridge.
+	// bridgectl login falls back to the OS hostname when it is empty.
+	Name         string                    `yaml:"name"`
 	Server       ServerConfig              `yaml:"server"`
 	Security     SecurityConfig            `yaml:"security"`
 	StepCA       StepCAYAMLConfig          `yaml:"step_ca"`
