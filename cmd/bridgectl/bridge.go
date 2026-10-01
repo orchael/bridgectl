@@ -404,6 +404,8 @@ func newBridgeLoginCmd() *cobra.Command {
 	var bridge string
 	var organization string
 	var force bool
+	var name string
+	var noBrowser bool
 	cmd := &cobra.Command{
 		Use: "login [bridge-url]", Short: "Log into Bridge and enroll this installation",
 		Args: cobra.MaximumNArgs(1),
@@ -415,11 +417,13 @@ func newBridgeLoginCmd() *cobra.Command {
 				}
 				origin = args[0]
 			}
-			return runBridgeLogin(cmd, origin, organization, force)
+			return runBridgeLogin(cmd, origin, organization, name, force, noBrowser)
 		},
 	}
 	cmd.Flags().StringVar(&bridge, "bridge", "", "Bridge HTTPS origin")
 	cmd.Flags().StringVar(&organization, "organization", "", "default organization name to request")
+	cmd.Flags().StringVar(&name, "name", "", "server name shown in Bridge (defaults to config name, then hostname)")
+	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "print the authorization URL without opening a browser")
 	cmd.Flags().BoolVar(&force, "force", false, "replace an existing enrollment")
 	return cmd
 }
@@ -429,14 +433,14 @@ func defaultOrganization(flag string) string {
 	}
 	return strings.TrimSpace(os.Getenv("BRIDGECTL_ORGANIZATION"))
 }
-func authorizeRequestBody(organization string) map[string]string {
-	body := map[string]string{"display_name": installationName()}
+func authorizeRequestBody(organization, name string) map[string]string {
+	body := map[string]string{"display_name": name}
 	if org := defaultOrganization(organization); org != "" {
 		body["requested_organization"] = org
 	}
 	return body
 }
-func runBridgeLogin(cmd *cobra.Command, bridge, organization string, force bool) error {
+func runBridgeLogin(cmd *cobra.Command, bridge, organization, name string, force, noBrowser bool) error {
 	if _, _, err := readEnrollment(); err == nil && !force {
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Already logged into Bridge.")
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Use --force to re-enroll.")
@@ -451,8 +455,9 @@ func runBridgeLogin(cmd *cobra.Command, bridge, organization string, force bool)
 	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	ctx, cancel := signalContext(cmd.Context())
 	defer cancel()
+	installation := installationName(name)
 	var auth deviceAuthorization
-	if _, err = httpJSON(ctx, client, "POST", base+"/v1/device/authorize", authorizeRequestBody(organization), &auth); err != nil {
+	if _, err = httpJSON(ctx, client, "POST", base+"/v1/device/authorize", authorizeRequestBody(organization, installation), &auth); err != nil {
 		return fmt.Errorf("request Bridge authorization: %w", err)
 	}
 	if err := validateDeviceAuthorization(auth); err != nil {
@@ -472,11 +477,17 @@ func runBridgeLogin(cmd *cobra.Command, bridge, organization string, force bool)
 		}
 	}
 	out := cmd.OutOrStdout()
-	_, _ = fmt.Fprintf(out, "Opening %s\n\nAuthorization code:\n\n    %s\n\n", auth.VerificationURI, auth.UserCode)
+	if noBrowser {
+		_, _ = fmt.Fprintf(out, "Authorization required at %s\n\nAuthorization code:\n\n    %s\n\n", auth.VerificationURI, auth.UserCode)
+	} else {
+		_, _ = fmt.Fprintf(out, "Opening %s\n\nAuthorization code:\n\n    %s\n\n", auth.VerificationURI, auth.UserCode)
+	}
 	if auth.VerificationURIComplete == "" {
 		auth.VerificationURIComplete = auth.VerificationURI + "?user_code=" + url.QueryEscape(auth.UserCode)
 	}
-	if err := openBrowser(auth.VerificationURIComplete); err != nil {
+	if noBrowser {
+		_, _ = fmt.Fprintf(out, "Open this URL in a browser: %s\n\n", auth.VerificationURIComplete)
+	} else if err := openBrowser(auth.VerificationURIComplete); err != nil {
 		_, _ = fmt.Fprintf(out, "Open this URL in your browser: %s\n\n", auth.VerificationURIComplete)
 	}
 	_, _ = fmt.Fprintln(out, "Waiting for authorization...")
@@ -496,7 +507,7 @@ func runBridgeLogin(cmd *cobra.Command, bridge, organization string, force bool)
 			return fmt.Errorf("bridge authorization: %w", err)
 		}
 		if tok != nil {
-			if err := persistBridgeEnrollment(*tok, installationName(), base); err != nil {
+			if err := persistBridgeEnrollment(*tok, installation, base); err != nil {
 				return err
 			}
 			_, _ = fmt.Fprintln(out, "✓ Bridge authorization complete\n✓ Installation registered\n✓ Organization selected\n✓ Telemetry configured")
@@ -517,7 +528,20 @@ func runBridgeLogin(cmd *cobra.Command, bridge, organization string, force bool)
 func signalContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(parent, os.Interrupt)
 }
-func installationName() string {
+func installationName(flag string) string {
+	if name := strings.TrimSpace(flag); name != "" {
+		return name
+	}
+	if b, err := os.ReadFile(bridgeConfigPath()); err == nil {
+		var cfg struct {
+			Name string `yaml:"name"`
+		}
+		if yaml.Unmarshal(b, &cfg) == nil {
+			if name := strings.TrimSpace(cfg.Name); name != "" {
+				return name
+			}
+		}
+	}
 	h, _ := os.Hostname()
 	if h == "" {
 		h = "bridgectl"
