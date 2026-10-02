@@ -248,6 +248,82 @@ func TestLiveCollectorBoundsOversizedUnterminatedInteraction(t *testing.T) {
 	}
 }
 
+// TestLiveCollectorHandlesANSISequenceSplitAcrossManyChunks is a correctness
+// check: an ANSI escape sequence arriving one byte per call must still be
+// recognized once it completes, not treated as a record boundary partway
+// through.
+func TestLiveCollectorHandlesANSISequenceSplitAcrossManyChunks(t *testing.T) {
+	sink := &memorySink{}
+	collector := NewLiveCollector(sink, 8, true, nil, EventProviderOutput)
+	session := Session{SessionID: "split-ansi-sequence", Provider: "codex"}
+
+	const paramBytes = 50
+	collector.ObserveOutputChunk(session, []byte("\x1b[")) // begin a CSI sequence
+	for i := 0; i < paramBytes; i++ {
+		collector.ObserveOutputChunk(session, []byte("0")) // valid CSI parameter byte
+	}
+	collector.ObserveOutputChunk(session, []byte("m\n")) // terminate, then close the record
+
+	collector.SessionEnded(session)
+	if err := collector.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	events := capturedEvents(sink.snapshot())
+	wantBytes := len("\x1b[") + paramBytes + len("m\n")
+	if len(events) != 1 || events[0].ByteCount != wantBytes || events[0].OmittedReason != "" {
+		t.Fatalf("events=%+v, want one retained interaction of %d bytes", events, wantBytes)
+	}
+}
+
+// TestLiveCollectorManyChunksWithoutBoundaryStaysLinear reproduces the
+// CPU-usage bug behind a real bridgectl deployment reporting "server start"
+// pinning a CPU core under an active, chatty TUI session. A full-screen
+// redraw TUI (common for interactive coding agents) repositions the cursor
+// with short, complete ANSI sequences rather than emitting \r/\n, so
+// pending output can grow for a long stretch with no record boundary. Three
+// independent O(n^2) costs compounded here, all scaling with the total
+// bytes buffered before a boundary appears rather than the bytes in each
+// chunk:
+//  1. nextInteractionBoundary rescanned data from byte 0 on every call.
+//  2. observeInteraction's UTF-8 desync check (utf8.Valid) re-validated the
+//     entire accumulated buffer on every call.
+//  3. trimFrameBuffer removed leading runes one at a time, re-encoding the
+//     entire remaining (still large) rune slice on every iteration just to
+//     recheck its byte length.
+//
+// Confirmed via a live pprof CPU profile during an attached codex session:
+// appendChunk -> ObserveProviderChunk -> observeInteraction ->
+// nextInteractionBoundary/ansiSequenceEnd/utf8.Valid accounted for 100% of
+// sampled CPU time. Before these fixes, this test's chunk count took
+// multiple seconds (trimFrameBuffer alone) to well over a minute (all
+// three); after, it completes in milliseconds.
+func TestLiveCollectorManyChunksWithoutBoundaryStaysLinear(t *testing.T) {
+	sink := &memorySink{}
+	collector := NewLiveCollector(sink, 8, true, nil, EventProviderOutput)
+	session := Session{SessionID: "slow-redraw-stream", Provider: "codex"}
+
+	const chunkCount = 5000
+	const chunk = "\x1b[2K\x1b[1;32mx" // short, complete ANSI sequences + text, no boundary
+	start := time.Now()
+	for i := 0; i < chunkCount; i++ {
+		collector.ObserveOutputChunk(session, []byte(chunk))
+	}
+	collector.ObserveOutputChunk(session, []byte("\n"))
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("feeding %d chunks with no boundary took %v, want well under 2s (quadratic regression?)", chunkCount, elapsed)
+	}
+
+	collector.SessionEnded(session)
+	if err := collector.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	events := capturedEvents(sink.snapshot())
+	wantBytes := chunkCount*len(chunk) + len("\n")
+	if len(events) != 1 || events[0].ByteCount != wantBytes || events[0].OmittedReason != "" {
+		t.Fatalf("events=%+v, want one retained interaction of %d bytes", events, wantBytes)
+	}
+}
+
 func readFixture(t *testing.T, name string) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", name))

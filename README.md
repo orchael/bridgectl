@@ -135,6 +135,20 @@ make dev-codex DEV_REPO=/workspace/my-repo
 make dev-claude DEV_REPO=/workspace/my-repo
 ```
 
+#### Debugging high CPU usage
+
+`dev-server-start` always enables an opt-in pprof debug endpoint on `127.0.0.1:6061` (loopback only, never exposed by the installed/packaged service — see `BRIDGECTL_PPROF_ADDR` in `cmd/bridgectl/server.go`). While the dev server is reproducing high CPU (e.g. with `dev-session-codex`/`dev-session-claude` attached and active), sample it:
+
+```bash
+# Capture a 30s CPU profile and open it interactively (top, list, web, etc.)
+make dev-server-cpu-profile
+
+# Dump all goroutine stacks (useful for spotting a stuck/busy-looping goroutine)
+make dev-server-goroutines
+```
+
+To profile the installed/packaged service instead, set `BRIDGECTL_PPROF_ADDR=127.0.0.1:6061` in its environment (e.g. `EnvironmentFile`/`Environment=` in the systemd unit) and restart it — the endpoint is otherwise completely absent from the binary's default behavior.
+
 Do not use plain `bridgectl` when validating local changes: that resolves the installed binary on `PATH`. The `dev-*` targets deliberately use `$(pwd)/bin/bridgectl`.
 
 ### Docker

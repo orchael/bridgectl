@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
+	_ "net/http/pprof" // registered on DefaultServeMux only when BRIDGECTL_PPROF_ADDR is set; see startDebugPprof
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,6 +20,29 @@ import (
 	"github.com/orchael/bridgectl/internal/config"
 	"github.com/orchael/bridgectl/internal/localserver"
 )
+
+// startDebugPprof starts a pprof HTTP server for live CPU/goroutine
+// profiling when BRIDGECTL_PPROF_ADDR is set (e.g. "127.0.0.1:6060"). It is
+// opt-in and off by default so the installed/production server never
+// exposes runtime internals. Bind to loopback only; this endpoint has no
+// authentication.
+//
+// Usage once running:
+//
+//	go tool pprof http://127.0.0.1:6060/debug/pprof/profile?seconds=30
+//	curl http://127.0.0.1:6060/debug/pprof/goroutine?debug=2
+func startDebugPprof(logger *slog.Logger) {
+	addr := strings.TrimSpace(os.Getenv("BRIDGECTL_PPROF_ADDR"))
+	if addr == "" {
+		return
+	}
+	go func() {
+		logger.Warn("debug pprof server enabled", "addr", addr)
+		if err := http.ListenAndServe(addr, nil); err != nil { //nolint:gosec // loopback debug-only endpoint, opt-in via env var
+			logger.Warn("debug pprof server exited", "error", err)
+		}
+	}()
+}
 
 // sdNotify sends a notification to the systemd service manager via
 // $NOTIFY_SOCKET. It is a no-op when the socket is not set (i.e. when not
@@ -187,6 +212,8 @@ infrastructure (Google, GitHub, Okta, etc.) managed through Step CA.`,
 				}
 			}
 			fmt.Fprintf(os.Stderr, "bridgectl server listening — %s (pid %d)\n", modeDesc, os.Getpid())
+
+			startDebugPprof(logger)
 
 			// Notify systemd that the server is ready and start the watchdog
 			// heartbeat. Both are no-ops when not running under systemd.

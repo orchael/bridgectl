@@ -1,4 +1,4 @@
-.PHONY: dev-server-start dev-server-stop dev-server-status dev-server-logs dev-claude dev-codex dev-check dev-session-claude dev-session-codex build proto tools test test-telemetry-e2e test-telemetry-s3-e2e test-e2e test-e2e-live-telemetry test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down reset logs up-local down-local reset-local logs-local up-collector down-collector reset-collector ps-collector logs-collector up-step-ca down-step-ca reset-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
+.PHONY: dev-server-start dev-server-stop dev-server-status dev-server-logs dev-server-cpu-profile dev-server-goroutines dev-claude dev-codex dev-check dev-session-claude dev-session-codex build proto tools test test-telemetry-e2e test-telemetry-s3-e2e test-e2e test-e2e-live-telemetry test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down reset logs up-local down-local reset-local logs-local up-collector down-collector reset-collector ps-collector logs-collector up-step-ca down-step-ca reset-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
 
 BIN_DIR := bin
 GOIMPORTS_VERSION ?= v0.44.0
@@ -31,6 +31,10 @@ DEV_CONFIG ?= $(CURDIR)/config/bridge-repo-dev.yaml
 DEV_LOG ?= $(CURDIR)/.dev/bridgectl-server.log
 DEV_REPO ?= $(CURDIR)
 DEV_BRIDGECTL = BRIDGECTL_STATE_DIR="$(DEV_STATE_DIR)" "$(CURDIR)/$(BRIDGE_CLI)"
+# Opt-in debug pprof endpoint (CPU/goroutine profiling), bound to loopback
+# only. Always on for the dev server since it never affects the installed
+# service; see startDebugPprof in cmd/bridgectl/server.go.
+DEV_PPROF_ADDR ?= 127.0.0.1:6061
 
 dev-server-start: build
 	@mkdir -p "$(DEV_STATE_DIR)" "$(dir $(DEV_LOG))"
@@ -38,8 +42,9 @@ dev-server-start: build
 		echo "Repository-local bridgectl server is already running."; \
 	else \
 		echo "Starting repository-local bridgectl with isolated state: $(DEV_STATE_DIR)"; \
+		echo "pprof debug endpoint: http://$(DEV_PPROF_ADDR)/debug/pprof/ (see 'make dev-server-cpu-profile')"; \
 		$(LOAD_AGENTS_ENV); \
-		nohup env BRIDGECTL_STATE_DIR="$(DEV_STATE_DIR)" "$(CURDIR)/$(BRIDGE_CLI)" server start --config "$(DEV_CONFIG)" >"$(DEV_LOG)" 2>&1 & \
+		nohup env BRIDGECTL_STATE_DIR="$(DEV_STATE_DIR)" BRIDGECTL_PPROF_ADDR="$(DEV_PPROF_ADDR)" "$(CURDIR)/$(BRIDGE_CLI)" server start --config "$(DEV_CONFIG)" >"$(DEV_LOG)" 2>&1 & \
 		for i in 1 2 3 4 5 6 7 8 9 10; do \
 			sleep 0.2; \
 			if $(DEV_BRIDGECTL) server status 2>/dev/null | grep -q "Server: running"; then exit 0; fi; \
@@ -48,6 +53,18 @@ dev-server-start: build
 		tail -n 50 "$(DEV_LOG)" >&2 || true; \
 		exit 1; \
 	fi
+
+# Capture a 30s CPU profile from the running dev server and open it
+# interactively. Run this while reproducing the high-CPU scenario (e.g. with
+# dev-session-codex/dev-session-claude attached and active) to find the hot
+# function. Add PPROF_SECONDS=N to change the sample window.
+PPROF_SECONDS ?= 30
+dev-server-cpu-profile:
+	@echo "Sampling CPU for $(PPROF_SECONDS)s from http://$(DEV_PPROF_ADDR)/debug/pprof/profile ..."
+	go tool pprof "http://$(DEV_PPROF_ADDR)/debug/pprof/profile?seconds=$(PPROF_SECONDS)"
+
+dev-server-goroutines:
+	@curl -s "http://$(DEV_PPROF_ADDR)/debug/pprof/goroutine?debug=2"
 
 dev-server-stop: build
 	@if $(DEV_BRIDGECTL) server status 2>/dev/null | grep -q "Server: running"; then \

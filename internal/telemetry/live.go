@@ -13,6 +13,10 @@ import (
 // process memory.
 const maxInteractionBufferSize = 1 << 20
 
+// utf8DesyncCheckLimit bounds how much of the pending buffer the UTF-8
+// desync check (see observeInteraction) inspects per call.
+const utf8DesyncCheckLimit = defaultFrameBufferSize
+
 // LiveCollector combines framing, analysis, and bounded asynchronous delivery.
 type LiveCollector struct {
 	analyzer    *Analyzer
@@ -30,6 +34,14 @@ type interactionBuffer struct {
 	direction Direction
 	stream    StreamType
 	data      []byte
+	// scanned is the resume cursor for nextInteractionBoundary: data[:scanned]
+	// is confirmed to contain no boundary and no incomplete ANSI escape
+	// sequence start, so the next call only needs to examine data[scanned:].
+	// Without this, a TUI that emits ANSI sequences split across PTY reads
+	// with no newline for a while made every incoming chunk rescan (and the
+	// caller re-copy) the entire buffered-so-far data from byte 0, which is
+	// O(n^2) in the total bytes buffered before a boundary appears.
+	scanned int
 }
 
 type LiveIdentity struct {
@@ -151,16 +163,30 @@ func (c *LiveCollector) observeInteraction(session Session, direction Direction,
 		pending = &interactionBuffer{direction: direction, stream: stream}
 		c.pending[key] = pending
 	}
-	combined := append(append([]byte(nil), pending.data...), data...)
-	if len(pending.data) > 0 && utf8.Valid(pending.data) && !validOrIncompleteUTF8(combined) {
+	// Appending directly onto pending.data (rather than copying it into a
+	// fresh buffer first) is safe here: oldData's own length still bounds
+	// the utf8.Valid check below to exactly the bytes it held before this
+	// append, regardless of whether the append grew in place.
+	oldData := pending.data
+	combined := append(pending.data, data...)
+	// Bounded by utf8DesyncCheckLimit: re-validating all of oldData on every
+	// incoming chunk reintroduced the same O(n^2) blowup the scan-resume
+	// cursor above fixed for nextInteractionBoundary, once oldData grows
+	// large without hitting a boundary. A record that large without a
+	// boundary is already rare and gets force-flushed by
+	// maxInteractionBufferSize below regardless; skipping this desync check
+	// past the limit only forgoes an early reset for that rare case.
+	if len(oldData) > 0 && len(oldData) <= utf8DesyncCheckLimit && utf8.Valid(oldData) && !validOrIncompleteUTF8(combined) {
 		c.flushInteraction(session, pending)
 		pending.data = nil
-		combined = append(combined[:0], data...)
+		combined = append([]byte(nil), data...)
+		pending.scanned = 0
 	}
 	pending.data = combined
 	for {
-		boundary := nextInteractionBoundary(pending.data)
+		boundary, resume := nextInteractionBoundary(pending.data, pending.scanned)
 		if boundary == 0 {
+			pending.scanned = resume
 			break
 		}
 		if boundary > maxInteractionBufferSize {
@@ -169,10 +195,12 @@ func (c *LiveCollector) observeInteraction(session Session, direction Direction,
 			c.emitInteraction(session, direction, stream, pending.data[:boundary])
 		}
 		pending.data = append([]byte(nil), pending.data[boundary:]...)
+		pending.scanned = 0
 	}
 	if len(pending.data) > maxInteractionBufferSize {
 		c.analyzer.ObserveOmittedInteraction(session, direction, interactionKind(direction), stream, pending.data, OmittedBufferLimit)
 		pending.data = nil
+		pending.scanned = 0
 		delete(c.pending, key)
 		return
 	}
@@ -180,22 +208,32 @@ func (c *LiveCollector) observeInteraction(session Session, direction Direction,
 
 // A malformed record is omitted as one privacy unit, but later valid records
 // remain recoverable. Newlines inside OSC/DCS payloads are not record boundaries.
-func nextInteractionBoundary(data []byte) int {
-	buffer := string(data)
+//
+// resumeFrom lets the caller skip data[:resumeFrom], already confirmed to
+// hold no boundary and no incomplete ANSI escape sequence start by a
+// previous call — necessary so repeated calls as a chunk-by-chunk stream
+// grows data don't rescan (and re-stringify) everything buffered so far on
+// every single call. Returns the boundary position (0 if none found) and,
+// when no boundary is found, the resume position for the next call.
+func nextInteractionBoundary(data []byte, resumeFrom int) (boundary, nextResume int) {
+	if resumeFrom < 0 || resumeFrom > len(data) {
+		resumeFrom = 0
+	}
+	buffer := string(data[resumeFrom:])
 	for i := 0; i < len(buffer); i++ {
 		if buffer[i] == '\x1b' {
 			end, complete := ansiSequenceEnd(buffer, i)
 			if !complete {
-				return 0
+				return 0, resumeFrom + i
 			}
 			i = end - 1
 			continue
 		}
 		if isRecordBoundary(buffer[i]) {
-			return i + 1
+			return resumeFrom + i + 1, 0
 		}
 	}
-	return 0
+	return 0, resumeFrom + len(buffer)
 }
 
 func (c *LiveCollector) flushInteraction(session Session, pending *interactionBuffer) {
