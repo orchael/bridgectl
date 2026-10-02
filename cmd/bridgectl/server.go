@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	_ "net/http/pprof" // registered on DefaultServeMux only when BRIDGECTL_PPROF_ADDR is set; see startDebugPprof
+	_ "net/http/pprof" // always registers its handlers on http.DefaultServeMux at init; see startDebugPprof for the env-gated, loopback-only listener that actually serves them
 	"os"
 	"os/signal"
 	"path/filepath"

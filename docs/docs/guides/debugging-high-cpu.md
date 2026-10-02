@@ -123,10 +123,10 @@ processed, even if each individual call looks cheap in isolation.
 
 A cheap way to confirm this empirically: write a throwaway test (or `go run`
 scratch program) that feeds the function many small increments and prints
-elapsed time at a few sizes (e.g. 5k, 20k, 80k, 320k). Roughly constant
-time-per-item means it's linear; time that roughly quadruples each time the
-size quadruples means it's quadratic — chase that down before concluding
-the fix worked.
+elapsed time at a few sizes (e.g. 5k, 20k, 80k, 320k). Total time scaling by
+the same factor as the size (4x the size → ~4x the time) means it's linear;
+total time scaling by that factor *squared* (4x the size → ~16x the time)
+means it's quadratic — chase that down before concluding the fix worked.
 
 ## Worked example: three compounding O(n²) bugs
 
