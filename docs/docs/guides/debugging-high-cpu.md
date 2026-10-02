@@ -157,14 +157,30 @@ scaled with the *total accumulated buffer*, not the incoming chunk:
    the entire remaining rune slice back to a string on every iteration just
    to recheck its byte length.
 
-Fixes: a resume cursor for (1), bounding (2) to a fixed size (the existing
-1MB hard cap already handles pathologically large records, so this only
-skips the *redundant rescan*, not correctness), and a single
-rune-boundary-aware byte slice for (3) instead of an iterative shrink. A
-regression test feeding 320,000 realistic chunks (short complete escape
-sequences + text, no newline) completes in ~120ms after the fix; before it,
-the same test didn't finish within a 90-second timeout at roughly a quarter
-of that size.
+A first pass fixed (1) with a resume cursor and bounded (2) to a fixed
+buffer size to avoid re-scanning. Code review (GitHub Copilot, on the PR)
+correctly flagged that bounding (2) by size silently changed behavior once
+a buffer exceeded that size — a large valid record followed by invalid
+bytes should split into two telemetry records, not merge into one
+`invalid_utf8` omission — and that the resume cursor for (1) didn't help a
+*single* escape sequence that itself grows across many chunks (e.g. a long
+CSI parameter list delivered a few bytes at a time), since the sequence
+terminator search still rescanned the whole open sequence from its start
+every call. Both became proper incremental state instead of a size bound:
+`advanceUTF8State` tracks only the (at most 3-byte) dangling UTF-8 tail
+across calls, and `ansiSequenceEndFrom` resumes the terminator search from
+where it left off within an open escape sequence.
+
+Committed regression tests cover both the steady-state case (many short,
+complete chunks with no boundary — `TestLiveCollectorManyChunksWithoutBoundaryStaysLinear`,
+5,000 chunks) and the single-long-open-sequence case
+(`TestLiveCollectorSingleLongIncompleteANSISequenceStaysLinear`, 50,000
+one-byte chunks), both completing in milliseconds. A manual (uncommitted)
+scaling probe during development fed up to 320,000 chunks: pre-fix, that
+pattern didn't finish within a 90-second timeout at roughly a quarter of
+that size; post-fix, the full 320,000 completed in ~120ms — useful for
+seeing the asymptotic difference directly, but the committed tests above
+are the ones CI actually runs.
 
 See PR history for `internal/telemetry/live.go` and
 `internal/telemetry/framing.go` for the full diff and test coverage.

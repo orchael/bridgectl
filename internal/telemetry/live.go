@@ -13,10 +13,6 @@ import (
 // process memory.
 const maxInteractionBufferSize = 1 << 20
 
-// utf8DesyncCheckLimit bounds how much of the pending buffer the UTF-8
-// desync check (see observeInteraction) inspects per call.
-const utf8DesyncCheckLimit = defaultFrameBufferSize
-
 // LiveCollector combines framing, analysis, and bounded asynchronous delivery.
 type LiveCollector struct {
 	analyzer    *Analyzer
@@ -35,13 +31,69 @@ type interactionBuffer struct {
 	stream    StreamType
 	data      []byte
 	// scanned is the resume cursor for nextInteractionBoundary: data[:scanned]
-	// is confirmed to contain no boundary and no incomplete ANSI escape
-	// sequence start, so the next call only needs to examine data[scanned:].
-	// Without this, a TUI that emits ANSI sequences split across PTY reads
-	// with no newline for a while made every incoming chunk rescan (and the
-	// caller re-copy) the entire buffered-so-far data from byte 0, which is
-	// O(n^2) in the total bytes buffered before a boundary appears.
+	// is confirmed to contain no boundary and no open ANSI escape sequence,
+	// so the next call only needs to examine data[scanned:]. Without this, a
+	// TUI that emits ANSI sequences split across PTY reads with no newline
+	// for a while made every incoming chunk rescan (and the caller re-copy)
+	// the entire buffered-so-far data from byte 0 — O(n^2) in the total
+	// bytes buffered before a boundary appears.
 	scanned int
+	// escStart is the start index (within data) of a currently-open,
+	// not-yet-complete ANSI escape sequence, or -1 when none is open.
+	// escScanned is how far the terminator search within that sequence has
+	// already progressed (an absolute index into data). Without resuming
+	// from here, an escape sequence delivered a few bytes at a time (e.g. a
+	// long CSI parameter list split across PTY reads) made ansiSequenceEnd
+	// re-scan the sequence from its start on every call — still O(n^2) even
+	// after the outer scanned cursor above stopped the rest of the buffer
+	// from being rescanned.
+	escStart   int
+	escScanned int
+	// utf8 tracks just enough of data's trailing bytes to answer "does data
+	// currently end on a clean UTF-8 boundary" without re-validating the
+	// whole buffer on every call — see advanceUTF8State.
+	utf8 utf8State
+}
+
+// utf8State is the result of validOrIncompleteUTF8-style analysis of a
+// buffer's end, carried forward across calls instead of recomputed from the
+// full buffer each time.
+type utf8State struct {
+	// broken is true once the buffer contains a non-trailing encoding
+	// error. utf8.Valid never becomes true again for such a buffer no
+	// matter what gets appended (a bad byte earlier in the stream isn't
+	// fixed by later bytes), so once broken this is an O(1) no-op forever,
+	// until the buffer is reset or truncated at a boundary.
+	broken bool
+	// tail holds the (at most 3) trailing bytes that are a valid prefix of
+	// an as-yet-incomplete rune. Empty/nil when data ends on a clean
+	// boundary (equivalent to utf8.Valid(data) == true).
+	tail []byte
+}
+
+// advanceUTF8State folds newData onto prev (the state of the buffer newData
+// is being appended to) without looking at any of the buffer's earlier
+// bytes: when prev is clean or incomplete, only prev.tail (<=3 bytes) plus
+// newData can possibly be relevant to whether the result ends cleanly,
+// since everything before that tail was already confirmed complete.
+// Re-running utf8.Valid/validOrIncompleteUTF8 on the whole accumulated
+// buffer on every incoming chunk reintroduced the same O(n^2) blowup the
+// scan-resume cursor above fixed for nextInteractionBoundary.
+func advanceUTF8State(prev utf8State, newData []byte) utf8State {
+	if prev.broken {
+		return prev
+	}
+	window := append(append([]byte(nil), prev.tail...), newData...)
+	if utf8.Valid(window) {
+		return utf8State{}
+	}
+	for suffix := 1; suffix <= 3 && suffix <= len(window); suffix++ {
+		prefix, tail := window[:len(window)-suffix], window[len(window)-suffix:]
+		if utf8.Valid(prefix) && !utf8.FullRune(tail) {
+			return utf8State{tail: append([]byte(nil), tail...)}
+		}
+	}
+	return utf8State{broken: true}
 }
 
 type LiveIdentity struct {
@@ -160,33 +212,26 @@ func (c *LiveCollector) observeInteraction(session Session, direction Direction,
 		pending = nil
 	}
 	if pending == nil {
-		pending = &interactionBuffer{direction: direction, stream: stream}
+		pending = &interactionBuffer{direction: direction, stream: stream, escStart: -1}
 		c.pending[key] = pending
 	}
 	// Appending directly onto pending.data (rather than copying it into a
-	// fresh buffer first) is safe here: oldData's own length still bounds
-	// the utf8.Valid check below to exactly the bytes it held before this
-	// append, regardless of whether the append grew in place.
-	oldData := pending.data
-	combined := append(pending.data, data...)
-	// Bounded by utf8DesyncCheckLimit: re-validating all of oldData on every
-	// incoming chunk reintroduced the same O(n^2) blowup the scan-resume
-	// cursor above fixed for nextInteractionBoundary, once oldData grows
-	// large without hitting a boundary. A record that large without a
-	// boundary is already rare and gets force-flushed by
-	// maxInteractionBufferSize below regardless; skipping this desync check
-	// past the limit only forgoes an early reset for that rare case.
-	if len(oldData) > 0 && len(oldData) <= utf8DesyncCheckLimit && utf8.Valid(oldData) && !validOrIncompleteUTF8(combined) {
+	// fresh buffer first) is safe here: a reset below only ever happens
+	// before anything reads pending.data's old content past what
+	// advanceUTF8State/resetNeeded already captured.
+	resetNeeded := len(pending.data) > 0 && !pending.utf8.broken && len(pending.utf8.tail) == 0 && !validOrIncompleteUTF8(data)
+	if resetNeeded {
 		c.flushInteraction(session, pending)
 		pending.data = nil
-		combined = append([]byte(nil), data...)
 		pending.scanned = 0
+		pending.escStart = -1
+		pending.utf8 = utf8State{}
 	}
-	pending.data = combined
+	pending.data = append(pending.data, data...)
+	pending.utf8 = advanceUTF8State(pending.utf8, data)
 	for {
-		boundary, resume := nextInteractionBoundary(pending.data, pending.scanned)
+		boundary := nextInteractionBoundary(pending)
 		if boundary == 0 {
-			pending.scanned = resume
 			break
 		}
 		if boundary > maxInteractionBufferSize {
@@ -194,46 +239,133 @@ func (c *LiveCollector) observeInteraction(session Session, direction Direction,
 		} else {
 			c.emitInteraction(session, direction, stream, pending.data[:boundary])
 		}
-		pending.data = append([]byte(nil), pending.data[boundary:]...)
+		remainder := pending.data[boundary:]
+		pending.data = append([]byte(nil), remainder...)
 		pending.scanned = 0
+		pending.escStart = -1
+		// The remainder was never checked for UTF-8 completeness on its
+		// own (only as a suffix of the now-discarded, boundary-terminated
+		// prefix), so re-derive its state fresh. This is a one-time cost
+		// per boundary found, proportional to the remainder at that
+		// moment — not repeated per subsequent chunk, so it doesn't
+		// reintroduce the O(n^2) this function exists to avoid.
+		pending.utf8 = advanceUTF8State(utf8State{}, pending.data)
 	}
 	if len(pending.data) > maxInteractionBufferSize {
 		c.analyzer.ObserveOmittedInteraction(session, direction, interactionKind(direction), stream, pending.data, OmittedBufferLimit)
 		pending.data = nil
 		pending.scanned = 0
+		pending.escStart = -1
+		pending.utf8 = utf8State{}
 		delete(c.pending, key)
 		return
 	}
 }
 
-// A malformed record is omitted as one privacy unit, but later valid records
-// remain recoverable. Newlines inside OSC/DCS payloads are not record boundaries.
+// nextInteractionBoundary scans pending.data for the next interaction
+// boundary (an unescaped newline/carriage return), resuming from
+// pending.scanned/escStart/escScanned — the position and in-progress escape
+// sequence state confirmed by a previous call — instead of rescanning from
+// byte 0. A malformed record is omitted as one privacy unit, but later valid
+// records remain recoverable. Newlines inside OSC/DCS payloads are not
+// record boundaries.
 //
-// resumeFrom lets the caller skip data[:resumeFrom], already confirmed to
-// hold no boundary and no incomplete ANSI escape sequence start by a
-// previous call — necessary so repeated calls as a chunk-by-chunk stream
-// grows data don't rescan (and re-stringify) everything buffered so far on
-// every single call. Returns the boundary position (0 if none found) and,
-// when no boundary is found, the resume position for the next call.
-func nextInteractionBoundary(data []byte, resumeFrom int) (boundary, nextResume int) {
-	if resumeFrom < 0 || resumeFrom > len(data) {
-		resumeFrom = 0
+// Without resuming, a TUI that emits ANSI sequences split across PTY reads
+// with no newline for a while made every incoming chunk rescan (and the
+// caller re-copy) the entire buffered-so-far data from byte 0 — O(n^2) in
+// the total bytes buffered before a boundary appears. Resuming the scan
+// cursor alone isn't enough for a single escape sequence that itself grows
+// across many chunks (e.g. a very long CSI parameter list delivered a few
+// bytes at a time): ansiSequenceEnd's own terminator search also needs to
+// resume from escScanned rather than re-scanning that sequence from its
+// start on every call.
+//
+// Updates pending.scanned/escStart/escScanned in place and returns the
+// boundary position, or 0 when none is found yet.
+func nextInteractionBoundary(pending *interactionBuffer) int {
+	data := pending.data
+	if pending.scanned < 0 || pending.scanned > len(data) {
+		pending.scanned = 0
 	}
-	buffer := string(data[resumeFrom:])
-	for i := 0; i < len(buffer); i++ {
-		if buffer[i] == '\x1b' {
-			end, complete := ansiSequenceEnd(buffer, i)
+	i := pending.scanned
+	if pending.escStart >= 0 {
+		end, complete := ansiSequenceEndFrom(data, pending.escStart, pending.escScanned)
+		if !complete {
+			pending.escScanned = end
+			return 0
+		}
+		i = end
+		pending.escStart = -1
+	}
+	for i < len(data) {
+		if data[i] == '\x1b' {
+			end, complete := ansiSequenceEndFrom(data, i, i+2)
 			if !complete {
-				return 0, resumeFrom + i
+				pending.escStart = i
+				pending.escScanned = end
+				pending.scanned = i
+				return 0
 			}
-			i = end - 1
+			i = end
 			continue
 		}
-		if isRecordBoundary(buffer[i]) {
-			return resumeFrom + i + 1, 0
+		if isRecordBoundary(data[i]) {
+			return i + 1
+		}
+		i++
+	}
+	pending.scanned = i
+	return 0
+}
+
+// ansiSequenceEndFrom reports where the ANSI escape sequence starting at
+// data[start] ends, resuming the terminator search from scanFrom (an
+// absolute index into data) instead of always restarting at start+2. The
+// sequence "kind" is determined solely by data[start+1], which never
+// changes once the sequence begins, so it's always cheap to re-derive.
+// Mirrors ansiSequenceEnd's logic (framing.go) but operates on []byte with
+// a resumable scan instead of re-scanning a fresh string from the
+// sequence's start on every call — needed because a single escape sequence
+// can itself grow across many chunks (e.g. a long CSI parameter list
+// delivered a few bytes at a time).
+func ansiSequenceEndFrom(data []byte, start, scanFrom int) (int, bool) {
+	if start+1 >= len(data) {
+		return len(data), false
+	}
+	introducer := data[start+1]
+	if scanFrom < start+2 {
+		scanFrom = start + 2
+	}
+	if introducer == ']' || introducer == 'P' || introducer == 'X' || introducer == '^' || introducer == '_' {
+		for i := scanFrom; i < len(data); i++ {
+			if introducer == ']' && data[i] == '\x07' {
+				return i + 1, true
+			}
+			if data[i] == '\x1b' {
+				if i+1 >= len(data) {
+					// Trailing ESC with no lookahead byte yet: resume
+					// exactly here next call so a terminating '\\'
+					// arriving as the very next chunk's first byte is
+					// still recognized, instead of being skipped over.
+					return i, false
+				}
+				if data[i+1] == '\\' {
+					return i + 2, true
+				}
+			}
+		}
+		return len(data), false
+	}
+	if introducer != '[' {
+		return start + 2, true
+	}
+	for i := scanFrom; i < len(data); i++ {
+		// ECMA-48 control sequence terminators occupy 0x40 through 0x7e.
+		if data[i] >= 0x40 && data[i] <= 0x7e {
+			return i + 1, true
 		}
 	}
-	return 0, resumeFrom + len(buffer)
+	return len(data), false
 }
 
 func (c *LiveCollector) flushInteraction(session Session, pending *interactionBuffer) {

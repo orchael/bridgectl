@@ -24,8 +24,10 @@ import (
 // startDebugPprof starts a pprof HTTP server for live CPU/goroutine
 // profiling when BRIDGECTL_PPROF_ADDR is set (e.g. "127.0.0.1:6060"). It is
 // opt-in and off by default so the installed/production server never
-// exposes runtime internals. Bind to loopback only; this endpoint has no
-// authentication.
+// exposes runtime internals, and refuses to start unless addr explicitly
+// resolves to loopback — this endpoint has no authentication, so a value
+// like ":6060" or "0.0.0.0:6060" would otherwise expose it to the network
+// despite the loopback-only intent.
 //
 // Usage once running:
 //
@@ -36,12 +38,31 @@ func startDebugPprof(logger *slog.Logger) {
 	if addr == "" {
 		return
 	}
+	if !isLoopbackAddr(addr) {
+		logger.Error("BRIDGECTL_PPROF_ADDR must bind to loopback (e.g. 127.0.0.1:6061); refusing to start the unauthenticated debug pprof server", "addr", addr)
+		return
+	}
 	go func() {
 		logger.Warn("debug pprof server enabled", "addr", addr)
-		if err := http.ListenAndServe(addr, nil); err != nil { //nolint:gosec // loopback debug-only endpoint, opt-in via env var
+		if err := http.ListenAndServe(addr, nil); err != nil { //nolint:gosec // isLoopbackAddr validated above; debug-only endpoint, opt-in via env var
 			logger.Warn("debug pprof server exited", "error", err)
 		}
 	}()
+}
+
+// isLoopbackAddr reports whether addr's host explicitly resolves to the
+// loopback interface. An empty host (e.g. ":6060") binds all interfaces, so
+// it is rejected rather than treated as "unspecified = local".
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // sdNotify sends a notification to the systemd service manager via
