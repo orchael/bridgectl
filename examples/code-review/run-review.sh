@@ -26,4 +26,4 @@ case "$PROVIDER" in
 esac
 
 echo "Reviewing $BRANCH with $PROVIDER" >&2
-docker run --rm -i   --name "bridgectl-review-${BRANCH//[^a-zA-Z0-9_.-]/-}-$$"   -v "$REPO:/repos/workspace"   -w /repos/workspace   "${AUTH_ARGS[@]}"   -e BRIDGECTL_REVIEW_BRANCH="$BRANCH"   "$IMAGE"   bridgectl run --no-tty --provider "$PROVIDER" --project code-review /repos/workspace   < "$PROMPT_FILE"
+docker run --rm -i   --name "bridgectl-review-${BRANCH//[^a-zA-Z0-9_.-]/-}-$$"   -v "$REPO:/repos/workspace"   -w /repos/workspace   "${AUTH_ARGS[@]}"   -e BRIDGECTL_REVIEW_BRANCH="$BRANCH"   "$IMAGE"   bridgectl session start --no-tty --provider "$PROVIDER" --project code-review /repos/workspace   < "$PROMPT_FILE"
