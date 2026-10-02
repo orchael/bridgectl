@@ -68,6 +68,33 @@ func writeFakeNode(t *testing.T, versionOutput string) {
 	t.Setenv("PATH", binDir)
 }
 
+// TestDoctorProviderRootFallsBackToXDGConfig guards against doctor checking
+// only <stateDir>/bridge.yaml while `server start` also auto-loads
+// $XDG_CONFIG_HOME/bridgectl/config.yaml: without the fix, doctor would read
+// ./.nvmrc (CWD) instead of the daemon's actual runtime.provider_root and
+// report a false Node status. Flagged by Copilot review on PR #272.
+func TestDoctorProviderRootFallsBackToXDGConfig(t *testing.T) {
+	stateDir := t.TempDir() // no bridge.yaml here
+	t.Setenv("BRIDGECTL_STATE_DIR", stateDir)
+
+	xdgConfigHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+	bridgectlConfigDir := filepath.Join(xdgConfigHome, "bridgectl")
+	if err := os.MkdirAll(bridgectlConfigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	providerRoot := t.TempDir()
+	configYAML := "runtime:\n  provider_root: " + providerRoot + "\n"
+	if err := os.WriteFile(filepath.Join(bridgectlConfigDir, "config.yaml"), []byte(configYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := doctorProviderRoot()
+	if got != providerRoot {
+		t.Fatalf("doctorProviderRoot() = %q, want %q", got, providerRoot)
+	}
+}
+
 func TestNodeVersionLineNotConfigured(t *testing.T) {
 	dir := t.TempDir() // no .nvmrc
 	got := nodeVersionLine(context.Background(), dir)

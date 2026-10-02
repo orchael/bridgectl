@@ -100,11 +100,24 @@ func printVersionsSection(ctx context.Context, out io.Writer) {
 }
 
 // doctorProviderRoot resolves the directory .nvmrc is read from: the
-// configured runtime.provider_root when a bridge.yaml is present, otherwise
+// configured runtime.provider_root when a config file is found, otherwise
 // the daemon's working directory convention of "." (CWD-relative), matching
 // the compatibility rule documented on config.RuntimeConfig.
+//
+// It reuses defaultServerConfigPath, the same discovery `server start` uses
+// (stateDir/bridge.yaml, then $XDG_CONFIG_HOME/bridgectl/config.yaml, then
+// the OS user-config dir) so doctor checks the config the daemon would
+// actually load by default, not just the stateDir candidate. An explicit
+// `--config` path passed to a running daemon is not discoverable here: the
+// daemon does not currently persist which config path it loaded, so a
+// doctor run against such a daemon can still report Node status against
+// the wrong .nvmrc. Persisting the active config path is a larger change
+// left for a follow-up; it is not one of the core items in issue #265.
 func doctorProviderRoot() string {
-	configPath := filepath.Join(localserver.StateDir(), "bridge.yaml")
+	configPath := defaultServerConfigPath(localserver.StateDir())
+	if configPath == "" {
+		return "."
+	}
 	if fileCfg, err := config.Load(configPath); err == nil && fileCfg.Runtime.ProviderRoot != "" {
 		return fileCfg.Runtime.ProviderRoot
 	}
