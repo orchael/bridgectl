@@ -1275,6 +1275,13 @@ func (s *Server) Stop() {
 	_ = os.Remove(filepath.Join(s.stateDir, "server.lock"))
 }
 
+// ensureExplicitServerCertFresh checks whether an externally-managed TLS
+// certificate (CABundlePath/TLSCertPath/TLSKeyPath) is expired or approaching
+// expiry. Unlike the auto-generated and Step CA-issued server certificates,
+// an explicit certificate's SAN set is not compared against serverSANs: it
+// is owned and issued by an external party, bridgectl's own `--san` flag has
+// no bearing on its content, and the caller derives tlsServerName from the
+// certificate itself (see serverNameFromCert) rather than from serverSANs.
 func ensureExplicitServerCertFresh(mat *PKIMaterial, serverSANs []string, logger *slog.Logger, stepCA *StepCAConfig) error {
 	notBefore, notAfter, err := ServerCertExpiry(mat.ServerCertPath)
 	if err != nil {

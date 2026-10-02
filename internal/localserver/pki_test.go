@@ -469,6 +469,196 @@ func TestEnsurePKI_StepCAExpiredCertRenewsAtStartup(t *testing.T) {
 	assert.True(t, time.Until(notAfter) > 23*time.Hour, "cert should have been renewed at startup, got remaining=%v", time.Until(notAfter))
 }
 
+// TestEnsurePKI_AutoGenExpiredCertRenewsAtStartup verifies that EnsurePKI
+// renews an expired auto-generated server certificate synchronously at
+// startup instead of reusing it indefinitely (issue #225).
+func TestEnsurePKI_AutoGenExpiredCertRenewsAtStartup(t *testing.T) {
+	stateDir := t.TempDir()
+	sans := []string{"10.0.0.1"}
+
+	// First call generates the CA and a (default ~90-day) server cert.
+	mat, err := EnsurePKI(stateDir, sans, testLogger(), nil, 0)
+	require.NoError(t, err)
+
+	// Mint an already-expired server cert signed by the SAME CA and drop it
+	// in place of the fresh one, simulating a daemon that was last started
+	// long enough ago for the cert to have expired.
+	caCert, caKey, err := pki.LoadCA(mat.CACertPath, mat.CAKeyPath)
+	require.NoError(t, err)
+	expiredCertPath, expiredKeyPath, err := pki.IssueCert(caCert, caKey, pki.CertTypeServer, "server", sans, filepath.Join(t.TempDir(), "scratch"), time.Nanosecond)
+	require.NoError(t, err)
+	time.Sleep(10 * time.Millisecond) // let it expire
+	expiredCertData, err := os.ReadFile(expiredCertPath)
+	require.NoError(t, err)
+	expiredKeyData, err := os.ReadFile(expiredKeyPath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(mat.ServerCertPath, expiredCertData, 0o644))
+	require.NoError(t, os.WriteFile(mat.ServerKeyPath, expiredKeyData, 0o600))
+
+	// Second call should detect the expired cert and renew it at startup.
+	mat2, err := EnsurePKI(stateDir, sans, testLogger(), nil, 0)
+	require.NoError(t, err)
+
+	_, notAfter, err := ServerCertExpiry(mat2.ServerCertPath)
+	require.NoError(t, err)
+	assert.True(t, time.Until(notAfter) > 24*time.Hour, "cert should have been renewed at startup with the default ~90-day validity, got remaining=%v", time.Until(notAfter))
+}
+
+// TestEnsurePKI_AutoGenSANMismatchRenewsAtStartup verifies that restarting
+// with a different --san value regenerates the auto-generated server cert
+// instead of reusing one that no longer covers the requested names
+// (issue #224).
+func TestEnsurePKI_AutoGenSANMismatchRenewsAtStartup(t *testing.T) {
+	stateDir := t.TempDir()
+
+	mat, err := EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), nil, 0)
+	require.NoError(t, err)
+	cert1, err := pki.LoadCert(mat.ServerCertPath)
+	require.NoError(t, err)
+	require.Len(t, cert1.IPAddresses, 1)
+	assert.Equal(t, "10.0.0.1", cert1.IPAddresses[0].String())
+
+	// Restart with a different --san value.
+	mat2, err := EnsurePKI(stateDir, []string{"10.0.0.2"}, testLogger(), nil, 0)
+	require.NoError(t, err)
+	cert2, err := pki.LoadCert(mat2.ServerCertPath)
+	require.NoError(t, err)
+	require.Len(t, cert2.IPAddresses, 1)
+	assert.Equal(t, "10.0.0.2", cert2.IPAddresses[0].String(), "cert should be regenerated to cover the new SAN")
+	assert.NotEqual(t, cert1.SerialNumber, cert2.SerialNumber, "cert should have been reissued, not reused")
+}
+
+// TestEnsurePKI_StepCASANChangeRenewsAtStartup is the Step CA-mode
+// counterpart of TestEnsurePKI_AutoGenSANMismatchRenewsAtStartup: restarting
+// with a different --san value must renew the cert even though the
+// previous one has not expired (issue #224). The comparison is against the
+// SANs bridgectl itself recorded as requested on the prior call (see
+// pkiRequestedSANsChanged), not against the issued cert's actual content —
+// see TestEnsurePKI_ACMEKeepsServerSAN and
+// TestDiscoverTargetSecureModeServerNameFromCert for why comparing against
+// the cert's own content would be unsafe (an external CA/provisioner can
+// legitimately narrow the issued SAN set).
+func TestEnsurePKI_StepCASANChangeRenewsAtStartup(t *testing.T) {
+	stateDir := t.TempDir()
+	rootPEM := filepath.Join(stateDir, "root.crt")
+	require.NoError(t, os.WriteFile(rootPEM, []byte("fake-root-cert"), 0o644))
+
+	caDir := filepath.Join(t.TempDir(), "ca")
+	caCertPath, caKeyPath, err := pki.InitCA("test-ca", caDir)
+	require.NoError(t, err)
+	caCert, caKey, err := pki.LoadCA(caCertPath, caKeyPath)
+	require.NoError(t, err)
+
+	jwkCalled := 0
+	oldJWK := requestCertJWKFn
+	requestCertJWKFn = func(_ *StepCAConfig, sans []string, certPath, keyPath string, _ *slog.Logger) error {
+		jwkCalled++
+		freshCert, freshKey, err := pki.IssueCert(caCert, caKey, pki.CertTypeServer, "server", sans, t.TempDir(), 24*time.Hour)
+		if err != nil {
+			return err
+		}
+		certData, err := os.ReadFile(freshCert)
+		if err != nil {
+			return err
+		}
+		keyData, err := os.ReadFile(freshKey)
+		if err != nil {
+			return err
+		}
+		require.NoError(t, os.WriteFile(certPath, certData, 0o644))
+		require.NoError(t, os.WriteFile(keyPath, keyData, 0o600))
+		return nil
+	}
+	t.Cleanup(func() { requestCertJWKFn = oldJWK })
+
+	pwFile := filepath.Join(t.TempDir(), "password")
+	require.NoError(t, os.WriteFile(pwFile, []byte("test"), 0o600))
+	stepCfg := &StepCAConfig{
+		URL:                     "https://ca.example.internal:443",
+		RootPath:                rootPEM,
+		ProvisionerPasswordFile: pwFile,
+	}
+
+	mat, err := EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), stepCfg, 0)
+	require.NoError(t, err)
+	require.Equal(t, 1, jwkCalled, "first call should issue once")
+	cert1, err := pki.LoadCert(mat.ServerCertPath)
+	require.NoError(t, err)
+	require.Len(t, cert1.IPAddresses, 1)
+	assert.Equal(t, "10.0.0.1", cert1.IPAddresses[0].String())
+
+	// Restart with a different --san value; the cert is still fresh
+	// (24h validity, just issued) so only the recorded-SAN check should
+	// trigger renewal.
+	mat2, err := EnsurePKI(stateDir, []string{"10.0.0.2"}, testLogger(), stepCfg, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 2, jwkCalled, "a recorded --san change must trigger re-issuance against the Step CA")
+	cert2, err := pki.LoadCert(mat2.ServerCertPath)
+	require.NoError(t, err)
+	require.Len(t, cert2.IPAddresses, 1)
+	assert.Equal(t, "10.0.0.2", cert2.IPAddresses[0].String(), "cert should have been renewed to cover the new SAN")
+}
+
+// TestEnsurePKI_StepCAUnchangedSANsDoesNotForceRenewal verifies that when
+// the requested SANs have not changed between starts, a fresh Step CA
+// cert is left untouched even if its actual issued SANs happen to differ
+// from what was requested (e.g. an ACME provisioner trimming them) —
+// pkiRequestedSANsChanged only compares against bridgectl's own recorded
+// request, never against the cert's own content.
+func TestEnsurePKI_StepCAUnchangedSANsDoesNotForceRenewal(t *testing.T) {
+	stateDir := t.TempDir()
+	rootPEM := filepath.Join(stateDir, "root.crt")
+	require.NoError(t, os.WriteFile(rootPEM, []byte("fake-root-cert"), 0o644))
+
+	caDir := filepath.Join(t.TempDir(), "ca")
+	caCertPath, caKeyPath, err := pki.InitCA("test-ca", caDir)
+	require.NoError(t, err)
+	caCert, caKey, err := pki.LoadCA(caCertPath, caKeyPath)
+	require.NoError(t, err)
+
+	jwkCalled := 0
+	oldJWK := requestCertJWKFn
+	requestCertJWKFn = func(_ *StepCAConfig, _ []string, certPath, keyPath string, _ *slog.Logger) error {
+		jwkCalled++
+		// Issue a cert whose actual SANs ("trimmed.example.com") differ from
+		// what was requested, simulating a provisioner that narrows the set.
+		freshCert, freshKey, err := pki.IssueCert(caCert, caKey, pki.CertTypeServer, "server", []string{"trimmed.example.com"}, t.TempDir(), 24*time.Hour)
+		if err != nil {
+			return err
+		}
+		certData, err := os.ReadFile(freshCert)
+		if err != nil {
+			return err
+		}
+		keyData, err := os.ReadFile(freshKey)
+		if err != nil {
+			return err
+		}
+		require.NoError(t, os.WriteFile(certPath, certData, 0o644))
+		require.NoError(t, os.WriteFile(keyPath, keyData, 0o600))
+		return nil
+	}
+	t.Cleanup(func() { requestCertJWKFn = oldJWK })
+
+	pwFile := filepath.Join(t.TempDir(), "password")
+	require.NoError(t, os.WriteFile(pwFile, []byte("test"), 0o600))
+	stepCfg := &StepCAConfig{
+		URL:                     "https://ca.example.internal:443",
+		RootPath:                rootPEM,
+		ProvisionerPasswordFile: pwFile,
+	}
+
+	_, err = EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), stepCfg, 0)
+	require.NoError(t, err)
+	require.Equal(t, 1, jwkCalled)
+
+	// Restart with the SAME requested SAN. Even though the issued cert's
+	// actual content ("trimmed.example.com") differs, nothing should renew.
+	_, err = EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), stepCfg, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 1, jwkCalled, "unchanged requested SANs must not force renewal even if the issued cert's own SANs differ")
+}
+
 // TestIssueClientCertViaOIDC_HappyPath exercises the full OIDC enrollment path
 // using a stub `step` binary.
 func TestIssueClientCertViaOIDC_HappyPath(t *testing.T) {
