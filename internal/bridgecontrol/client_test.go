@@ -1042,3 +1042,16 @@ func TestNotifyRecencySurvivesCoalescingAndDrain(t *testing.T) {
 		t.Fatal("full drain left queue ordering entries")
 	}
 }
+
+func TestStatusUsesNegotiatedInstallation(t *testing.T) {
+	c := newTestClient(t, "wss://bridge.example/v1/control", "bri_valid", nil)
+	c.installationID = "negotiated-installation"
+	c.setStatus(StateConnected, "")
+	st, err := ReadStatus(c.cfg.StatusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.InstallationID != "negotiated-installation" {
+		t.Fatalf("status has stale installation identity: %q", st.InstallationID)
+	}
+}

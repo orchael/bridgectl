@@ -57,10 +57,12 @@ config; preserve existing provider/security settings when reconciling duplicate
 configs. Do not print the credentials JSON. The standard unmodified ai-desktop
 layout is covered by the production enrollment regression test.
 
-Restart is necessary for a running daemon: control and telemetry configuration
-are loaded at startup. This unit uses `KillMode=control-group`, so finish active
-work before restarting. With no running daemon, simply log in and run the
-session; no restart command is necessary. Existing provider authentication and
+The v1.4.0 acceptance commands above require a restart because that release loads
+reporting configuration only at startup. Builds with enrollment reload support
+activate it during login and preserve live sessions; omit the post-login restart
+on those builds. Upgrading an already-running v1.4.0 daemon still requires one
+restart to load the new binary. The unit uses `KillMode=control-group`, so finish
+active work before an upgrade restart. Existing provider authentication and
 workspace permissions remain prerequisites and are supplied by ai-desktops.
 
 ## Telemetry

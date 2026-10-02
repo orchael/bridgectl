@@ -48,7 +48,10 @@ func (c *Client) executeCommand(ctx context.Context, cmd Command) CommandResult 
 	if err != nil || id.String() != cmd.ID || cmd.UserID == "" || len(cmd.UserID) > 256 || cmd.SessionID == "" || len(cmd.SessionID) > 256 || (cmd.Action != "instruct" && cmd.PendingRequestID == "") || len(cmd.PendingRequestID) > 256 || !validCommandPayload(cmd) {
 		return result
 	}
-	if cmd.OrganizationID != c.organizationID || cmd.InstallationID != c.installationID {
+	c.identityMu.Lock()
+	organizationID, installationID := c.organizationID, c.installationID
+	c.identityMu.Unlock()
+	if cmd.OrganizationID != organizationID || cmd.InstallationID != installationID {
 		result.Code = "wrong_installation"
 		return result
 	}

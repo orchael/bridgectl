@@ -41,10 +41,18 @@ Login writes Bridge telemetry settings only when an explicit telemetry collector
 Enrollment also configures the returned outbound WSS control endpoint and a
 separate `bri_` control credential. No inbound port, Tailscale or step-ca setup
 is required for Bridge-managed operation. Existing explicitly configured direct
-listeners remain supported. If the daemon is already running, restart it to
-load the new settings; there is no login-triggered hot reload. Restart before
-starting work because the ai-desktop systemd unit stops its process group.
-If no daemon is running, the next `bridgectl run` starts it with the enrollment.
+listeners remain supported. Login starts a daemon when needed and asks a running
+daemon to reload telemetry and control configuration without stopping sessions.
+It waits for the daemon to acknowledge activation and, when control is provisioned,
+for Bridge to confirm the connection. Existing sessions are included in its initial
+snapshot. Provider, listener, and security configuration are not reloaded.
+
+If activation fails, enrollment remains saved and login returns an error. Run
+`bridgectl doctor`, resolve the reported connectivity or credential problem, and
+retry `bridgectl login`; an existing enrollment is activated again without another
+browser authorization. A daemon from an older release must be upgraded and
+restarted once before it can handle reload requests. Finish active work before
+that upgrade restart because the ai-desktop systemd unit stops its process group.
 
 See [production ai-desktop setup](production-bridge.md) for the exact upgrade
 and first-acceptance commands.

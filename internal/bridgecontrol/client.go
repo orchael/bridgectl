@@ -99,7 +99,15 @@ type queuedNotification struct {
 // hot path; the actual network I/O happens on a single background
 // goroutine started by Start.
 type Client struct {
-	commandMu      sync.Mutex
+	commandMu sync.Mutex
+	// identityMu guards organizationID/installationID independently of
+	// commandMu: executeCommand holds commandMu for the lifetime of a
+	// dispatched remote action, up to 30s (see command.go). setStatus reads
+	// these fields on every state transition, including the deferred call
+	// in run() when Close is tearing the client down under a short caller
+	// deadline (enrollment reload's 5s budget) — it must never wait behind
+	// an in-flight command for that long.
+	identityMu     sync.Mutex
 	organizationID string
 	installationID string
 	cfg            Config
@@ -297,7 +305,15 @@ func (c *Client) setStatus(state State, lastErr string) {
 	if c.cfg.StatusPath == "" {
 		return
 	}
-	st := Status{State: state, InstallationID: c.cfg.InstallationID, LastError: lastErr, UpdatedAt: time.Now().UTC()}
+	// The server's hello_ack is authoritative; startup configuration may
+	// omit the installation ID or refer to a previous enrollment.
+	c.identityMu.Lock()
+	installationID := c.installationID
+	c.identityMu.Unlock()
+	if installationID == "" {
+		installationID = c.cfg.InstallationID
+	}
+	st := Status{State: state, InstallationID: installationID, LastError: lastErr, UpdatedAt: time.Now().UTC()}
 	if err := WriteStatus(c.cfg.StatusPath, st); err != nil {
 		c.cfg.Logger.Warn("bridgecontrol: failed to persist status", "error", err)
 	}
@@ -347,10 +363,10 @@ func (c *Client) connectAndServe(parent context.Context) error {
 	if err != nil {
 		return err
 	}
-	c.commandMu.Lock()
+	c.identityMu.Lock()
 	c.organizationID = ack.OrganizationID
 	c.installationID = ack.InstallationID
-	c.commandMu.Unlock()
+	c.identityMu.Unlock()
 	c.setStatus(StateConnected, "")
 	c.cfg.Logger.Info("bridgecontrol: connected", "installation_id", ack.InstallationID, "heartbeat_interval_s", ack.HeartbeatIntervalSeconds)
 
