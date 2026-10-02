@@ -71,8 +71,10 @@ not to keep hunting for a busy-loop.
 Never experiment against an installed/production bridgectl service — it may
 be serving real sessions. Build and run this repo's binary with isolated
 state instead (see ["Developing bridgectl when bridgectl is already
-installed"](../../../README.md#developing-bridgectl-when-bridgectl-is-already-installed)
-in the repo README for the full isolation story):
+installed"](https://github.com/orchael/bridgectl#developing-bridgectl-when-bridgectl-is-already-installed)
+in the repo README for the full isolation story — a repo-relative link isn't
+used here since this file lives in the separate Docusaurus `docs/` site,
+which can't resolve links outside its own content tree):
 
 ```bash
 make build-cli
