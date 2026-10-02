@@ -11,7 +11,7 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Guides',
-      items: ['guides/session-workflow', 'guides/session-status', 'guides/terminal-control', 'guides/telemetry', 'guides/bridge-enrollment', 'guides/production-bridge', 'guides/web-ui', 'guides/step-ca-tailscale'],
+      items: ['guides/session-workflow', 'guides/session-status', 'guides/terminal-control', 'guides/telemetry', 'guides/bridge-enrollment', 'guides/production-bridge', 'guides/web-ui', 'guides/step-ca-tailscale', 'guides/debugging-high-cpu'],
     },
     {
       type: 'category',
