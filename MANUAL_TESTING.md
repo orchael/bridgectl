@@ -28,26 +28,34 @@ process.
 **Rule: always isolate both `BRIDGECTL_STATE_DIR` and `HOME` (or
 `XDG_CONFIG_HOME`) together.** Never isolate one without the other.
 
-The sandbox for each scenario below does this with a single throwaway
-directory used as both state dir and home:
+Session testing needs two terminals talking to the *same* isolated
+environment, so use a **fixed, predictable path** per test pass rather than
+`mktemp -d` (a random path can't be typed into a second terminal). Two
+blocks:
+
+**Setup — run once, in your first terminal, to start a clean test pass:**
 
 ```bash
-export BRIDGECTL_TEST_DIR="$(mktemp -d)"
+export BRIDGECTL_TEST_DIR="${TMPDIR:-/tmp}/bridgectl-manual-test"
+rm -rf "$BRIDGECTL_TEST_DIR"   # wipe any previous test pass
 export BRIDGECTL_STATE_DIR="$BRIDGECTL_TEST_DIR/state"
 export HOME="$BRIDGECTL_TEST_DIR/home"
-mkdir -p "$BRIDGECTL_STATE_DIR" "$HOME"
+mkdir -p "$BRIDGECTL_STATE_DIR" "$HOME" "$BRIDGECTL_TEST_DIR/project"
 ```
 
-Run this in **every new shell/terminal** you use for a given test pass
-(including the second terminal you open to `attach`), and run it again with
-a fresh `mktemp -d` before switching scenarios. Use a project repo path
-under `$BRIDGECTL_TEST_DIR` too (`session start` needs a real directory to
-run the provider in) so a test session never touches your actual working
-tree:
+**Join — run in every *additional* terminal for the same pass** (identical
+path, no `rm -rf` — that would delete the state the first terminal is
+actively using):
 
 ```bash
-mkdir -p "$BRIDGECTL_TEST_DIR/project" && cd "$BRIDGECTL_TEST_DIR/project"
+export BRIDGECTL_TEST_DIR="${TMPDIR:-/tmp}/bridgectl-manual-test"
+export BRIDGECTL_STATE_DIR="$BRIDGECTL_TEST_DIR/state"
+export HOME="$BRIDGECTL_TEST_DIR/home"
 ```
+
+Only re-run **Setup** (which wipes and recreates the directory) when you
+want a clean slate for a new scenario; every other terminal in that same
+pass just runs **Join**.
 
 To verify isolation actually took effect before you log in, confirm there's
 no accidental config waiting at the fallback location:
@@ -84,18 +92,19 @@ Standalone mode needs no login at all.
 #   enrollment    - not logged in
 ```
 
-**Session start → attach → stop**, using two terminals (export the same
-isolation block from above in the second terminal before running anything):
+**Session start → attach → stop**, using two terminals:
 
-Terminal 1:
+Terminal 1 (ran **Setup** above):
 ```bash
-./bin/bridgectl session start --provider echo .
+cd "$BRIDGECTL_TEST_DIR/project"
+/path/to/repo/bin/bridgectl session start --provider echo .
 # prints session output; Ctrl-] to detach without stopping
 # on detach it prints: "Reattach with: bridgectl session attach <session-id>"
 ```
 
-Terminal 2 (same `BRIDGECTL_STATE_DIR`/`HOME`):
+Terminal 2 — run **Join** from above first, then:
 ```bash
+cd /path/to/repo
 ./bin/bridgectl session list
 # note the SESSION ID column
 ./bin/bridgectl session attach <session-id>
@@ -120,8 +129,9 @@ Check the server itself:
 
 ## Scenario B — Production Bridge (bridge.orchael.com)
 
+Run **Setup** from above (fresh pass), then:
+
 ```bash
-# fresh isolated env (see above)
 ./bin/bridgectl login https://bridge.orchael.com --name manual-test --no-browser
 ```
 
@@ -147,9 +157,9 @@ Then:
 # control all reporting ✓ (network depends on real connectivity)
 ```
 
-Run the same **session start → attach → stop** sequence as Scenario A
-(`./bin/bridgectl session start --provider echo .`, then `list` / `attach` /
-`stop` from a second terminal with the same isolated env exported).
+Run the same **session start → attach → stop** sequence as Scenario A:
+`session start --provider echo .` in this terminal, then run **Join** in a
+second terminal before `session list` / `attach` / `stop` there.
 
 Clean up when done testing against production:
 ```bash
@@ -172,8 +182,9 @@ Same as Scenario B, pointing at whatever HTTPS origin you're testing
 (a self-hosted Bridge, a staging deploy, or the `.dev` instance referenced
 in `docs/docs/guides/bridge-enrollment.md`):
 
+Run **Setup** from above (fresh pass), then:
+
 ```bash
-# fresh isolated env (see above)
 ./bin/bridgectl login https://your-custom-bridge.example --name manual-test --no-browser
 # or, equivalently:
 BRIDGECTL_BRIDGE_URL=https://your-custom-bridge.example ./bin/bridgectl login --no-browser
