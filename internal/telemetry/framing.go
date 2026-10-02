@@ -3,6 +3,7 @@ package telemetry
 import (
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 const defaultFrameBufferSize = 16 << 10
@@ -124,13 +125,23 @@ func ansiSequenceEnd(buffer string, start int) (int, bool) {
 	return len(buffer), false
 }
 
+// trimFrameBuffer keeps the longest trailing slice of buffer that fits
+// within maxBytes, cut at a UTF-8 rune boundary so a multi-byte character is
+// never split. The previous implementation removed leading runes one at a
+// time, re-encoding the entire (still large) remaining rune slice back to a
+// string on every single iteration just to recheck its byte length — O(n^2)
+// in the number of bytes trimmed. FeedOutput/FeedInput call this on every
+// chunk fed through the framer, so a session whose output grows past
+// maxBytes before a frame boundary appears (e.g. a full-screen-redraw TUI
+// that repositions the cursor instead of emitting \r/\n) made this the
+// dominant cost of an otherwise ordinary attached session.
 func trimFrameBuffer(buffer string, maxBytes int) string {
 	if len(buffer) <= maxBytes {
 		return buffer
 	}
-	runes := []rune(buffer)
-	for len(string(runes)) > maxBytes {
-		runes = runes[1:]
+	cut := len(buffer) - maxBytes
+	for cut < len(buffer) && !utf8.RuneStart(buffer[cut]) {
+		cut++
 	}
-	return string(runes)
+	return buffer[cut:]
 }

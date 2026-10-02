@@ -54,3 +54,31 @@ func TestResolveLogSettings(t *testing.T) {
 		}
 	})
 }
+
+// TestIsLoopbackAddr is a regression test for a Copilot review finding on
+// the BRIDGECTL_PPROF_ADDR debug endpoint: the loopback-only guarantee
+// documented on startDebugPprof was not enforced, so a value like ":6061"
+// or "0.0.0.0:6061" would expose the unauthenticated pprof endpoints to the
+// network.
+func TestIsLoopbackAddr(t *testing.T) {
+	cases := []struct {
+		addr string
+		want bool
+	}{
+		{"127.0.0.1:6061", true},
+		{"localhost:6061", true},
+		{"[::1]:6061", true},
+		{":6061", false},
+		{"0.0.0.0:6061", false},
+		{"[::]:6061", false},
+		{"example.com:6061", false},
+		{"10.0.0.5:6061", false},
+		{"not-a-valid-addr", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isLoopbackAddr(c.addr); got != c.want {
+			t.Errorf("isLoopbackAddr(%q) = %v, want %v", c.addr, got, c.want)
+		}
+	}
+}

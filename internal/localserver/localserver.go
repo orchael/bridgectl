@@ -84,7 +84,13 @@ func SecureReadFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = os.Chmod(path, 0600)
+	// Only chmod when permissions actually need correcting: this is called
+	// on a tight poll (every 100ms, for the server's entire lifetime, by
+	// startEnrollmentReload) and an unconditional chmod syscall on every
+	// call was pure overhead in the overwhelmingly common already-0600 case.
+	if info.Mode().Perm() != 0600 {
+		_ = os.Chmod(path, 0600)
+	}
 	return b, nil
 }
 

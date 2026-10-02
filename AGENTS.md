@@ -29,6 +29,17 @@ History follows concise, imperative subjects (for example, `Add gRPC server...`,
 ## Security & Configuration Tips
 Treat `config/bridge.yaml` as local-dev plaintext mode only. For realistic environments, use `config/bridge-dev.yaml` with mTLS and JWT keys from `certs/`. Never commit private keys, tokens, or environment-specific secrets.
 
+## Debugging High CPU / Performance Issues
+
+Full walkthrough with a worked example: `docs/docs/guides/debugging-high-cpu.md`. Quick reference for this repo specifically:
+
+1. **Never experiment against an installed/production bridgectl service.** It may be serving real sessions. Build this repo's binary (`make build-cli`) and run it with isolated state (`make dev-server-start`, `make dev-session-codex`/`dev-session-claude` with `DEV_REPO=...`) — see "Developing bridgectl when bridgectl is already installed" in `README.md`.
+2. **Distinguish threads from processes before theorizing about "multiple servers."** `htop`'s thread view shows one process's OS threads as separate rows with the same command line. Confirm with `ps -eLf | grep "server start"` — same `PID` (not the `LWP` column) means one process.
+3. **pprof is opt-in and off by default.** Set `BRIDGECTL_PPROF_ADDR=127.0.0.1:<port>` before `server start` to expose `/debug/pprof/*` on loopback (see `startDebugPprof` in `cmd/bridgectl/server.go`). `make dev-server-start` always sets this; use `make dev-server-cpu-profile` / `make dev-server-goroutines`.
+4. **Read the goroutine dump before the CPU profile.** If every goroutine is blocked in a recognizable wait (netpoll, `syscall.Read`, a ticker's `select`), there's no stuck/spinning goroutine — CPU is going into real work when data arrives, so go straight to the CPU profile's hot call chain instead of hunting for a busy-loop.
+5. **When a profile names a hot function, check whether its cost scales with total accumulated history or just the new input.** A function that re-scans/re-copies/re-validates a growing buffer from the start on every call is O(n²) in total bytes processed even though each call looks cheap alone — this is the bug class found in `internal/telemetry/live.go` and `internal/telemetry/framing.go` (see the guide above). Confirm empirically with a throwaway test that times the function at a few increasing sizes (e.g. 5k/20k/80k/320k) before and after a fix — total time scaling by the same factor as the size (4x size → ~4x time) is linear; total time scaling by that factor *squared* (4x size → ~16x time, i.e. time-per-item itself keeps growing) is quadratic.
+6. **`bridgectl login`'s config-path auto-discovery can target the production config even under an isolated `BRIDGECTL_STATE_DIR`.** `defaultServerConfigPath` in `cmd/bridgectl/server.go` falls through to `~/.config/bridgectl/config.yaml` when `<BRIDGECTL_STATE_DIR>/bridge.yaml` doesn't exist yet. Always seed that isolated file first (e.g. copy `config/bridge-repo-dev.yaml`) before running `login` against a dev state dir, or you risk rewriting the production service's `control`/`telemetry` credential paths.
+
 ## Google login authentication
 
 When logging in with `GOOGLE_` environment variables, use only Google
