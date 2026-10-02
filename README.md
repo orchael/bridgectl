@@ -110,6 +110,33 @@ This starts the bridge in local Unix socket mode. Use `bin/bridgectl server star
 make chat-claude     # or chat-opencode, chat-codex, chat-gemini
 ```
 
+### Developing bridgectl when bridgectl is already installed
+
+A development machine can keep its packaged/system bridgectl service running while you build and test this repository. The development targets use `./bin/bridgectl` explicitly and set `BRIDGECTL_STATE_DIR=$(pwd)/.dev/bridgectl`, which isolates the dev server's socket, PID, certificates, and discovery files from `~/.config/bridgectl`. The dev config intentionally does not bind TCP port 9445.
+
+```bash
+# Build the repository binary. This never replaces /usr/bin/bridgectl.
+make build
+
+# Compare the isolated development server with the installed server.
+make dev-server-status
+
+# Start/stop the repository-local server in the background.
+make dev-server-start
+make dev-server-stop
+make dev-server-logs
+
+# Run an agent through the repository-local bridgectl build.
+make dev-session-codex DEV_REPO=/workspace/my-repo
+make dev-session-claude DEV_REPO=/workspace/my-repo
+
+# Bypass bridgectl completely when you need an unaffected coding session.
+make dev-codex DEV_REPO=/workspace/my-repo
+make dev-claude DEV_REPO=/workspace/my-repo
+```
+
+Do not use plain `bridgectl` when validating local changes: that resolves the installed binary on `PATH`. The `dev-*` targets deliberately use `$(pwd)/bin/bridgectl`.
+
 ### Docker
 
 ```bash

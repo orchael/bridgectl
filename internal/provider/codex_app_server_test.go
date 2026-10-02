@@ -3,10 +3,13 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -233,5 +236,68 @@ func TestCodexAppServer_CompanionEndpoint_UnknownSession(t *testing.T) {
 	p := newTestCodexAppServerProvider("codex")
 	if _, ok := p.CompanionEndpoint("never-started"); ok {
 		t.Fatal("expected ok=false for a session BuildCommand never started")
+	}
+}
+
+// --- companionLogTail ---
+
+func TestCompanionLogTail_EmptyPath(t *testing.T) {
+	if got := companionLogTail(""); got != "" {
+		t.Fatalf("companionLogTail(%q) = %q, want empty", "", got)
+	}
+}
+
+func TestCompanionLogTail_NonexistentFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "does-not-exist.log")
+	if got := companionLogTail(path); got != "" {
+		t.Fatalf("companionLogTail(nonexistent) = %q, want empty", got)
+	}
+}
+
+func TestCompanionLogTail_EmptyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty.log")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := companionLogTail(path); got != "" {
+		t.Fatalf("companionLogTail(empty file) = %q, want empty", got)
+	}
+}
+
+func TestCompanionLogTail_ShortContentIncludesAllLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "short.log")
+	content := "Error: Cannot find module 'codex.js'\nstack trace line\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := companionLogTail(path)
+	if !strings.Contains(got, "companion app-server output:") {
+		t.Fatalf("companionLogTail(short) = %q, want a header line", got)
+	}
+	if !strings.Contains(got, "Error: Cannot find module 'codex.js'") || !strings.Contains(got, "stack trace line") {
+		t.Fatalf("companionLogTail(short) = %q, want both lines present", got)
+	}
+}
+
+func TestCompanionLogTail_TruncatesToLastTwentyLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "long.log")
+	var b strings.Builder
+	for i := 1; i <= 30; i++ {
+		fmt.Fprintf(&b, "line-%02d\n", i)
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := companionLogTail(path)
+	for i := 1; i <= 10; i++ {
+		if strings.Contains(got, fmt.Sprintf("line-%02d\n", i)) || strings.HasSuffix(got, fmt.Sprintf("line-%02d", i)) {
+			t.Fatalf("companionLogTail(30 lines) unexpectedly contains dropped line-%02d: %q", i, got)
+		}
+	}
+	for i := 11; i <= 30; i++ {
+		want := fmt.Sprintf("line-%02d", i)
+		if !strings.Contains(got, want) {
+			t.Fatalf("companionLogTail(30 lines) missing retained %q: %q", want, got)
+		}
 	}
 }

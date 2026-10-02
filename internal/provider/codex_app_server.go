@@ -74,7 +74,9 @@ func (p *CodexAppServerProvider) BuildCommand(ctx context.Context, cfg bridge.Se
 	if err != nil {
 		return nil, err
 	}
+	var logPath string
 	if logFile, logErr := os.CreateTemp("", "bridgectl-codex-appserver-*.log"); logErr == nil {
+		logPath = logFile.Name()
 		appServerCmd.Stdout = logFile
 		appServerCmd.Stderr = logFile
 		go func() { <-ctx.Done(); _ = logFile.Close() }()
@@ -86,7 +88,7 @@ func (p *CodexAppServerProvider) BuildCommand(ctx context.Context, cfg bridge.Se
 	if !waitForPort(ctx, "127.0.0.1", port, portReadyTimeout) {
 		_ = appServerCmd.Process.Kill()
 		_ = appServerCmd.Wait()
-		return nil, fmt.Errorf("codex-app-server: companion app-server on %s never became reachable", endpoint)
+		return nil, fmt.Errorf("codex-app-server: companion app-server on %s never became reachable%s", endpoint, companionLogTail(logPath))
 	}
 
 	proxyEndpoint, observer, err := codexapp.Proxy(ctx, endpoint)
@@ -223,6 +225,27 @@ func freeLocalPort() (int, error) {
 	}
 	defer func() { _ = l.Close() }()
 	return l.Addr().(*net.TCPAddr).Port, nil
+}
+
+// companionLogTail reads back the companion app-server's redirected
+// stdout/stderr so a startup failure (e.g. a missing script under
+// node_modules, or a syntax/dependency error) is visible in the returned
+// error instead of only sitting in a discarded temp file nobody is told
+// about.
+func companionLogTail(path string) string {
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	const maxLines = 20
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	return "\ncompanion app-server output:\n" + strings.Join(lines, "\n")
 }
 
 // waitForPort polls until a TCP connection to host:port succeeds, ctx is

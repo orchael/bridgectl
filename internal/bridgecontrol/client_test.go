@@ -635,6 +635,12 @@ func TestGracefulShutdown_FlushesPendingEvent(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
+	// Close() only guarantees the client finished writing the flushed frame;
+	// the fake server's handler goroutine still needs to read it and push to
+	// `flushed` on its own schedule. A non-blocking check here would race
+	// that goroutine and flake under scheduling pressure (e.g. -race, a busy
+	// CI runner), so give it testTimeout to actually arrive instead of
+	// failing the instant Close() returns.
 	select {
 	case env := <-flushed:
 		if env.Type != msgSessionStarted { // a never-before-seen session starts here
@@ -647,7 +653,7 @@ func TestGracefulShutdown_FlushesPendingEvent(t *testing.T) {
 		if sp.SessionID != "final-session" {
 			t.Fatalf("session_id=%q, want final-session", sp.SessionID)
 		}
-	default:
+	case <-time.After(testTimeout):
 		t.Fatal("the queued notification was never flushed before shutdown closed the connection")
 	}
 }
