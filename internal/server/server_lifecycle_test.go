@@ -68,7 +68,7 @@ func TestBridgeServerSessionLifecycle(t *testing.T) {
 		StartSessionPerClientBurst: 10,
 		SendInputPerSessionRPS:     10,
 		SendInputPerSessionBurst:   10,
-	}, "test-instance", nil, nil, "")
+	}, "test-instance", nil, nil, "", "")
 
 	sessionID := uuid.NewString()
 	ctx := auth.ContextWithClaims(context.Background(), &auth.BridgeClaims{ProjectID: "project-a"})
@@ -166,7 +166,7 @@ func TestBridgeServerValidationAndPermissions(t *testing.T) {
 	s := New(supervisor, registry, nil, RateLimitConfig{
 		GlobalRPS:   10,
 		GlobalBurst: 10,
-	}, "test-instance", nil, nil, "")
+	}, "test-instance", nil, nil, "", "")
 	ctx := auth.ContextWithClaims(context.Background(), &auth.BridgeClaims{ProjectID: "project-a"})
 
 	if _, err := s.ListSessions(ctx, &bridgev1.ListSessionsRequest{ProjectId: "project-b"}); status.Code(err) != codes.PermissionDenied {
@@ -196,7 +196,7 @@ func TestBridgeServerStartSessionDirAccess(t *testing.T) {
 		GlobalBurst:                10,
 		StartSessionPerClientRPS:   10,
 		StartSessionPerClientBurst: 10,
-	}, "test-instance", nil, nil, "")
+	}, "test-instance", nil, nil, "", "")
 
 	ctx := auth.ContextWithClaims(context.Background(), &auth.BridgeClaims{ProjectID: "project-a"})
 
@@ -268,7 +268,7 @@ func TestBridgeServerStartSessionUsesConfiguredFallbacks(t *testing.T) {
 		SendInputPerSessionBurst:   10,
 	}, "test-instance", map[string][]string{
 		"primary": {"secondary"},
-	}, nil, "")
+	}, nil, "", "")
 
 	ctx := auth.ContextWithClaims(context.Background(), &auth.BridgeClaims{ProjectID: "project-a"})
 	sessionID := uuid.NewString()
@@ -321,7 +321,7 @@ func TestBridgeServerStartSessionNoFallbackWhenDisabled(t *testing.T) {
 		StartSessionPerClientBurst: 10,
 		SendInputPerSessionRPS:     10,
 		SendInputPerSessionBurst:   10,
-	}, "test-instance", nil, nil, "")
+	}, "test-instance", nil, nil, "", "")
 
 	ctx := auth.ContextWithClaims(context.Background(), &auth.BridgeClaims{ProjectID: "project-a"})
 	_, err := s.StartSession(ctx, &bridgev1.StartSessionRequest{
@@ -352,7 +352,7 @@ func TestAttachSessionSendsExitEvent(t *testing.T) {
 		StartSessionPerClientBurst: 10,
 		SendInputPerSessionRPS:     10,
 		SendInputPerSessionBurst:   10,
-	}, "test-instance", nil, nil, "")
+	}, "test-instance", nil, nil, "", "")
 
 	ctx := auth.ContextWithClaims(context.Background(), &auth.BridgeClaims{ProjectID: "project-a"})
 	sessionID := uuid.NewString()

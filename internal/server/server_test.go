@@ -157,7 +157,7 @@ func TestBridgeHelpersAndProviderResponses(t *testing.T) {
 		t.Fatalf("Register broken: %v", err)
 	}
 
-	s := New(nil, registry, slog.Default(), RateLimitConfig{}, "test-instance", nil, nil, "")
+	s := New(nil, registry, slog.Default(), RateLimitConfig{}, "test-instance", nil, nil, "", "")
 	health, err := s.Health(context.Background(), &bridgev1.HealthRequest{})
 	if err != nil {
 		t.Fatalf("Health: %v", err)
@@ -288,7 +288,7 @@ func newServerWithSupervisor(t *testing.T) (*BridgeServer, *bridge.Supervisor) {
 	}
 	sup := bridge.NewSupervisor(registry, bridge.DefaultPolicy(), 1024*1024, time.Minute)
 	t.Cleanup(func() { sup.Close() })
-	s := New(sup, registry, slog.Default(), RateLimitConfig{}, "test", nil, nil, "")
+	s := New(sup, registry, slog.Default(), RateLimitConfig{}, "test", nil, nil, "", "")
 	return s, sup
 }
 

@@ -1726,8 +1726,12 @@ type HealthResponse struct {
 	// restart (a changed ID means the process restarted and all in-memory
 	// session state has been lost).
 	ServerInstanceId string `protobuf:"bytes,3,opt,name=server_instance_id,json=serverInstanceId,proto3" json:"server_instance_id,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// server_version is the running daemon's build version (the same value
+	// reported by `bridgectl --version` for the binary that started it).
+	// Empty for unversioned dev builds.
+	ServerVersion string `protobuf:"bytes,4,opt,name=server_version,json=serverVersion,proto3" json:"server_version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HealthResponse) Reset() {
@@ -1777,6 +1781,13 @@ func (x *HealthResponse) GetProviders() []*ProviderHealth {
 func (x *HealthResponse) GetServerInstanceId() string {
 	if x != nil {
 		return x.ServerInstanceId
+	}
+	return ""
+}
+
+func (x *HealthResponse) GetServerVersion() string {
+	if x != nil {
+		return x.ServerVersion
 	}
 	return ""
 }
@@ -2491,11 +2502,12 @@ const file_bridge_v1_bridge_proto_rawDesc = "" +
 	"\tclient_id\x18\x02 \x01(\tR\bclientId\"3\n" +
 	"\x15ReleaseWriterResponse\x12\x1a\n" +
 	"\breleased\x18\x01 \x01(\bR\breleased\"\x0f\n" +
-	"\rHealthRequest\"\x8f\x01\n" +
+	"\rHealthRequest\"\xb6\x01\n" +
 	"\x0eHealthResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x127\n" +
 	"\tproviders\x18\x02 \x03(\v2\x19.bridge.v1.ProviderHealthR\tproviders\x12,\n" +
-	"\x12server_instance_id\x18\x03 \x01(\tR\x10serverInstanceId\"`\n" +
+	"\x12server_instance_id\x18\x03 \x01(\tR\x10serverInstanceId\x12%\n" +
+	"\x0eserver_version\x18\x04 \x01(\tR\rserverVersion\"`\n" +
 	"\x0eProviderHealth\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x1c\n" +
 	"\tavailable\x18\x02 \x01(\bR\tavailable\x12\x14\n" +

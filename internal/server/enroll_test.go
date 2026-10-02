@@ -47,7 +47,7 @@ func testEnrollServer(t *testing.T) (*BridgeServer, string) {
 	s := New(nil, nil, nil, RateLimitConfig{
 		GlobalRPS:   100,
 		GlobalBurst: 100,
-	}, "test", nil, verifier, certsDir)
+	}, "test", nil, verifier, certsDir, "")
 	return s, certsDir
 }
 
@@ -143,7 +143,7 @@ func TestRegisterJWTKey(t *testing.T) {
 		s := New(nil, nil, nil, RateLimitConfig{
 			GlobalRPS:   100,
 			GlobalBurst: 100,
-		}, "test", nil, nil, "")
+		}, "test", nil, nil, "", "")
 		pubDER, _ := genTestPubKeyDER(t)
 
 		_, err := s.RegisterJWTKey(mtlsContext("test-client"), &bridgev1.RegisterJWTKeyRequest{
