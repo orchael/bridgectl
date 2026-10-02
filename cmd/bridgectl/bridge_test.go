@@ -626,7 +626,6 @@ func TestPollDeviceTokenTerminalErrorIsReturned(t *testing.T) {
 	}
 }
 
-
 func TestInstallationNamePrecedence(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)

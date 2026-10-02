@@ -441,10 +441,12 @@ func authorizeRequestBody(organization, name string) map[string]string {
 	return body
 }
 func runBridgeLogin(cmd *cobra.Command, bridge, organization, name string, force, noBrowser bool) error {
+	ctx, cancel := signalContext(cmd.Context())
+	defer cancel()
 	if _, _, err := readEnrollment(); err == nil && !force {
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Already logged into Bridge.")
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Use --force to re-enroll.")
-		return nil
+		return activateBridgeEnrollment(ctx, cmd)
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) && !force {
 		return fmt.Errorf("read existing enrollment: %w", err)
 	}
@@ -453,8 +455,6 @@ func runBridgeLogin(cmd *cobra.Command, bridge, organization, name string, force
 		return err
 	}
 	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
-	ctx, cancel := signalContext(cmd.Context())
-	defer cancel()
 	installation := installationName(name)
 	var auth deviceAuthorization
 	if _, err = httpJSON(ctx, client, "POST", base+"/v1/device/authorize", authorizeRequestBody(organization, installation), &auth); err != nil {
@@ -511,8 +511,7 @@ func runBridgeLogin(cmd *cobra.Command, bridge, organization, name string, force
 				return err
 			}
 			_, _ = fmt.Fprintln(out, "✓ Bridge authorization complete\n✓ Installation registered\n✓ Organization selected\n✓ Telemetry configured")
-			_, _ = fmt.Fprintln(out, "Restart an already-running bridgectl server to load the enrollment configuration.")
-			return nil
+			return activateBridgeEnrollment(ctx, cmd)
 		}
 		switch derr.Error {
 		case "authorization_pending":

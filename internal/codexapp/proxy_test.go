@@ -104,3 +104,111 @@ func TestProxyRequestBoundResponse(t *testing.T) {
 		})
 	}
 }
+
+// Resume opens a picker connection alongside the TUI owner. That connection
+// must relay history without replacing the owner or invalidating its state.
+func TestProxyResumePickerConnection(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	server := newFakeAppServer(t)
+	endpoint, client, err := Proxy(ctx, server.wsURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := websocket.Dial(ctx, endpoint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = owner.CloseNow() }()
+	upstream := server.acceptConn(t)
+	defer func() { _ = upstream.CloseNow() }()
+	serverSend(t, owner, envelope{ID: json.RawMessage(`1`), Method: "thread/start"})
+	_ = serverReadEnvelope(t, upstream)
+	serverSend(t, upstream, envelope{ID: json.RawMessage(`1`), Result: mustJSON(map[string]any{"thread": map[string]any{"id": "owner", "status": map[string]any{"type": "idle"}}})})
+	_ = serverReadEnvelope(t, owner)
+	<-client.Updates
+	picker, _, err := websocket.Dial(ctx, endpoint, nil)
+	if err != nil {
+		t.Fatalf("resume picker connection rejected: %v", err)
+	}
+	pickerUpstream := server.acceptConn(t)
+	defer func() { _ = pickerUpstream.CloseNow() }()
+	// Reusing an RPC ID on another connection must not bind the owner.
+	serverSend(t, picker, envelope{ID: json.RawMessage(`1`), Method: "thread/list"})
+	_ = serverReadEnvelope(t, pickerUpstream)
+	serverSend(t, pickerUpstream, envelope{ID: json.RawMessage(`1`), Result: mustJSON(map[string]any{"data": []any{}})})
+	_ = serverReadEnvelope(t, picker)
+	_ = picker.CloseNow()
+	serverSend(t, upstream, notif(methodThreadStatusChanged, map[string]any{"threadId": "owner", "status": map[string]any{"type": "active", "activeFlags": []string{}}}))
+	_ = serverReadEnvelope(t, owner)
+	select {
+	case update := <-client.Updates:
+		if update.State != bridge.InteractionWorking {
+			t.Fatalf("picker changed owner state: %+v", update)
+		}
+	case <-ctx.Done():
+		t.Fatal("owner updates stopped")
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if client.closed || client.state.threadID != "owner" {
+		t.Fatal("picker replaced or closed owner")
+	}
+}
+
+func TestProxyResumeTransfersResponseOwnership(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	server := newFakeAppServer(t)
+	endpoint, client, err := Proxy(ctx, server.wsURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	connect := func(method, thread string) (*websocket.Conn, *websocket.Conn) {
+		t.Helper()
+		tui, _, err := websocket.Dial(ctx, endpoint, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		upstream := server.acceptConn(t)
+		t.Cleanup(func() { _ = tui.CloseNow(); _ = upstream.CloseNow() })
+		serverSend(t, tui, envelope{ID: json.RawMessage(`1`), Method: method})
+		_ = serverReadEnvelope(t, upstream)
+		serverSend(t, upstream, envelope{ID: json.RawMessage(`1`), Result: mustJSON(map[string]any{"thread": map[string]any{"id": thread, "status": map[string]any{"type": "idle"}}})})
+		_ = serverReadEnvelope(t, tui)
+		<-client.Updates
+		return tui, upstream
+	}
+	old, oldUpstream := connect("thread/start", "original")
+	resumed, upstream := connect("thread/resume", "resumed")
+	// Old-connection notifications must not change the resumed owner's state.
+	serverSend(t, oldUpstream, notif(methodThreadStatusChanged, map[string]any{"threadId": "resumed", "status": map[string]any{"type": "active", "activeFlags": []string{"waitingOnApproval"}}}))
+	_ = serverReadEnvelope(t, old)
+	_ = old.CloseNow()
+	forward := func(env envelope) { t.Helper(); serverSend(t, upstream, env); _ = serverReadEnvelope(t, resumed) }
+	forward(notif(methodThreadStatusChanged, map[string]any{"threadId": "resumed", "status": map[string]any{"type": "active", "activeFlags": []string{"waitingOnApproval"}}}))
+	<-client.Updates
+	forward(envelope{ID: json.RawMessage(`42`), Method: methodItemCommandExecApproval, Params: mustJSON(map[string]any{"threadId": "resumed", "turnId": "turn", "itemId": "approval", "command": "printf BLUE", "cwd": "/tmp"})})
+	update := <-client.Updates
+	if update.Pending == nil {
+		t.Fatalf("lost resumed approval: %+v", update)
+	}
+	if err := client.Decide(ctx, update.Pending.ID, "accept"); err != nil {
+		t.Fatal(err)
+	}
+	response := serverReadEnvelope(t, upstream)
+	if string(response.ID) != "42" || string(response.Result) != `{"decision":"accept"}` {
+		t.Fatalf("response went to wrong owner: %+v", response)
+	}
+	_ = resumed.CloseNow()
+	select {
+	case update := <-client.Updates:
+		if update.State != bridge.InteractionUnknown {
+			t.Fatalf("owner disconnect: %+v", update)
+		}
+	case <-ctx.Done():
+		t.Fatal("owner disconnect not observed")
+	}
+	// A later connection to the same endpoint can become owner again.
+	connect("thread/resume", "resumed")
+}

@@ -120,6 +120,11 @@ infrastructure (Google, GitHub, Okta, etc.) managed through Step CA.`,
 				configPath = defaultServerConfigPath(localserver.StateDir())
 			}
 
+			// A config file's logging.level/format apply when the operator
+			// didn't pass the matching flag explicitly, so a value set in the
+			// file isn't silently shadowed by the flag's hardcoded default.
+			logLevel, logFormat = resolveLogSettings(configPath, logLevel, logFormat, cmd.Flags().Changed("log-level"), cmd.Flags().Changed("log-format"))
+
 			// Build logger from --log-level and --log-format.
 			level := slog.LevelWarn
 			switch strings.ToLower(logLevel) {
@@ -216,6 +221,28 @@ infrastructure (Google, GitHub, Okta, etc.) managed through Step CA.`,
 	cmd.Flags().DurationVar(&certRenewalCheckInterval, "cert-renewal-check-interval", 0, "how often to check certificate expiry (e.g. 10m, 1h); default 1 hour")
 
 	return cmd
+}
+
+// resolveLogSettings applies a config file's logging.level/format when the
+// corresponding CLI flag was not explicitly passed, so a value the operator
+// set in the file isn't silently shadowed by the flag's hardcoded default.
+// An unreadable or unparsable config file is not an error here; server start
+// surfaces that separately when it loads the full config.
+func resolveLogSettings(configPath, logLevel, logFormat string, levelFlagSet, formatFlagSet bool) (string, string) {
+	if configPath == "" {
+		return logLevel, logFormat
+	}
+	fileLevel, fileFormat, err := config.ExplicitLogging(configPath)
+	if err != nil {
+		return logLevel, logFormat
+	}
+	if !levelFlagSet && fileLevel != "" {
+		logLevel = fileLevel
+	}
+	if !formatFlagSet && fileFormat != "" {
+		logFormat = fileFormat
+	}
+	return logLevel, logFormat
 }
 
 func defaultServerConfigPath(stateDir string) string {

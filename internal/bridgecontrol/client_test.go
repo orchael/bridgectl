@@ -635,6 +635,12 @@ func TestGracefulShutdown_FlushesPendingEvent(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
+	// Close() only guarantees the client finished writing the flushed frame;
+	// the fake server's handler goroutine still needs to read it and push to
+	// `flushed` on its own schedule. A non-blocking check here would race
+	// that goroutine and flake under scheduling pressure (e.g. -race, a busy
+	// CI runner), so give it testTimeout to actually arrive instead of
+	// failing the instant Close() returns.
 	select {
 	case env := <-flushed:
 		if env.Type != msgSessionStarted { // a never-before-seen session starts here
@@ -647,7 +653,7 @@ func TestGracefulShutdown_FlushesPendingEvent(t *testing.T) {
 		if sp.SessionID != "final-session" {
 			t.Fatalf("session_id=%q, want final-session", sp.SessionID)
 		}
-	default:
+	case <-time.After(testTimeout):
 		t.Fatal("the queued notification was never flushed before shutdown closed the connection")
 	}
 }
@@ -1034,5 +1040,18 @@ func TestNotifyRecencySurvivesCoalescingAndDrain(t *testing.T) {
 	c.Notify(SessionSnapshot{SessionID: "after"})
 	if len(c.drainAllPending()) != 1 || c.pendingOrder.Len() != 0 {
 		t.Fatal("full drain left queue ordering entries")
+	}
+}
+
+func TestStatusUsesNegotiatedInstallation(t *testing.T) {
+	c := newTestClient(t, "wss://bridge.example/v1/control", "bri_valid", nil)
+	c.installationID = "negotiated-installation"
+	c.setStatus(StateConnected, "")
+	st, err := ReadStatus(c.cfg.StatusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.InstallationID != "negotiated-installation" {
+		t.Fatalf("status has stale installation identity: %q", st.InstallationID)
 	}
 }

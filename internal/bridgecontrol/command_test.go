@@ -149,3 +149,58 @@ func TestMAR95InstructionLedger(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// TestSetStatusDoesNotBlockOnInFlightCommand reproduces a Copilot review
+// finding on PR #268: setStatus previously shared executeCommand's
+// commandMu, which executeCommand holds for the full dispatch deadline (up
+// to 30s). Close's deferred setStatus(StateDisconnected) could then block
+// behind an in-flight command for that long, blowing past a caller's much
+// shorter deadline (e.g. enrollment reload's 5s budget). setStatus must
+// stay fast regardless of how long a concurrent command dispatch takes.
+func TestSetStatusDoesNotBlockOnInFlightCommand(t *testing.T) {
+	dispatching := make(chan struct{})
+	release := make(chan struct{})
+	cfg := Config{
+		Credential:  "key",
+		CommandPath: t.TempDir(),
+		StatusPath:  filepath.Join(t.TempDir(), "status.json"),
+		Logger:      testLogger(),
+		InstructionFunc: func(ctx context.Context, _, _, _ string) error {
+			close(dispatching)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return nil
+		},
+	}
+	c := New(cfg)
+	c.organizationID = "o"
+	c.installationID = "i"
+	cmd := Command{ID: uuid.NewString(), OrganizationID: "o", InstallationID: "i", SessionID: "s", UserID: "u", Action: "instruct", Text: "do work", ExpiresAt: time.Now().Add(20 * time.Second)}
+
+	done := make(chan CommandResult, 1)
+	go func() { done <- c.executeCommand(context.Background(), cmd) }()
+
+	select {
+	case <-dispatching:
+	case <-time.After(5 * time.Second):
+		t.Fatal("command never started dispatching")
+	}
+
+	statusDone := make(chan struct{})
+	go func() {
+		c.setStatus(StateDisconnected, "")
+		close(statusDone)
+	}()
+	select {
+	case <-statusDone:
+	case <-time.After(time.Second):
+		t.Fatal("setStatus blocked behind an in-flight command dispatch")
+	}
+
+	close(release)
+	if result := <-done; result.Status != "accepted" {
+		t.Fatalf("%+v", result)
+	}
+}

@@ -81,8 +81,16 @@ activate_required_node() {
 
   if command -v nvm >/dev/null 2>&1; then
     echo "==> Installing Node.js $required_node_major via nvm"
+    # nvm's internal helpers (e.g. nvm_version) return non-zero as part of
+    # their normal bookkeeping when a version isn't installed yet — not a
+    # real failure. Under `set -e` that trips errexit and aborts this script
+    # mid-install on a cold cache, before `nvm install` ever runs. The
+    # actual_node_major check below is the real verification, so it's safe
+    # to relax errexit around just these two calls.
+    set +e
     nvm install "$required_node_major"
     nvm use "$required_node_major" >/dev/null
+    set -e
     if [ -n "${NVM_BIN:-}" ]; then
       export PATH="$NVM_BIN:$PATH"
     fi

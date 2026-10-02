@@ -300,22 +300,21 @@ func TestClaudeStreamJSON_AuthoritativeWorkingIdle(t *testing.T) {
 	sup := NewSupervisor(registry, DefaultPolicy(), 1024*1024, time.Minute, WithControlObserver(spy))
 	t.Cleanup(func() { sup.Close() })
 
-	info, err := sup.Start(context.Background(), SessionConfig{
+	_, err := sup.Start(context.Background(), SessionConfig{
 		ProjectID: "p", SessionID: "stream-1", RepoPath: t.TempDir(),
 		Options: map[string]string{"provider": "claude-chat-fake"},
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if info.Interaction.EffectiveState() != InteractionUnknown {
-		t.Fatalf("initial state = %q, want unknown before any event", info.Interaction.EffectiveState())
-	}
 
 	// The scripted process runs and exits in well under a millisecond, so
-	// polling current state can race straight past the transient Working
-	// state to the final Idle one. Assert on the ControlObserver's full
-	// history instead, which captures every authoritative transition in
-	// order regardless of how fast they happened.
+	// by the time Start() returns the session may already have advanced
+	// past Unknown (or even past the transient Working state straight to
+	// Idle) — asserting on live state here or immediately after Start()
+	// races that goroutine. Assert on the ControlObserver's full history
+	// instead, which captures every authoritative transition in order
+	// regardless of how fast they happened.
 	waitForInteraction(t, sup, "stream-1", InteractionIdle)
 
 	spy.mu.Lock()

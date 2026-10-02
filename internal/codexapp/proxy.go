@@ -18,7 +18,8 @@ import (
 // requests only to that owner, not to a second status observer. Forwarding
 // its connection gives responses the original RPC request identity and
 // lets the TUI receive the provider's subsequent resolution notification.
-// Only one local TUI connection is accepted for this session lifetime.
+// Picker and reconnect clients may use separate connections. Only a successful
+// non-ephemeral thread start/resume/fork selects the response owner.
 func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -26,17 +27,9 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 	}
 	updates := make(chan bridge.Interaction, 64)
 	client := &ResponseClient{Updates: updates}
-	taken := false
-	threadRequests := make(map[string]bool)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		client.mu.Lock()
-		if taken {
-			client.mu.Unlock()
-			http.Error(w, "session already attached", http.StatusConflict)
-			return
-		}
-		taken = true
-		client.mu.Unlock()
+		// RPC IDs are scoped to a connection, including picker requests.
+		threadRequests := make(map[string]bool)
 		tui, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
@@ -51,12 +44,13 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 		defer func() { _ = conn.CloseNow() }()
 		conn.SetReadLimit(16 << 20)
 		tui.SetReadLimit(16 << 20)
-		client.mu.Lock()
-		client.conn = conn
-		client.mu.Unlock()
 		defer func() {
 			client.mu.Lock()
 			defer client.mu.Unlock()
+			if client.conn != conn {
+				return
+			}
+			client.conn = nil
 			client.closed = true
 			client.state.pending = nil
 			client.requestID = nil
@@ -95,7 +89,7 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 					client.mu.Unlock()
 				}
 				client.mu.Lock()
-				if request.Method == "" && len(request.ID) > 0 && string(request.ID) == string(client.requestID) {
+				if client.conn == conn && request.Method == "" && len(request.ID) > 0 && string(request.ID) == string(client.requestID) {
 					client.submitted = true
 				}
 				client.mu.Unlock()
@@ -128,7 +122,6 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 					client.mu.Unlock()
 					continue
 				}
-				client.observeActivityLocked(env)
 				// The TUI reads historical threads during startup. Only a
 				// response to its own non-ephemeral start/resume/fork operation establishes
 				// session ownership; an unrelated thread/read result must not.
@@ -137,7 +130,7 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 					var result threadStartedParams
 					if json.Unmarshal(env.Result, &result) == nil && result.Thread.ID != "" && !result.Thread.Ephemeral {
 						slog.Debug("codexapp owner binding", "rpc_id", string(env.ID), "thread_id", result.Thread.ID, "status", result.Thread.Status.Type)
-						if client.state.threadID != result.Thread.ID {
+						if client.conn != conn || client.state.threadID != result.Thread.ID {
 							client.state = observerState{threadID: result.Thread.ID}
 							client.turnID = ""
 							client.requestID = nil
@@ -145,10 +138,20 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 							client.approval = false
 							client.submitted = false
 						}
+						client.conn = conn
+						client.closed = false
 						env.Method = methodThreadStarted
 						env.Params = env.Result
 					}
 				}
+				if client.conn != conn {
+					client.mu.Unlock()
+					if err := tui.Write(relayCtx, typ, b); err != nil {
+						return
+					}
+					continue
+				}
+				client.observeActivityLocked(env)
 				if env.Method == methodThreadStatusChanged || env.Method == methodItemToolRequestUserInput {
 					var meta struct {
 						ThreadID string              `json:"threadId"`
