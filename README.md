@@ -121,10 +121,15 @@ make build
 # Compare the isolated development server with the installed server.
 make dev-server-status
 
-# Start/stop the repository-local server in the background.
+# Start/stop/restart the repository-local server in the background.
 make dev-server-start
 make dev-server-stop
+make dev-server-restart   # stop, wait for it to actually exit, then start — use after rebuilding a fix
 make dev-server-logs
+
+# Log into Bridge against the isolated dev state dir (never the installed
+# service's real config/credentials — see "Debugging high CPU usage" below).
+make dev-login
 
 # Run an agent through the repository-local bridgectl build.
 make dev-session-codex DEV_REPO=/workspace/my-repo
@@ -148,6 +153,10 @@ make dev-server-goroutines
 ```
 
 To profile the installed/packaged service instead, set `BRIDGECTL_PPROF_ADDR=127.0.0.1:6061` in its environment (e.g. `EnvironmentFile`/`Environment=` in the systemd unit) and restart it — without that variable set, the server never starts a listener for it, so the endpoint is unreachable by default.
+
+If reproducing the issue needs real `control`/`telemetry` wiring (only active once `managed_by_bridge` config is present — otherwise the dev server is a much simpler, lower-CPU code path), run `make dev-login` rather than `bin/bridgectl login` directly: it seeds the isolated config file first so login can never fall through to and rewrite the installed service's real config. After changing code to test a fix, use `make dev-server-restart` (not a separate stop + start) to avoid a race where the old process still holds the pprof port when the new one tries to bind it.
+
+See `docs/docs/guides/debugging-high-cpu.md` for the full methodology (confirming threads vs. processes, `strace`, reading a goroutine dump, and narrowing a hot function to an algorithmic cause) and a worked example.
 
 Do not use plain `bridgectl` when validating local changes: that resolves the installed binary on `PATH`. The `dev-*` targets deliberately use `$(pwd)/bin/bridgectl`.
 

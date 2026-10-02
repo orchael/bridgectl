@@ -1,4 +1,4 @@
-.PHONY: dev-server-start dev-server-stop dev-server-status dev-server-logs dev-server-cpu-profile dev-server-goroutines dev-claude dev-codex dev-check dev-session-claude dev-session-codex build proto tools test test-telemetry-e2e test-telemetry-s3-e2e test-e2e test-e2e-live-telemetry test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down reset logs up-local down-local reset-local logs-local up-collector down-collector reset-collector ps-collector logs-collector up-step-ca down-step-ca reset-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
+.PHONY: dev-server-start dev-server-stop dev-server-restart dev-server-status dev-server-logs dev-server-cpu-profile dev-server-goroutines dev-login dev-claude dev-codex dev-check dev-session-claude dev-session-codex build proto tools test test-telemetry-e2e test-telemetry-s3-e2e test-e2e test-e2e-live-telemetry test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down reset logs up-local down-local reset-local logs-local up-collector down-collector reset-collector ps-collector logs-collector up-step-ca down-step-ca reset-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
 
 BIN_DIR := bin
 GOIMPORTS_VERSION ?= v0.44.0
@@ -73,6 +73,19 @@ dev-server-stop: build
 		echo "Repository-local bridgectl server is not running."; \
 	fi
 
+# Stop-then-start, waiting for the old process to actually exit first. A bare
+# dev-server-stop followed immediately by dev-server-start can race: the old
+# process may still hold the pprof port/socket for a moment after `server
+# stop` returns, making the new one fail to bind. Use this after rebuilding
+# with a fix you want to verify live.
+dev-server-restart: build
+	@$(MAKE) --no-print-directory dev-server-stop
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+		$(DEV_BRIDGECTL) server status 2>/dev/null | grep -q "Server: running" || break; \
+		sleep 0.3; \
+	done
+	@$(MAKE) --no-print-directory dev-server-start
+
 dev-server-status: build
 	@echo "Repository-local binary: $(CURDIR)/$(BRIDGE_CLI)"
 	@echo "Repository-local state:  $(DEV_STATE_DIR)"
@@ -83,6 +96,26 @@ dev-server-status: build
 dev-server-logs:
 	@touch "$(DEV_LOG)"
 	@tail -f "$(DEV_LOG)"
+
+# Log into Bridge against the ISOLATED dev state dir, safely. Seeds
+# DEV_STATE_DIR/bridge.yaml from DEV_CONFIG first (if not already present) so
+# `bridgectl login`'s config-path auto-discovery (defaultServerConfigPath in
+# cmd/bridgectl/server.go) finds that file first and never falls through to
+# ~/.config/bridgectl/config.yaml — the INSTALLED service's real config.
+# Without this seed, login would rewrite the installed service's
+# control/telemetry credential paths to point at this isolated state dir,
+# breaking its reporting on its next reload or restart. See
+# docs/docs/guides/debugging-high-cpu.md for the full story. Pass
+# LOGIN_ARGS= (empty) to let login open a real browser instead of printing a
+# code to paste in manually.
+LOGIN_ARGS ?= --no-browser
+dev-login: build
+	@mkdir -p "$(DEV_STATE_DIR)"
+	@if [ ! -f "$(DEV_STATE_DIR)/bridge.yaml" ]; then \
+		cp "$(DEV_CONFIG)" "$(DEV_STATE_DIR)/bridge.yaml"; \
+		echo "Seeded $(DEV_STATE_DIR)/bridge.yaml so login can never touch the installed service's config."; \
+	fi
+	$(DEV_BRIDGECTL) login $(LOGIN_ARGS)
 
 # Escape hatches: use the provider CLIs directly, with no bridgectl process.
 # agents.env holds desktop agent credentials (CODEX_AUTH, CLAUDE_CODE_OAUTH_TOKEN, ...)
