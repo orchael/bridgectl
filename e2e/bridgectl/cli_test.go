@@ -74,11 +74,20 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// testStateDir returns a per-test temp state dir (isolated from ~/.config/bridgectl).
+// testStateDir returns a per-test temp state dir (isolated from
+// ~/.config/bridgectl). Setting BRIDGECTL_STATE_DIR alone is not enough:
+// bridgeConfigPath's resolution falls back to the real per-user XDG config
+// (~/.config/bridgectl/config.yaml) when no bridge.yaml exists yet at the
+// state dir, so a subprocess that inherits the developer's real HOME can
+// silently read — or, worse, write via login/logout — that real config
+// instead of this test's isolated one. HOME must be isolated too so
+// os.UserConfigDir() can never resolve outside the test's own temp dir.
 func (s *CLISuite) testStateDir() string {
 	s.T().Helper()
 	dir := s.T().TempDir()
 	s.T().Setenv("BRIDGECTL_STATE_DIR", dir)
+	s.T().Setenv("HOME", s.T().TempDir())
+	s.T().Setenv("XDG_CONFIG_HOME", "")
 	return dir
 }
 
