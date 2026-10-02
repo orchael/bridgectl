@@ -22,6 +22,18 @@ The equivalent flag is `bridgectl login --bridge https://bridge.orchael.dev`. Th
 
 Login uses Bridge's device authorization flow. bridgectl displays a short code, opens `/device` when a local browser opener is available, and polls until the browser approval succeeds. Google authentication and organization selection happen in Bridge; bridgectl never receives Google tokens, passwords, cookies, or Auth.js sessions.
 
+On a headless machine or over SSH with no local browser, pass `--no-browser` to print the authorization URL and code instead of attempting to open a browser:
+
+```sh
+bridgectl login https://bridge.orchael.com --no-browser
+```
+
+The server name shown in Bridge for this installation comes from, in order: `--name`, the `name` field in the daemon's YAML config (`config/bridge.yaml`), then the OS hostname. Pass `--name` to set it explicitly for this login:
+
+```sh
+bridgectl login https://bridge.orchael.com --name prod-worker-3
+```
+
 Polling honors the documented protocol exactly: on `slow_down`, bridgectl keeps the greatest of its current interval, the server-returned `interval`, and the `Retry-After` header, and never reduces it; `authorization_pending` continues at the current interval; `access_denied`, `expired_token`, and `invalid_grant` stop the login with that error. The successful exchange response carries an `api_version` field (currently `v1`); bridgectl rejects an enrollment whose `api_version` it does not recognize instead of silently persisting a credential issued under an incompatible protocol.
 
 To skip Bridge's organization picker when the target organization is already known, pass its name (not an ID — bridgectl has no way to know Bridge's internal organization IDs):

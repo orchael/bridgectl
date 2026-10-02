@@ -25,8 +25,10 @@ service), an isolated-looking test login will silently find and overwrite
 register a brand-new installation against your real Bridge org in the
 process.
 
-**Rule: always isolate both `BRIDGECTL_STATE_DIR` and `HOME` (or
-`XDG_CONFIG_HOME`) together.** Never isolate one without the other.
+**Rule: always isolate `BRIDGECTL_STATE_DIR`, `HOME`, and `XDG_CONFIG_HOME`
+together.** Never isolate one without the others — an inherited
+`XDG_CONFIG_HOME` takes precedence over `HOME`, so isolating `HOME` alone is
+not enough.
 
 Session testing needs two terminals talking to the *same* isolated
 environment, so use a **fixed, predictable path** per test pass rather than
@@ -40,8 +42,14 @@ export BRIDGECTL_TEST_DIR="${TMPDIR:-/tmp}/bridgectl-manual-test"
 rm -rf "$BRIDGECTL_TEST_DIR"   # wipe any previous test pass
 export BRIDGECTL_STATE_DIR="$BRIDGECTL_TEST_DIR/state"
 export HOME="$BRIDGECTL_TEST_DIR/home"
-mkdir -p "$BRIDGECTL_STATE_DIR" "$HOME" "$BRIDGECTL_TEST_DIR/project"
+export XDG_CONFIG_HOME="$BRIDGECTL_TEST_DIR/home/.config"
+mkdir -p "$BRIDGECTL_STATE_DIR" "$XDG_CONFIG_HOME" "$BRIDGECTL_TEST_DIR/project"
 ```
+
+An inherited `XDG_CONFIG_HOME` from your real shell would otherwise take
+precedence over `$HOME` in `bridgectl`'s config resolution, letting it find
+and overwrite your real config even with `$HOME` isolated — pin it into the
+scratch directory explicitly, don't just rely on isolating `$HOME`.
 
 **Join — run in every *additional* terminal for the same pass** (identical
 path, no `rm -rf` — that would delete the state the first terminal is
@@ -51,6 +59,7 @@ actively using):
 export BRIDGECTL_TEST_DIR="${TMPDIR:-/tmp}/bridgectl-manual-test"
 export BRIDGECTL_STATE_DIR="$BRIDGECTL_TEST_DIR/state"
 export HOME="$BRIDGECTL_TEST_DIR/home"
+export XDG_CONFIG_HOME="$BRIDGECTL_TEST_DIR/home/.config"
 ```
 
 Only re-run **Setup** (which wipes and recreates the directory) when you
@@ -62,11 +71,11 @@ no accidental config waiting at the fallback location:
 
 ```bash
 ls "$BRIDGECTL_STATE_DIR"/bridge.yaml 2>/dev/null && echo "already has local config (fine)"
-ls "$HOME"/.config/bridgectl/config.yaml 2>/dev/null && echo "UNEXPECTED: found a config here — stop and check HOME"
+ls "$XDG_CONFIG_HOME"/bridgectl/config.yaml 2>/dev/null && echo "UNEXPECTED: found a config here — stop and check HOME/XDG_CONFIG_HOME"
 ```
 
-The second `ls` must find nothing. If it does, `$HOME` isn't actually
-pointed at your fresh scratch directory — check the export above before
+The second `ls` must find nothing. If it does, `$HOME`/`$XDG_CONFIG_HOME`
+aren't actually pointed at your fresh scratch directory — check the exports above before
 going any further.
 
 ## Build the binary
@@ -200,7 +209,7 @@ attach` / `session stop` / `logout` sequence from Scenario B.
 
 | Step | Local | Production/Custom Bridge |
 | --- | --- | --- |
-| Isolate env | `BRIDGECTL_STATE_DIR` + `HOME` | same |
+| Isolate env | `BRIDGECTL_STATE_DIR` + `HOME` + `XDG_CONFIG_HOME` | same |
 | Build | `make build-cli` | same |
 | Enroll | — (skip) | `bridgectl login <url> --no-browser [--name ...] [--organization ...]` |
 | Check status | `bridgectl doctor` | `bridgectl whoami` + `bridgectl doctor` |

@@ -547,7 +547,11 @@ func installationName(flag string) string {
 	}
 	return h
 }
-func openBrowser(target string) error {
+
+// openBrowser is a var, not a func, so tests can stub it and assert
+// --no-browser never invokes it without depending on a real xdg-open/open
+// binary or display being present.
+var openBrowser = func(target string) error {
 	for _, name := range []string{"xdg-open", "open"} {
 		if _, err := exec.LookPath(name); err == nil {
 			return exec.Command(name, target).Start()
@@ -555,6 +559,7 @@ func openBrowser(target string) error {
 	}
 	return errors.New("no browser opener found")
 }
+
 func persistBridgeEnrollment(tok deviceToken, name, expectedOrigin string) error {
 	if !supportedDeviceAPIVersions[tok.APIVersion] {
 		return fmt.Errorf("unsupported Bridge device-enrollment api_version %q", tok.APIVersion)
