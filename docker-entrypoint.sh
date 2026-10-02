@@ -41,9 +41,13 @@ mkdir -p /run/bridge
 chown bridge:bridge /run/bridge
 
 # Ensure bridge user can read/write mounted workspace volumes such as /repos.
+# Recursive: a bind-mounted repo (e.g. /repos/workspace) is a separate
+# filesystem from the image's /repos directory and keeps the host's
+# UID/GID, so a non-recursive chown here leaves it unwritable by bridge
+# whenever the host owner's UID differs from bridge's.
 for _vol in /repos /workspace /telemetry; do
   if [ -d "$_vol" ]; then
-    chown bridge:bridge "$_vol"
+    chown -R bridge:bridge "$_vol"
   fi
 done
 
