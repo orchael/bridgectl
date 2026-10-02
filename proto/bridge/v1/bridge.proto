@@ -266,6 +266,10 @@ message HealthResponse {
   // restart (a changed ID means the process restarted and all in-memory
   // session state has been lost).
   string server_instance_id = 3;
+  // server_version is the running daemon's build version (the same value
+  // reported by `bridgectl --version` for the binary that started it).
+  // Empty for unversioned dev builds.
+  string server_version = 4;
 }
 
 message ProviderHealth {
