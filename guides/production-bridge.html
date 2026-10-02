@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.2">
 <title data-rh="true">Production Bridge on an ai-desktop | Bridgectl</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orchael.github.io/bridgectl/guides/production-bridge"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Production Bridge on an ai-desktop | Bridgectl"><meta data-rh="true" name="description" content="The minimum version for the first production Bridge acceptance is v1.4.0."><meta data-rh="true" property="og:description" content="The minimum version for the first production Bridge acceptance is v1.4.0."><link data-rh="true" rel="canonical" href="https://orchael.github.io/bridgectl/guides/production-bridge"><link data-rh="true" rel="alternate" href="https://orchael.github.io/bridgectl/guides/production-bridge" hreflang="en"><link data-rh="true" rel="alternate" href="https://orchael.github.io/bridgectl/guides/production-bridge" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Production Bridge on an ai-desktop","item":"https://orchael.github.io/bridgectl/guides/production-bridge"}]}</script><link rel="stylesheet" href="/bridgectl/assets/css/styles.4c9ca108.css">
-<script src="/bridgectl/assets/js/runtime~main.a290e66c.js" defer="defer"></script>
+<script src="/bridgectl/assets/js/runtime~main.21dd0b43.js" defer="defer"></script>
 <script src="/bridgectl/assets/js/main.56116713.js" defer="defer"></script>
 </head>
 <body>
@@ -44,10 +44,12 @@ on a previously customized desktop, confirm the service and login use the same
 config; preserve existing provider/security settings when reconciling duplicate
 configs. Do not print the credentials JSON. The standard unmodified ai-desktop
 layout is covered by the production enrollment regression test.</p>
-<p>Restart is necessary for a running daemon: control and telemetry configuration
-are loaded at startup. This unit uses <code>KillMode=control-group</code>, so finish active
-work before restarting. With no running daemon, simply log in and run the
-session; no restart command is necessary. Existing provider authentication and
+<p>The v1.4.0 acceptance commands above require a restart because that release loads
+reporting configuration only at startup. Builds with enrollment reload support
+activate it during login and preserve live sessions; omit the post-login restart
+on those builds. Upgrading an already-running v1.4.0 daemon still requires one
+restart to load the new binary. The unit uses <code>KillMode=control-group</code>, so finish
+active work before an upgrade restart. Existing provider authentication and
 workspace permissions remain prerequisites and are supplied by ai-desktops.</p>
 <h2 class="anchor anchorTargetStickyNavbar_lel1" id="telemetry">Telemetry<a href="#telemetry" class="hash-link" aria-label="Direct link to Telemetry" title="Direct link to Telemetry" translate="no">​</a></h2>
 <p>Login configures a separate HTTPS collector endpoint and <code>brc_</code> credential. It
