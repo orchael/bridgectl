@@ -187,6 +187,16 @@ func (s *Server) reloadEnrollment(ctx context.Context, reporting *reportingObser
 	}
 	reporting.mu.Unlock()
 	if control != nil {
+		// Start only schedules run()'s goroutine; it returns before any
+		// handshake happens. Without a synchronous write here, the status
+		// file can still hold a "connected" (or "auth_rejected") entry from
+		// a previous connection at the moment this reload's ack is
+		// written, and waitForBridgeControl could report success — or a
+		// stale rejection — without this client ever attempting its own
+		// handshake.
+		if err := bridgecontrol.WriteStatus(filepath.Join(s.stateDir, "bridge-control-status.json"), bridgecontrol.Status{State: bridgecontrol.StateConnecting, UpdatedAt: time.Now()}); err != nil {
+			s.logger.Warn("write bridge control status", "error", err)
+		}
 		control.Start(context.Background())
 	} else {
 		_ = bridgecontrol.WriteStatus(filepath.Join(s.stateDir, "bridge-control-status.json"), bridgecontrol.Status{State: bridgecontrol.StateNotProvisioned, UpdatedAt: time.Now()})

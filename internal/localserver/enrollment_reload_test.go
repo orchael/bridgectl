@@ -84,6 +84,58 @@ func TestEnrollmentReloadReportsInvalidConfigAndCanRetry(t *testing.T) {
 	}
 }
 
+// TestEnrollmentReloadOverwritesStaleStatusBeforeAck reproduces a Copilot
+// review finding on PR #268: control.Start only schedules run()'s goroutine
+// and returns immediately, so a stale "connected" entry left by a previous
+// connection could still be on disk at the moment this reload's ack is
+// written — letting waitForBridgeControl report success (or a stale
+// rejection) without the new client ever attempting its own handshake.
+// reloadEnrollment must synchronously clear that stale entry before Start.
+func TestEnrollmentReloadOverwritesStaleStatusBeforeAck(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "bridge.yaml")
+	if err := os.WriteFile(configPath, []byte("providers: {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := Start(Config{StateDir: dir, ConfigPath: configPath, Logger: testLogger()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+
+	statusPath := statusFilePath(dir)
+	stale := bridgecontrol.Status{State: bridgecontrol.StateConnected, InstallationID: "stale-installation", UpdatedAt: time.Now()}
+	if err := bridgecontrol.WriteStatus(statusPath, stale); err != nil {
+		t.Fatal(err)
+	}
+
+	credPath := filepath.Join(dir, "bridge-credentials.json")
+	if err := os.WriteFile(credPath, []byte(`{"control_credential":"`+testValidControlCredential+`"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("control:\n  endpoint: wss://127.0.0.1:1/v1/control\n  credential_file: "+credPath+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeReload := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ReloadEnrollment(ctx, dir, configPath); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := bridgecontrol.ReadStatus(statusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.State == bridgecontrol.StateConnected {
+		t.Fatalf("stale connected status survived reload: %+v", st)
+	}
+	if !st.UpdatedAt.After(beforeReload) {
+		t.Fatalf("status was not rewritten synchronously during reload: %+v (reload started %v)", st, beforeReload)
+	}
+}
+
 func TestEnrollmentReloadNoDaemonTimesOut(t *testing.T) {
 	dir := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
