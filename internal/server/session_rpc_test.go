@@ -33,7 +33,7 @@ func TestSessionIDFormatValidationRPC(t *testing.T) {
 		StartSessionPerClientBurst: 100,
 		SendInputPerSessionRPS:     100,
 		SendInputPerSessionBurst:   100,
-	}, "test", nil, nil, "")
+	}, "test", nil, nil, "", "")
 
 	ctx := auth.ContextWithClaims(context.Background(), &auth.BridgeClaims{ProjectID: "proj"})
 
@@ -126,7 +126,7 @@ func TestGlobalRateLimitExhausted(t *testing.T) {
 		StartSessionPerClientBurst: 100,
 		SendInputPerSessionRPS:     100,
 		SendInputPerSessionBurst:   100,
-	}, "test", nil, nil, "")
+	}, "test", nil, nil, "", "")
 
 	ctx := auth.ContextWithClaims(context.Background(), &auth.BridgeClaims{ProjectID: "proj"})
 
@@ -170,7 +170,7 @@ func TestListSessionsRPC(t *testing.T) {
 		StartSessionPerClientBurst: 100,
 		SendInputPerSessionRPS:     100,
 		SendInputPerSessionBurst:   100,
-	}, "test", nil, nil, "")
+	}, "test", nil, nil, "", "")
 
 	ctx := auth.ContextWithClaims(context.Background(), &auth.BridgeClaims{ProjectID: "proj-list"})
 
@@ -230,7 +230,7 @@ func TestWriteInputRateLimitExhausted(t *testing.T) {
 		StartSessionPerClientBurst: 1000,
 		SendInputPerSessionRPS:     1,
 		SendInputPerSessionBurst:   2,
-	}, "test", nil, nil, "")
+	}, "test", nil, nil, "", "")
 
 	ctx := auth.ContextWithClaims(context.Background(), &auth.BridgeClaims{ProjectID: "proj"})
 	sid := uuid.NewString()

@@ -1,0 +1,105 @@
+name: Publish CLI
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish (without the v tag prefix)
+        type: string
+        required: true
+  workflow_call:
+    inputs:
+      version:
+        description: Version to publish (without the v tag prefix)
+        type: string
+        required: true
+
+concurrency:
+  group: publish-cli-${{ inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release_cli:
+    name: Release CLI archives and Homebrew cask
+    # macos-latest is required: codesign and notarytool are macOS-only.
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/v${{ inputs.version }}
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Import Developer ID certificate
+        uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Set up App Store Connect API key
+        env:
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.private_keys"
+          printf '%s' "$APPLE_API_KEY_CONTENT" | base64 -D \
+            > "$HOME/.private_keys/AuthKey_${APPLE_API_KEY_ID}.p8"
+          chmod 600 "$HOME/.private_keys/AuthKey_${APPLE_API_KEY_ID}.p8"
+
+      - name: Verify build
+        run: go build -o /tmp/bridgectl-verify ./cmd/bridgectl
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: 'v2.14.0'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+
+      - name: Notarize darwin release archives
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_KEY_ISSUER_ID: ${{ secrets.APPLE_API_KEY_ISSUER_ID }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          for ARCH in amd64 arm64; do
+            ARCHIVE="dist/bridgectl_${VERSION}_darwin_${ARCH}.tar.gz"
+            WORKDIR="/tmp/notarize_${ARCH}"
+            mkdir -p "$WORKDIR"
+
+            tar -xzf "$ARCHIVE" -C "$WORKDIR" bridgectl
+            ditto -c -k --keepParent "$WORKDIR/bridgectl" "$WORKDIR/bridgectl.zip"
+
+            xcrun notarytool submit "$WORKDIR/bridgectl.zip" \
+              --key "$HOME/.private_keys/AuthKey_${APPLE_API_KEY_ID}.p8" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_KEY_ISSUER_ID" \
+              --wait \
+              --timeout 20m
+
+            echo "Notarized darwin/${ARCH}"
+          done
+
+      - name: Summarize published CLI artifacts
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "Release archives and checksums.txt appended to release v${VERSION}"
+          echo "Homebrew cask pushed to orchael/homebrew-bridgectl"
+          echo "Install with: brew install orchael/bridgectl/bridgectl"

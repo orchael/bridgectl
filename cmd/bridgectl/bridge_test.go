@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -384,11 +385,11 @@ func TestDefaultOrganizationPrecedence(t *testing.T) {
 
 func TestAuthorizeRequestBodyIncludesRequestedOrganization(t *testing.T) {
 	t.Setenv("BRIDGECTL_ORGANIZATION", "")
-	body := authorizeRequestBody("")
+	body := authorizeRequestBody("", "test-server")
 	if _, ok := body["requested_organization"]; ok {
 		t.Fatalf("expected requested_organization omitted when empty, got %v", body)
 	}
-	body = authorizeRequestBody("Acme Inc")
+	body = authorizeRequestBody("Acme Inc", "test-server")
 	if body["requested_organization"] != "Acme Inc" {
 		t.Fatalf("expected requested_organization=Acme Inc, got %v", body)
 	}
@@ -623,5 +624,99 @@ func TestPollDeviceTokenTerminalErrorIsReturned(t *testing.T) {
 		if derr == nil || derr.Error != code {
 			t.Fatalf("%s: unexpected derr: %+v", code, derr)
 		}
+	}
+}
+
+func TestInstallationNamePrecedence(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := os.WriteFile(filepath.Join(dir, "bridge.yaml"), []byte("name: config-server\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := installationName("explicit-server"); got != "explicit-server" {
+		t.Fatalf("explicit name precedence: %q", got)
+	}
+	if got := installationName(""); got != "config-server" {
+		t.Fatalf("config name precedence: %q", got)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "bridge.yaml"), []byte("name: \"\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := installationName(""); strings.TrimSpace(got) == "" {
+		t.Fatal("expected hostname or bridgectl fallback")
+	}
+}
+
+func TestBridgeLoginFlags(t *testing.T) {
+	cmd := newBridgeLoginCmd()
+	if cmd.Flags().Lookup("name") == nil {
+		t.Fatal("expected --name flag")
+	}
+	if cmd.Flags().Lookup("no-browser") == nil {
+		t.Fatal("expected --no-browser flag")
+	}
+}
+
+// deviceAuthProbeTransport returns one valid /v1/device/authorize response,
+// then fails every subsequent request so the test exits the polling loop
+// immediately instead of waiting for real device approval.
+type deviceAuthProbeTransport struct{ calls int }
+
+func (p *deviceAuthProbeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	p.calls++
+	if p.calls == 1 {
+		body := `{"device_code":"dc","user_code":"ABCD-EFGH","verification_uri":"https://bridge.orchael.com/device","expires_in":600,"interval":1}`
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	}
+	return nil, errors.New("stop after authorization")
+}
+
+func runLoginWithStubbedBrowserAndTransport(t *testing.T, args []string) (out bytes.Buffer, opened bool) {
+	t.Helper()
+	t.Setenv("BRIDGECTL_STATE_DIR", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	originalOpen := openBrowser
+	openBrowser = func(string) error { opened = true; return nil }
+	t.Cleanup(func() { openBrowser = originalOpen })
+
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = &deviceAuthProbeTransport{}
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+
+	cmd := newBridgeLoginCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs(append([]string{"https://bridge.orchael.com"}, args...))
+	// The stubbed transport fails the device-token poll on purpose, so
+	// Execute() always errors; only the printed output up to that point
+	// and whether the browser opener fired are under test here.
+	_ = cmd.Execute()
+	return out, opened
+}
+
+func TestBridgeLoginNoBrowserNeverOpensBrowser(t *testing.T) {
+	out, opened := runLoginWithStubbedBrowserAndTransport(t, []string{"--no-browser"})
+	if opened {
+		t.Fatal("--no-browser must never invoke the browser opener")
+	}
+	if !strings.Contains(out.String(), "Authorization required at") {
+		t.Fatalf("expected the no-browser authorization message, got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "Open this URL in a browser:") {
+		t.Fatalf("expected the printed verification URL, got: %s", out.String())
+	}
+}
+
+func TestBridgeLoginWithoutNoBrowserOpensBrowser(t *testing.T) {
+	out, opened := runLoginWithStubbedBrowserAndTransport(t, nil)
+	if !opened {
+		t.Fatal("without --no-browser, login must attempt to open a browser")
+	}
+	if !strings.Contains(out.String(), "Opening https://bridge.orchael.com/device") {
+		t.Fatalf("expected the opening-browser message, got: %s", out.String())
 	}
 }

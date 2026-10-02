@@ -38,7 +38,7 @@ type GRPCForwardingSink struct {
 
 func NewGRPCForwardingSink(spool *SegmentSpool, client bridgev1.TelemetryCollectorServiceClient, closer io.Closer, flushInterval, retryInterval time.Duration, onError func(error)) *GRPCForwardingSink {
 	if flushInterval <= 0 {
-		flushInterval = 10 * time.Second
+		flushInterval = DefaultFlushInterval
 	}
 	if retryInterval <= 0 {
 		retryInterval = time.Second

@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/orchael/bridgectl/internal/bridgecontrol"
 	"github.com/orchael/bridgectl/internal/localserver"
 )
 
@@ -32,9 +33,33 @@ type bridgeEnrollment struct {
 	InstallationID    string `json:"installation_id"`
 	InstallationName  string `json:"installation_name,omitempty"`
 	TelemetryEndpoint string `json:"telemetry_endpoint"`
+	// SchemaVersion and ControlEndpoint are absent (zero value) in an
+	// enrollment created before Bridge PR #16 added control-plane support.
+	// That is a valid, expected state: such an enrollment remains a fully
+	// working Bridge/telemetry enrollment, and control-related commands
+	// report "not provisioned" rather than failing. See controlProvisioned.
+	SchemaVersion   int    `json:"schema_version,omitempty"`
+	ControlEndpoint string `json:"control_endpoint,omitempty"`
 }
 type bridgeSecret struct {
 	CollectorCredential string `json:"collector_credential"`
+	// ControlCredential is empty for an enrollment created before Bridge
+	// PR #16. Never the same value/prefix as CollectorCredential: brc_ and
+	// bri_ credentials are never interchangeable.
+	ControlCredential string `json:"control_credential,omitempty"`
+}
+
+// controlProvisioned reports whether e/controlCredential together describe
+// a complete, usable control-plane credential. It is the single source of
+// truth for "not provisioned" vs "configured" across whoami/doctor/the
+// control client's own startup gate, so all three agree. controlCredential
+// must come from readControlCredential (or an equivalent independent read),
+// never from readBridgeSecret: the two credentials are unrelated, and a
+// broken telemetry (brc_) credential in the same file must never make a
+// perfectly valid control (bri_) credential report as unconfigured.
+func controlProvisioned(e *bridgeEnrollment, controlCredential string) bool {
+	return e != nil && e.SchemaVersion >= 2 && e.ControlEndpoint != "" &&
+		controlCredentialPattern.MatchString(controlCredential)
 }
 
 func bridgeStatePaths() (string, string) {
@@ -107,6 +132,36 @@ func readBridgeSecret() (*bridgeSecret, error) {
 	}
 	return &s, nil
 }
+
+// readControlCredential reads only control_credential from the shared
+// secret file, independent of whether collector_credential in that same
+// file is valid: readBridgeSecret rejects the whole file when the
+// (unrelated) telemetry credential is malformed, which must never make an
+// otherwise-healthy control credential report as missing. Returns ("", nil)
+// when the file exists but has no control_credential set — an enrollment
+// created before Bridge PR #16, or a telemetry-only enrollment — which is a
+// valid, expected state, not an error.
+func readControlCredential() (string, error) {
+	_, sp := bridgeStatePaths()
+	b, err := secureRead(sp)
+	if err != nil {
+		return "", err
+	}
+	var s struct {
+		ControlCredential string `json:"control_credential"`
+	}
+	if err := json.Unmarshal(b, &s); err != nil {
+		return "", err
+	}
+	if s.ControlCredential == "" {
+		return "", nil
+	}
+	if !controlCredentialPattern.MatchString(s.ControlCredential) {
+		return "", fmt.Errorf("bridge credential file %q has a malformed control_credential", sp)
+	}
+	return s.ControlCredential, nil
+}
+
 func secureRead(path string) ([]byte, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -240,6 +295,15 @@ type deviceToken struct {
 	InstallationID      string `json:"installation_id"`
 	TelemetryEndpoint   string `json:"telemetry_endpoint"`
 	CollectorCredential string `json:"collector_credential"`
+	// SchemaVersion, ControlEndpoint, and ControlCredential were added by
+	// Bridge PR #16 (control-plane support). A Bridge deployment older than
+	// that PR simply omits them, which decodes to SchemaVersion 0 here;
+	// persistBridgeEnrollment only trusts control_endpoint/control_credential
+	// once SchemaVersion >= 2, per docs/bridgectl-device-enrollment.md's
+	// documented compatibility check.
+	SchemaVersion     int    `json:"schema_version"`
+	ControlEndpoint   string `json:"control_endpoint"`
+	ControlCredential string `json:"control_credential"`
 }
 
 // supportedDeviceAPIVersions are the device-enrollment protocol versions this
@@ -253,6 +317,10 @@ var supportedDeviceAPIVersions = map[string]bool{"v1": true}
 // (internal/localserver.CollectorCredentialPattern) so a malformed
 // credential is rejected the same way on write and on read.
 var collectorCredentialPattern = localserver.CollectorCredentialPattern
+
+// controlCredentialPattern is the bri_ control-only counterpart, shared
+// with internal/localserver.ControlCredentialPattern for the same reason.
+var controlCredentialPattern = localserver.ControlCredentialPattern
 
 type deviceTokenError struct {
 	Error    string `json:"error"`
@@ -336,9 +404,26 @@ func newBridgeLoginCmd() *cobra.Command {
 	var bridge string
 	var organization string
 	var force bool
-	cmd := &cobra.Command{Use: "login", Short: "Log into Bridge and enroll this installation", RunE: func(cmd *cobra.Command, _ []string) error { return runBridgeLogin(cmd, bridge, organization, force) }}
+	var name string
+	var noBrowser bool
+	cmd := &cobra.Command{
+		Use: "login [bridge-url]", Short: "Log into Bridge and enroll this installation",
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			origin := bridge
+			if len(args) == 1 {
+				if cmd.Flags().Changed("bridge") {
+					return errors.New("specify either bridge-url or --bridge, not both")
+				}
+				origin = args[0]
+			}
+			return runBridgeLogin(cmd, origin, organization, name, force, noBrowser)
+		},
+	}
 	cmd.Flags().StringVar(&bridge, "bridge", "", "Bridge HTTPS origin")
 	cmd.Flags().StringVar(&organization, "organization", "", "default organization name to request")
+	cmd.Flags().StringVar(&name, "name", "", "server name shown in Bridge (defaults to config name, then hostname)")
+	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "print the authorization URL without opening a browser")
 	cmd.Flags().BoolVar(&force, "force", false, "replace an existing enrollment")
 	return cmd
 }
@@ -348,18 +433,20 @@ func defaultOrganization(flag string) string {
 	}
 	return strings.TrimSpace(os.Getenv("BRIDGECTL_ORGANIZATION"))
 }
-func authorizeRequestBody(organization string) map[string]string {
-	body := map[string]string{"display_name": installationName()}
+func authorizeRequestBody(organization, name string) map[string]string {
+	body := map[string]string{"display_name": name}
 	if org := defaultOrganization(organization); org != "" {
 		body["requested_organization"] = org
 	}
 	return body
 }
-func runBridgeLogin(cmd *cobra.Command, bridge, organization string, force bool) error {
+func runBridgeLogin(cmd *cobra.Command, bridge, organization, name string, force, noBrowser bool) error {
+	ctx, cancel := signalContext(cmd.Context())
+	defer cancel()
 	if _, _, err := readEnrollment(); err == nil && !force {
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Already logged into Bridge.")
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Use --force to re-enroll.")
-		return nil
+		return activateBridgeEnrollment(ctx, cmd)
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) && !force {
 		return fmt.Errorf("read existing enrollment: %w", err)
 	}
@@ -368,10 +455,9 @@ func runBridgeLogin(cmd *cobra.Command, bridge, organization string, force bool)
 		return err
 	}
 	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
-	ctx, cancel := signalContext(cmd.Context())
-	defer cancel()
+	installation := installationName(name)
 	var auth deviceAuthorization
-	if _, err = httpJSON(ctx, client, "POST", base+"/v1/device/authorize", authorizeRequestBody(organization), &auth); err != nil {
+	if _, err = httpJSON(ctx, client, "POST", base+"/v1/device/authorize", authorizeRequestBody(organization, installation), &auth); err != nil {
 		return fmt.Errorf("request Bridge authorization: %w", err)
 	}
 	if err := validateDeviceAuthorization(auth); err != nil {
@@ -391,11 +477,17 @@ func runBridgeLogin(cmd *cobra.Command, bridge, organization string, force bool)
 		}
 	}
 	out := cmd.OutOrStdout()
-	_, _ = fmt.Fprintf(out, "Opening %s\n\nAuthorization code:\n\n    %s\n\n", auth.VerificationURI, auth.UserCode)
+	if noBrowser {
+		_, _ = fmt.Fprintf(out, "Authorization required at %s\n\nAuthorization code:\n\n    %s\n\n", auth.VerificationURI, auth.UserCode)
+	} else {
+		_, _ = fmt.Fprintf(out, "Opening %s\n\nAuthorization code:\n\n    %s\n\n", auth.VerificationURI, auth.UserCode)
+	}
 	if auth.VerificationURIComplete == "" {
 		auth.VerificationURIComplete = auth.VerificationURI + "?user_code=" + url.QueryEscape(auth.UserCode)
 	}
-	if err := openBrowser(auth.VerificationURIComplete); err != nil {
+	if noBrowser {
+		_, _ = fmt.Fprintf(out, "Open this URL in a browser: %s\n\n", auth.VerificationURIComplete)
+	} else if err := openBrowser(auth.VerificationURIComplete); err != nil {
 		_, _ = fmt.Fprintf(out, "Open this URL in your browser: %s\n\n", auth.VerificationURIComplete)
 	}
 	_, _ = fmt.Fprintln(out, "Waiting for authorization...")
@@ -415,11 +507,11 @@ func runBridgeLogin(cmd *cobra.Command, bridge, organization string, force bool)
 			return fmt.Errorf("bridge authorization: %w", err)
 		}
 		if tok != nil {
-			if err := persistBridgeEnrollment(*tok, installationName(), base); err != nil {
+			if err := persistBridgeEnrollment(*tok, installation, base); err != nil {
 				return err
 			}
 			_, _ = fmt.Fprintln(out, "✓ Bridge authorization complete\n✓ Installation registered\n✓ Organization selected\n✓ Telemetry configured")
-			return nil
+			return activateBridgeEnrollment(ctx, cmd)
 		}
 		switch derr.Error {
 		case "authorization_pending":
@@ -435,14 +527,31 @@ func runBridgeLogin(cmd *cobra.Command, bridge, organization string, force bool)
 func signalContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(parent, os.Interrupt)
 }
-func installationName() string {
+func installationName(flag string) string {
+	if name := strings.TrimSpace(flag); name != "" {
+		return name
+	}
+	if b, err := os.ReadFile(bridgeConfigPath()); err == nil {
+		var cfg struct {
+			Name string `yaml:"name"`
+		}
+		if yaml.Unmarshal(b, &cfg) == nil {
+			if name := strings.TrimSpace(cfg.Name); name != "" {
+				return name
+			}
+		}
+	}
 	h, _ := os.Hostname()
 	if h == "" {
 		h = "bridgectl"
 	}
 	return h
 }
-func openBrowser(target string) error {
+
+// openBrowser is a var, not a func, so tests can stub it and assert
+// --no-browser never invokes it without depending on a real xdg-open/open
+// binary or display being present.
+var openBrowser = func(target string) error {
 	for _, name := range []string{"xdg-open", "open"} {
 		if _, err := exec.LookPath(name); err == nil {
 			return exec.Command(name, target).Start()
@@ -450,6 +559,7 @@ func openBrowser(target string) error {
 	}
 	return errors.New("no browser opener found")
 }
+
 func persistBridgeEnrollment(tok deviceToken, name, expectedOrigin string) error {
 	if !supportedDeviceAPIVersions[tok.APIVersion] {
 		return fmt.Errorf("unsupported Bridge device-enrollment api_version %q", tok.APIVersion)
@@ -480,7 +590,27 @@ func persistBridgeEnrollment(tok deviceToken, name, expectedOrigin string) error
 			return fmt.Errorf("invalid organization URL: %w", err)
 		}
 	}
+	// Bridge documents schema_version >= 2 as the compatibility check for
+	// trusting control_endpoint/control_credential (added by PR #16): an
+	// older Bridge deployment (schema_version 0, unset) simply doesn't send
+	// them, and this enrollment remains a fully valid Bridge/telemetry
+	// enrollment with control left unprovisioned rather than failing login.
+	secret := bridgeSecret{CollectorCredential: tok.CollectorCredential}
 	e := bridgeEnrollment{BridgeURL: validatedBridge, OrganizationID: tok.OrganizationID, OrganizationName: strings.TrimSpace(tok.OrganizationName), OrganizationURL: orgURL, InstallationID: tok.InstallationID, InstallationName: name, TelemetryEndpoint: tok.TelemetryEndpoint}
+	if tok.SchemaVersion >= 2 {
+		if tok.ControlEndpoint == "" || tok.ControlCredential == "" {
+			return errors.New("bridge advertised schema_version >= 2 but omitted control_endpoint/control_credential")
+		}
+		if err := validateControlEndpoint(tok.ControlEndpoint); err != nil {
+			return fmt.Errorf("invalid control endpoint: %w", err)
+		}
+		if !controlCredentialPattern.MatchString(tok.ControlCredential) {
+			return errors.New("bridge returned a malformed control credential")
+		}
+		e.SchemaVersion = tok.SchemaVersion
+		e.ControlEndpoint = tok.ControlEndpoint
+		secret.ControlCredential = tok.ControlCredential
+	}
 	mp, sp := bridgeStatePaths()
 	// With --force, mp/sp may already hold a working enrollment. Capture it
 	// before overwriting so a later failure restores it instead of just
@@ -490,7 +620,7 @@ func persistBridgeEnrollment(tok deviceToken, name, expectedOrigin string) error
 	if err := atomicJSON(mp, e); err != nil {
 		return fmt.Errorf("save Bridge enrollment: %w", err)
 	}
-	if err := atomicJSON(sp, bridgeSecret{CollectorCredential: tok.CollectorCredential}); err != nil {
+	if err := atomicJSON(sp, secret); err != nil {
 		restore()
 		return fmt.Errorf("save Bridge credential: %w", err)
 	}
@@ -498,7 +628,24 @@ func persistBridgeEnrollment(tok deviceToken, name, expectedOrigin string) error
 		restore()
 		return fmt.Errorf("configure Bridge telemetry: %w", err)
 	}
+	if err := configureBridgeControl(e, mp); err != nil {
+		restore()
+		return fmt.Errorf("configure Bridge control: %w", err)
+	}
 	return nil
+}
+
+// validateControlEndpoint requires a wss:// URL with a non-empty path and no
+// credentials/query/fragment, matching Bridge's own startup validation for
+// BRIDGE_CONTROL_URL. bridgectl must never fall back to plain ws:// even if
+// a misconfigured Bridge were to return one.
+// validateControlEndpoint delegates to bridgecontrol.ValidateEndpoint, the
+// single shared check enforced at every point a control endpoint value is
+// accepted (here, at enrollment write time, and again at daemon read time
+// in internal/localserver, since a hand-edited config bypasses this write
+// path entirely).
+func validateControlEndpoint(raw string) error {
+	return bridgecontrol.ValidateEndpoint(raw)
 }
 func validateHTTPSURL(raw string) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
@@ -543,6 +690,38 @@ func hasExplicitCollector(t map[string]any) bool {
 	url, _ := t["collector_url"].(string)
 	target, _ := t["collector_target"].(string)
 	return url != "" || target != ""
+}
+
+// configureBridgeControl writes (or refreshes) a managed control: block in
+// the daemon YAML config pointing at Bridge's control endpoint and the
+// shared credentials file. It is a no-op when e has no control endpoint
+// (an enrollment created before Bridge PR #16), leaving any existing
+// control: block from a prior, newer-Bridge login untouched rather than
+// erasing it.
+func configureBridgeControl(e bridgeEnrollment, _ string) error {
+	if e.ControlEndpoint == "" {
+		return nil
+	}
+	path := bridgeConfigPath()
+	m := map[string]any{}
+	if b, err := os.ReadFile(path); err == nil {
+		if err := yaml.Unmarshal(b, &m); err != nil {
+			return err
+		}
+	}
+	c, ok := m["control"].(map[string]any)
+	if !ok {
+		c = map[string]any{}
+	}
+	c["endpoint"] = e.ControlEndpoint
+	c["credential_file"] = filepath.Join(localserver.StateDir(), "bridge-credentials.json")
+	c["managed_by_bridge"] = true
+	m["control"] = c
+	b, err := yaml.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return atomicWriteFile(path, b, 0600)
 }
 
 func configureBridgeTelemetry(e bridgeEnrollment, metadataPath string) error {
@@ -590,8 +769,9 @@ func newBridgeWhoamiCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
+		secret, secretErr := readBridgeSecret()
 		status := "logged in"
-		if _, secretErr := readBridgeSecret(); secretErr != nil {
+		if secretErr != nil {
 			status = "credential missing"
 		}
 		out := cmd.OutOrStdout()
@@ -600,6 +780,16 @@ func newBridgeWhoamiCmd() *cobra.Command {
 			_, _ = fmt.Fprintf(out, "Org URL         %s\n", e.OrganizationURL)
 		}
 		_, _ = fmt.Fprintf(out, "Installation    %s\nStatus          %s\n", display(e.InstallationName, e.InstallationID), status)
+		telemetryStatus := "configured"
+		if secretErr != nil || secret == nil || secret.CollectorCredential == "" {
+			telemetryStatus = "not configured"
+		}
+		controlCredential, _ := readControlCredential() // a read error just means "not usable" here
+		controlStatus := "configured"
+		if !controlProvisioned(e, controlCredential) {
+			controlStatus = "not configured"
+		}
+		_, _ = fmt.Fprintf(out, "Telemetry       %s\nControl         %s\n", telemetryStatus, controlStatus)
 		return nil
 	}}
 }
@@ -621,6 +811,9 @@ func newBridgeLogoutCmd() *cobra.Command {
 		if err := removeManagedTelemetry(); err != nil {
 			return fmt.Errorf("update telemetry configuration: %w", err)
 		}
+		if err := removeManagedControl(); err != nil {
+			return fmt.Errorf("update control configuration: %w", err)
+		}
 		if err := os.Remove(mp); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -631,6 +824,44 @@ func newBridgeLogoutCmd() *cobra.Command {
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Remote revocation is not exposed by this Bridge protocol.")
 		return nil
 	}}
+}
+
+// removeManagedControl removes a managed control: block written by
+// configureBridgeControl. It never touches a control: block the user
+// configured themselves (managed_by_bridge not set).
+func removeManagedControl() error {
+	path := bridgeConfigPath()
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	m := map[string]any{}
+	if err := yaml.Unmarshal(b, &m); err != nil {
+		return err
+	}
+	c, ok := m["control"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	managed, _ := c["managed_by_bridge"].(bool)
+	if !managed {
+		return nil
+	}
+	delete(m, "control")
+	if len(m) == 0 && path == filepath.Join(localserver.StateDir(), "bridge.yaml") {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	out, err := yaml.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return atomicWriteFile(path, out, 0600)
 }
 
 func removeManagedTelemetry() error {

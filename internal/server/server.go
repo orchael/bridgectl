@@ -44,6 +44,10 @@ type BridgeServer struct {
 	// enrollStore is the enrollment token store. Nil when enrollment is
 	// not configured.
 	enrollStore *enrollment.Store
+	// version is the running daemon's build version, reported back to
+	// clients via Health so `bridgectl doctor` can detect a stale daemon
+	// after an upgrade. Empty for unversioned dev builds.
+	version string
 }
 
 type RateLimitConfig struct {
@@ -55,7 +59,7 @@ type RateLimitConfig struct {
 	SendInputPerSessionBurst   int
 }
 
-func New(supervisor *bridge.Supervisor, registry *bridge.Registry, logger *slog.Logger, rl RateLimitConfig, serverInstanceID string, providerFallbacks map[string][]string, jwtVerifier *auth.JWTVerifier, certsDir string) *BridgeServer {
+func New(supervisor *bridge.Supervisor, registry *bridge.Registry, logger *slog.Logger, rl RateLimitConfig, serverInstanceID string, providerFallbacks map[string][]string, jwtVerifier *auth.JWTVerifier, certsDir string, version string) *BridgeServer {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -70,6 +74,7 @@ func New(supervisor *bridge.Supervisor, registry *bridge.Registry, logger *slog.
 		providerFallbacks: providerFallbacks,
 		jwtVerifier:       jwtVerifier,
 		certsDir:          certsDir,
+		version:           version,
 	}
 }
 
@@ -452,6 +457,7 @@ func (s *BridgeServer) Health(ctx context.Context, req *bridgev1.HealthRequest) 
 		Status:           "serving",
 		Providers:        providers,
 		ServerInstanceId: s.serverInstanceID,
+		ServerVersion:    s.version,
 	}, nil
 }
 
@@ -552,6 +558,7 @@ func sessionInfoToProto(info *bridge.SessionInfo) *bridgev1.GetSessionResponse {
 		Rows:                 info.Rows,
 		ActiveWriterClientId: info.ActiveWriterClientID,
 		ObserverCount:        int32(info.ObserverCount),
+		Interaction:          interactionToProto(info.Interaction),
 	}
 	if !info.StoppedAt.IsZero() {
 		resp.StoppedAt = timestamppb.New(info.StoppedAt)

@@ -50,6 +50,51 @@ pnpm_installed() {
   command -v pnpm >/dev/null 2>&1
 }
 
+# Runs a corepack command, retrying with sudo if it fails for permission
+# reasons (e.g. Node installed system-wide via apt/nodesource, where the
+# corepack shims must be symlinked into a root-owned bin directory).
+run_corepack() {
+  local err_file
+  err_file="$(mktemp)"
+  if corepack "$@" 2>"$err_file"; then
+    rm -f "$err_file"
+    return 0
+  fi
+  cat "$err_file" >&2
+  rm -f "$err_file"
+  if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+    echo "Retrying 'corepack $*' with sudo (corepack needs root to update a system-wide Node install)..."
+    sudo corepack "$@"
+    return $?
+  fi
+  return 1
+}
+
+ensure_pnpm() {
+  if pnpm_installed; then
+    echo "pnpm detected: $(pnpm --version) ($(command -v pnpm))"
+    return 0
+  fi
+
+  if ! command -v corepack >/dev/null 2>&1; then
+    echo "pnpm not found and corepack is not available." >&2
+    echo "Install pnpm manually: https://pnpm.io/installation" >&2
+    return 1
+  fi
+
+  echo "pnpm not found. Installing via corepack..."
+  run_corepack enable || { echo "Failed to run 'corepack enable'." >&2; return 1; }
+  run_corepack prepare pnpm@latest --activate || { echo "Failed to run 'corepack prepare pnpm@latest --activate'." >&2; return 1; }
+
+  if pnpm_installed; then
+    echo "pnpm installed: $(pnpm --version) ($(command -v pnpm))"
+  else
+    echo "corepack reported success but pnpm is still not on PATH." >&2
+    echo "Open a new shell, or re-check PATH, then rerun 'make deps'." >&2
+    return 1
+  fi
+}
+
 brew_installed() {
   command -v brew >/dev/null 2>&1
 }
@@ -169,14 +214,8 @@ if node_installed; then
     echo "Version OK: matches .nvmrc requirement (${REQUIRED_MAJOR})"
     echo ""
 
-    # Also check pnpm
-    if pnpm_installed; then
-      echo "pnpm detected: $(pnpm --version) ($(command -v pnpm))"
-    else
-      echo "pnpm not found. Install with:"
-      echo "  corepack enable"
-      echo "  corepack prepare pnpm@latest --activate"
-    fi
+    # Also ensure pnpm is available.
+    ensure_pnpm
 
     echo ""
     echo "=== Node.js setup is complete ==="

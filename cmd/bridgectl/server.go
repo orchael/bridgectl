@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
+	_ "net/http/pprof" // always registers its handlers on http.DefaultServeMux at init; see startDebugPprof for the env-gated, loopback-only listener that actually serves them
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,6 +20,50 @@ import (
 	"github.com/orchael/bridgectl/internal/config"
 	"github.com/orchael/bridgectl/internal/localserver"
 )
+
+// startDebugPprof starts a pprof HTTP server for live CPU/goroutine
+// profiling when BRIDGECTL_PPROF_ADDR is set (e.g. "127.0.0.1:6060"). It is
+// opt-in and off by default so the installed/production server never
+// exposes runtime internals, and refuses to start unless addr explicitly
+// resolves to loopback — this endpoint has no authentication, so a value
+// like ":6060" or "0.0.0.0:6060" would otherwise expose it to the network
+// despite the loopback-only intent.
+//
+// Usage once running:
+//
+//	go tool pprof http://127.0.0.1:6060/debug/pprof/profile?seconds=30
+//	curl http://127.0.0.1:6060/debug/pprof/goroutine?debug=2
+func startDebugPprof(logger *slog.Logger) {
+	addr := strings.TrimSpace(os.Getenv("BRIDGECTL_PPROF_ADDR"))
+	if addr == "" {
+		return
+	}
+	if !isLoopbackAddr(addr) {
+		logger.Error("BRIDGECTL_PPROF_ADDR must bind to loopback (e.g. 127.0.0.1:6061); refusing to start the unauthenticated debug pprof server", "addr", addr)
+		return
+	}
+	go func() {
+		logger.Warn("debug pprof server enabled", "addr", addr)
+		if err := http.ListenAndServe(addr, nil); err != nil { //nolint:gosec // isLoopbackAddr validated above; debug-only endpoint, opt-in via env var
+			logger.Warn("debug pprof server exited", "error", err)
+		}
+	}()
+}
+
+// isLoopbackAddr reports whether addr's host explicitly resolves to the
+// loopback interface. An empty host (e.g. ":6060") binds all interfaces, so
+// it is rejected rather than treated as "unspecified = local".
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
 
 // sdNotify sends a notification to the systemd service manager via
 // $NOTIFY_SOCKET. It is a no-op when the socket is not set (i.e. when not
@@ -71,6 +117,8 @@ func newServerCmd() *cobra.Command {
 		newServerStopCmd(),
 		newServerIssueClientCmd(),
 		newServerRenewCertCmd(),
+		newServerInstallAgentCmd(),
+		newServerUninstallAgentCmd(),
 	)
 
 	return cmd
@@ -117,6 +165,11 @@ infrastructure (Google, GitHub, Okta, etc.) managed through Step CA.`,
 			if configPath == "" {
 				configPath = defaultServerConfigPath(localserver.StateDir())
 			}
+
+			// A config file's logging.level/format apply when the operator
+			// didn't pass the matching flag explicitly, so a value set in the
+			// file isn't silently shadowed by the flag's hardcoded default.
+			logLevel, logFormat = resolveLogSettings(configPath, logLevel, logFormat, cmd.Flags().Changed("log-level"), cmd.Flags().Changed("log-format"))
 
 			// Build logger from --log-level and --log-format.
 			level := slog.LevelWarn
@@ -181,6 +234,8 @@ infrastructure (Google, GitHub, Okta, etc.) managed through Step CA.`,
 			}
 			fmt.Fprintf(os.Stderr, "bridgectl server listening — %s (pid %d)\n", modeDesc, os.Getpid())
 
+			startDebugPprof(logger)
+
 			// Notify systemd that the server is ready and start the watchdog
 			// heartbeat. Both are no-ops when not running under systemd.
 			sdNotify("READY=1\nSTATUS=listening")
@@ -214,6 +269,28 @@ infrastructure (Google, GitHub, Okta, etc.) managed through Step CA.`,
 	cmd.Flags().DurationVar(&certRenewalCheckInterval, "cert-renewal-check-interval", 0, "how often to check certificate expiry (e.g. 10m, 1h); default 1 hour")
 
 	return cmd
+}
+
+// resolveLogSettings applies a config file's logging.level/format when the
+// corresponding CLI flag was not explicitly passed, so a value the operator
+// set in the file isn't silently shadowed by the flag's hardcoded default.
+// An unreadable or unparsable config file is not an error here; server start
+// surfaces that separately when it loads the full config.
+func resolveLogSettings(configPath, logLevel, logFormat string, levelFlagSet, formatFlagSet bool) (string, string) {
+	if configPath == "" {
+		return logLevel, logFormat
+	}
+	fileLevel, fileFormat, err := config.ExplicitLogging(configPath)
+	if err != nil {
+		return logLevel, logFormat
+	}
+	if !levelFlagSet && fileLevel != "" {
+		logLevel = fileLevel
+	}
+	if !formatFlagSet && fileFormat != "" {
+		logFormat = fileFormat
+	}
+	return logLevel, logFormat
 }
 
 func defaultServerConfigPath(stateDir string) string {

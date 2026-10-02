@@ -1,6 +1,7 @@
 {
   "name": "bridgectl",
   "private": true,
+  "license": "MIT",
   "packageManager": "pnpm@11.22.0",
   "description": "Pinned local AI agent CLIs for bridgectl",
   "engines": {
@@ -17,13 +18,13 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "eslint": "^10.10.0",
+    "eslint": "^10.11.0",
     "globals": "^17.12.0",
-    "typescript-eslint": "^8.70.0"
+    "typescript-eslint": "^8.70.1"
   },
   "dependencies": {
-    "@anthropic-ai/claude-code": "2.1.270",
-    "@openai/codex": "0.154.0",
-    "opencode-ai": "1.18.30"
+    "@anthropic-ai/claude-code": "2.1.283",
+    "@openai/codex": "0.157.1",
+    "opencode-ai": "1.18.32"
   }
 }

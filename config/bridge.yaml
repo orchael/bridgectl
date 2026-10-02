@@ -1,3 +1,6 @@
+# Human-friendly name shown in Bridge. Login falls back to the hostname when empty.
+name: ""
+
 server:
   listen: "0.0.0.0:9445"
 
@@ -25,7 +28,7 @@ repo_setup:
 sessions:
   max_per_project: 5
   max_global: 20
-  idle_timeout: "30m"
+  idle_timeout: "24h"
   stop_grace_period: "10s"
   event_buffer_size: 8388608
 
@@ -59,7 +62,7 @@ telemetry:
   kinds: ["session_started", "session_context", "question", "answer", "session_ended"]
   queue_size: 1024
   rolling_window: "168h"
-  flush_interval: "10s"
+  flush_interval: "30s"
   retry_interval: "1s"
   max_segment_bytes: 10485760
   max_disk_space: 1GB

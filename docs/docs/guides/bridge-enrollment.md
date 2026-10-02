@@ -4,7 +4,15 @@ Bridge is optional. A bridgectl installation remains fully usable in standalone 
 
 ## Log in
 
-The production default is `https://bridge.orchael.com`. Development and end-to-end testing can select the development service explicitly:
+The production default is `https://bridge.orchael.com`. With v1.4.0 or newer:
+
+```sh
+bridgectl login https://bridge.orchael.com
+```
+
+The positional URL and `--bridge` are equivalent explicit selectors; use only
+one. Either overrides the environment and saved enrollment URL. Development
+and end-to-end testing can select the development service explicitly:
 
 ```sh
 BRIDGECTL_BRIDGE_URL=https://bridge.orchael.dev bridgectl login
@@ -13,6 +21,18 @@ BRIDGECTL_BRIDGE_URL=https://bridge.orchael.dev bridgectl login
 The equivalent flag is `bridgectl login --bridge https://bridge.orchael.dev`. The flag takes precedence over `BRIDGECTL_BRIDGE_URL`, which takes precedence over a previously saved enrollment URL, followed by the production default.
 
 Login uses Bridge's device authorization flow. bridgectl displays a short code, opens `/device` when a local browser opener is available, and polls until the browser approval succeeds. Google authentication and organization selection happen in Bridge; bridgectl never receives Google tokens, passwords, cookies, or Auth.js sessions.
+
+On a headless machine or over SSH with no local browser, pass `--no-browser` to print the authorization URL and code instead of attempting to open a browser:
+
+```sh
+bridgectl login https://bridge.orchael.com --no-browser
+```
+
+The server name shown in Bridge for this installation comes from, in order: `--name`, the `name` field in the daemon's YAML config (`config/bridge.yaml`), then the OS hostname. Pass `--name` to set it explicitly for this login:
+
+```sh
+bridgectl login https://bridge.orchael.com --name prod-worker-3
+```
 
 Polling honors the documented protocol exactly: on `slow_down`, bridgectl keeps the greatest of its current interval, the server-returned `interval`, and the `Retry-After` header, and never reduces it; `authorization_pending` continues at the current interval; `access_denied`, `expired_token`, and `invalid_grant` stop the login with that error. The successful exchange response carries an `api_version` field (currently `v1`); bridgectl rejects an enrollment whose `api_version` it does not recognize instead of silently persisting a credential issued under an incompatible protocol.
 
@@ -29,6 +49,25 @@ BRIDGECTL_ORGANIZATION="Acme Inc" bridgectl login
 After approval, bridgectl stores enrollment metadata in `bridge-enrollment.json` and the telemetry-only `brc_` credential in `bridge-credentials.json` beneath the bridgectl state directory. Both files are restricted to the current user. The credential is never printed or included in `whoami` or `doctor` output.
 
 Login writes Bridge telemetry settings only when an explicit telemetry collector URL is not already configured. Existing standalone telemetry settings therefore remain authoritative.
+
+Enrollment also configures the returned outbound WSS control endpoint and a
+separate `bri_` control credential. No inbound port, Tailscale or step-ca setup
+is required for Bridge-managed operation. Existing explicitly configured direct
+listeners remain supported. Login starts a daemon when needed and asks a running
+daemon to reload telemetry and control configuration without stopping sessions.
+It waits for the daemon to acknowledge activation and, when control is provisioned,
+for Bridge to confirm the connection. Existing sessions are included in its initial
+snapshot. Provider, listener, and security configuration are not reloaded.
+
+If activation fails, enrollment remains saved and login returns an error. Run
+`bridgectl doctor`, resolve the reported connectivity or credential problem, and
+retry `bridgectl login`; an existing enrollment is activated again without another
+browser authorization. A daemon from an older release must be upgraded and
+restarted once before it can handle reload requests. Finish active work before
+that upgrade restart because the ai-desktop systemd unit stops its process group.
+
+See [production ai-desktop setup](production-bridge.md) for the exact upgrade
+and first-acceptance commands.
 
 ## Status and logout
 

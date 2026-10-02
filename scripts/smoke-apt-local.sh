@@ -88,7 +88,14 @@ run_suite() {
       tail -f /dev/null
     ' >/dev/null
 
-  for _ in $(seq 1 30); do
+  # The container's own apt-get update/install sequence (ca-certificates,
+  # gnupg, then bridgectl itself) runs entirely before bridgectl can start,
+  # so this budget has to absorb two apt-get update passes and a package
+  # install under whatever mirror speed the CI runner gets that day, not
+  # just bridgectl's own startup time. 30s was tight enough to flake on
+  # ordinary network variance; 2 minutes gives real headroom while staying
+  # well inside the job's 25-minute timeout.
+  for _ in $(seq 1 120); do
     if docker exec "$container" /usr/local/bin/plain-healthcheck >/dev/null 2>&1; then
       echo "APT SMOKE PASSED: suite=$suite"
       return

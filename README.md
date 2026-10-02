@@ -2,12 +2,18 @@
 
 [![CI](https://github.com/orchael/bridgectl/actions/workflows/ci.yml/badge.svg)](https://github.com/orchael/bridgectl/actions/workflows/ci.yml)
 [![Publish](https://github.com/orchael/bridgectl/actions/workflows/publish.yml/badge.svg)](https://github.com/orchael/bridgectl/actions/workflows/publish.yml)
+[![Publish CLI](https://github.com/orchael/bridgectl/actions/workflows/publish-cli.yml/badge.svg)](https://github.com/orchael/bridgectl/actions/workflows/publish-cli.yml)
 [![License](https://img.shields.io/github/license/orchael/bridgectl)](LICENSE)
 [![GitHub Release](https://img.shields.io/github/v/release/orchael/bridgectl)](https://github.com/orchael/bridgectl/releases)
 
 A standalone gRPC daemon and SDK that manages AI agent subprocess lifecycles and exposes a PTY transport so any client can attach to, interact with, and replay the terminal output of a running AI agent — regardless of when it connected.
 
 Supported providers: **Claude**, **Codex**, **OpenCode**, **Gemini**
+
+Claude and Codex expose structured working, waiting, and idle status through
+`bridgectl session list` and the public Go/gRPC API. This works without a hosted
+service or telemetry. See [session status](docs/docs/guides/session-status.md)
+for setup, provider signals, compatibility mode, and troubleshooting.
 
 ---
 
@@ -104,6 +110,56 @@ This starts the bridge in local Unix socket mode. Use `bin/bridgectl server star
 make chat-claude     # or chat-opencode, chat-codex, chat-gemini
 ```
 
+### Developing bridgectl when bridgectl is already installed
+
+A development machine can keep its packaged/system bridgectl service running while you build and test this repository. The development targets use `./bin/bridgectl` explicitly and set `BRIDGECTL_STATE_DIR=$(pwd)/.dev/bridgectl`, which isolates the dev server's socket, PID, certificates, and discovery files from `~/.config/bridgectl`. The dev config intentionally does not bind TCP port 9445.
+
+```bash
+# Build the repository binary. This never replaces /usr/bin/bridgectl.
+make build
+
+# Compare the isolated development server with the installed server.
+make dev-server-status
+
+# Start/stop/restart the repository-local server in the background.
+make dev-server-start
+make dev-server-stop
+make dev-server-restart   # stop, wait for it to actually exit, then start — use after rebuilding a fix
+make dev-server-logs
+
+# Log into Bridge against the isolated dev state dir (never the installed
+# service's real config/credentials — see "Debugging high CPU usage" below).
+make dev-login
+
+# Run an agent through the repository-local bridgectl build.
+make dev-session-codex DEV_REPO=/workspace/my-repo
+make dev-session-claude DEV_REPO=/workspace/my-repo
+
+# Bypass bridgectl completely when you need an unaffected coding session.
+make dev-codex DEV_REPO=/workspace/my-repo
+make dev-claude DEV_REPO=/workspace/my-repo
+```
+
+#### Debugging high CPU usage
+
+`dev-server-start` always enables an opt-in pprof debug endpoint on `127.0.0.1:6061` (loopback only; disabled by default and never started on the installed/packaged service unless its environment also sets `BRIDGECTL_PPROF_ADDR` — see `cmd/bridgectl/server.go`). While the dev server is reproducing high CPU (e.g. with `dev-session-codex`/`dev-session-claude` attached and active), sample it:
+
+```bash
+# Capture a 30s CPU profile and open it interactively (top, list, web, etc.)
+make dev-server-cpu-profile
+
+# Dump all goroutine stacks (useful for spotting a stuck/busy-looping goroutine)
+make dev-server-goroutines
+```
+
+To profile the installed/packaged service instead, set `BRIDGECTL_PPROF_ADDR=127.0.0.1:6061` in its environment (e.g. `EnvironmentFile`/`Environment=` in the systemd unit) and restart it — without that variable set, the server never starts a listener for it, so the endpoint is unreachable by default.
+
+If reproducing the issue needs real `control`/`telemetry` wiring (only active once `managed_by_bridge` config is present — otherwise the dev server is a much simpler, lower-CPU code path), run `make dev-login` rather than `bin/bridgectl login` directly: it seeds the isolated config file first so login can never fall through to and rewrite the installed service's real config. After changing code to test a fix, use `make dev-server-restart` (not a separate stop + start) to avoid a race where the old process still holds the pprof port when the new one tries to bind it.
+
+See `docs/docs/guides/debugging-high-cpu.md` for the full methodology (confirming threads vs. processes, `strace`, reading a goroutine dump, and narrowing a hot function to an algorithmic cause) and a worked example.
+
+Do not use plain `bridgectl` when validating local changes: that resolves the installed binary on `PATH`. The `dev-*` targets deliberately use `$(pwd)/bin/bridgectl`.
+
 ### Docker
 
 ```bash
@@ -136,7 +192,7 @@ telemetry:
   kinds: ["question", "answer"]
   queue_size: 1024
   rolling_window: "168h"
-  flush_interval: "10s"
+  flush_interval: "30s"
   retry_interval: "1s"
   max_segment_bytes: 10485760
   max_disk_space: 1GB
@@ -238,6 +294,12 @@ authenticate bridge clients. Keep the collector behind an operator-managed
 network ACL or authenticated proxy. Native tenant/actor authentication is
 tracked in [orchael/bridge#5](https://github.com/orchael/bridge/issues/5).
 
+Completeness checkpoints are enabled by default and record capture scope, event
+counts, and delivery losses. HTTPS batches respect Bridge's 1 MiB/1,000-record
+limits, with lossless fragments for oversized events and matching S3 receipts
+required before deleting local data. See the [telemetry guide](docs/docs/guides/telemetry.md#completeness-checkpoints-and-delivery-recovery)
+for audit and recovery details.
+
 The bridge always writes redacted events to its bounded local spool before
 streaming them. The collector acknowledges a segment only after it is durably
 synced to the collector-owned volume. If the collector is unavailable, the
@@ -303,6 +365,46 @@ make smoke
 
 This validates the repo Dockerfile and Compose stack by starting the bridge in Docker and running an authenticated gRPC health check.
 It also verifies config-driven provider fallback by requesting a deliberately unavailable smoke provider and asserting the configured fallback provider is selected.
+
+### macOS Install (Homebrew)
+
+Supported on Apple Silicon and Intel Macs.
+
+```bash
+brew install orchael/bridgectl/bridgectl
+```
+
+The released binaries are signed with a Developer ID certificate and notarized by Apple, so they run without a Gatekeeper prompt.
+
+Homebrew does **not** install the provider CLIs or their runtime. `bridgectl` launches `claude`, `codex`, `gemini`, and `opencode` through Node.js 24, so install that separately:
+
+```bash
+brew install node@24
+```
+
+**Run the daemon at login (optional):**
+
+```bash
+bridgectl server install-agent --start
+```
+
+This writes a launchd user agent to `~/Library/LaunchAgents/com.orchael.bridgectl.plist`. The agent points at the absolute path of the `bridgectl` binary you ran the command with, so it is correct for Homebrew on Apple Silicon (`/opt/homebrew`), Homebrew on Intel (`/usr/local`), and manual installs alike.
+
+It also copies the `PATH` of the shell you run it from into the plist. That matters: launchd gives agents a minimal `PATH`, and the server resolves `node` and the provider CLIs through `PATH` — without this the daemon starts but every session fails with `node not found on PATH`. Run the command from a shell where `node --version` works.
+
+Logs go to `~/Library/Logs/bridgectl/bridgectl.log` and `bridgectl.err`. Omit `--start` to write the plist without loading it.
+
+To remove the agent:
+
+```bash
+bridgectl server uninstall-agent
+```
+
+`brew uninstall bridgectl` unloads the agent too, and `brew uninstall --zap bridgectl` additionally deletes the plist and the logs.
+
+Unsigned local builds remain available via `make build-cli` — see [Build and install](#2-build-and-install).
+
+**Windows** is not yet supported natively (tracked in [#259](https://github.com/orchael/bridgectl/issues/259)). Use Docker Desktop with `ghcr.io/orchael/bridgectl`, or WSL2 with the Ubuntu package below.
 
 ### Ubuntu Package Install
 

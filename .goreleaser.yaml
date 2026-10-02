@@ -2,20 +2,21 @@ version: 2
 
 project_name: bridgectl
 
-builds:
-  - id: bridge-ca
-    binary: bridge-ca
-    main: ./cmd/bridge-ca
-    env:
-      - CGO_ENABLED=0
-    goos:
-      - linux
-    goarch:
-      - amd64
-      - arm64
-    ldflags:
-      - -s -w -X main.version={{.Version}}
+release:
+  name_template: "bridgectl v{{ .Version }}"
+  # The GitHub release is created by the publish_release job in publish.yml
+  # (AI release notes + .deb assets). Append the CLI archives to it instead of
+  # replacing the release body or the artifacts already attached.
+  mode: append
 
+builds:
+  # bridge-ca and the container images are intentionally absent: bridge-ca ships
+  # through the .deb (scripts/build-deb.sh) and the image, and images are built
+  # and pushed by the publish_container job in publish.yml. This config owns the
+  # bridgectl CLI release artifacts only.
+  #
+  # windows is intentionally absent: cmd/bridgectl does not cross-compile for
+  # Windows yet (see issue #259), and an unbuildable target fails the whole run.
   - id: bridgectl
     binary: bridgectl
     main: ./cmd/bridgectl
@@ -24,62 +25,79 @@ builds:
     goos:
       - linux
       - darwin
-      - windows
     goarch:
       - amd64
       - arm64
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X main.version={{ .Version }}
+    hooks:
+      post:
+        - cmd: sh -c 'if [ "{{ .Os }}" = "darwin" ]; then codesign --sign "{{ .Env.APPLE_SIGNING_IDENTITY }}" --options runtime --timestamp "{{ .Path }}"; fi'
+          env:
+            - APPLE_SIGNING_IDENTITY={{ .Env.APPLE_SIGNING_IDENTITY }}
 
-dockers:
-  - id: bridge-amd64
-    goos: linux
-    goarch: amd64
-    image_templates:
-      - "ghcr.io/orchael/bridgectl:{{ .Tag }}-amd64"
-      - "ghcr.io/orchael/bridgectl:latest-amd64"
-    dockerfile: Dockerfile
-    use: buildx
-    extra_files:
-      - docker-entrypoint.sh
-      - config/bridge.yaml
-    build_flag_templates:
-      - "--build-arg=BUILD_FROM=prebuilt"
-      - "--platform=linux/amd64"
-      - "--label=org.opencontainers.image.created={{.Date}}"
-      - "--label=org.opencontainers.image.title={{.ProjectName}}"
-      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
-      - "--label=org.opencontainers.image.version={{.Version}}"
+archives:
+  - id: bridgectl
+    ids:
+      - bridgectl
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
 
-  - id: bridge-arm64
-    goos: linux
-    goarch: arm64
-    image_templates:
-      - "ghcr.io/orchael/bridgectl:{{ .Tag }}-arm64"
-      - "ghcr.io/orchael/bridgectl:latest-arm64"
-    dockerfile: Dockerfile
-    use: buildx
-    extra_files:
-      - docker-entrypoint.sh
-      - config/bridge.yaml
-    build_flag_templates:
-      - "--build-arg=BUILD_FROM=prebuilt"
-      - "--platform=linux/arm64"
-      - "--label=org.opencontainers.image.created={{.Date}}"
-      - "--label=org.opencontainers.image.title={{.ProjectName}}"
-      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
-      - "--label=org.opencontainers.image.version={{.Version}}"
+checksum:
+  name_template: checksums.txt
 
-docker_manifests:
-  - name_template: "ghcr.io/orchael/bridgectl:{{ .Tag }}"
-    image_templates:
-      - "ghcr.io/orchael/bridgectl:{{ .Tag }}-amd64"
-      - "ghcr.io/orchael/bridgectl:{{ .Tag }}-arm64"
+homebrew_casks:
+  - name: bridgectl
+    ids:
+      - bridgectl
+    binaries:
+      - bridgectl
+    homepage: https://github.com/orchael/bridgectl
+    description: gRPC daemon and SDK that manages AI agent subprocess lifecycles over a PTY transport
+    license: MIT
+    repository:
+      owner: orchael
+      name: homebrew-bridgectl
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: github-actions[bot]
+      email: github-actions[bot]@users.noreply.github.com
+    directory: Casks
+    caveats: |
+      bridgectl runs the provider CLIs (claude, codex, gemini, opencode) through
+      Node.js 24. Install it separately if you have not already:
 
-  - name_template: "ghcr.io/orchael/bridgectl:latest"
-    image_templates:
-      - "ghcr.io/orchael/bridgectl:latest-amd64"
-      - "ghcr.io/orchael/bridgectl:latest-arm64"
+        brew install node@24
+
+      To run the bridge server at login, install the launchd agent:
+
+        bridgectl server install-agent --start
+
+      The agent is generated from this binary's real path and inherits the PATH
+      of the shell you run it from, so it finds node and the provider CLIs.
+      Logs go to ~/Library/Logs/bridgectl/. Remove it with:
+
+        bridgectl server uninstall-agent
+
+    # Homebrew cannot install a launchd agent itself -- the cask "service"
+    # stanza installs macOS Service bundles into ~/Library/Services, not
+    # LaunchAgents -- and auto-starting a daemon on install would be
+    # inappropriate anyway. The agent is opt-in through the command above;
+    # these stanzas make `brew uninstall` and `brew uninstall --zap` clean up
+    # after it.
+    uninstall:
+      launchctl:
+        - com.orchael.bridgectl
+    zap:
+      launchctl:
+        - com.orchael.bridgectl
+      trash:
+        - ~/Library/LaunchAgents/com.orchael.bridgectl.plist
+        - ~/Library/Logs/bridgectl
 
 changelog:
   sort: asc

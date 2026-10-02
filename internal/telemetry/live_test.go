@@ -29,7 +29,7 @@ func TestLiveCollectorFramesProviderFixtures(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			events := sink.snapshot()
+			events := capturedEvents(sink.snapshot())
 			if len(events) != 4 {
 				t.Fatalf("events=%+v, want lifecycle/question/answer/lifecycle", events)
 			}
@@ -56,7 +56,7 @@ func TestLiveCollectorDeduplicatesRedrawAndCanOmitText(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	events := sink.snapshot()
+	events := capturedEvents(sink.snapshot())
 	questions := 0
 	for _, event := range events {
 		if event.Kind == EventQuestion {
@@ -86,7 +86,7 @@ func TestLiveCollectorFiltersEventKindsBeforeQueueing(t *testing.T) {
 	if err := collector.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	events := sink.snapshot()
+	events := capturedEvents(sink.snapshot())
 	if len(events) != 2 || events[0].Kind != EventQuestion || events[1].Kind != EventAnswer || events[0].Sequence != 1 || events[1].Sequence != 2 {
 		t.Fatalf("filtered events=%+v", events)
 	}
@@ -111,7 +111,7 @@ func TestLiveCollectorCapturesFullBidirectionalInteraction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	events := sink.snapshot()
+	events := capturedEvents(sink.snapshot())
 	if len(events) != 7 {
 		t.Fatalf("events=%+v, want four provider chunks, user input, question, and answer", events)
 	}
@@ -169,7 +169,7 @@ func TestLiveCollectorReassemblesSplitUTF8AndSecrets(t *testing.T) {
 	if err := collector.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	events := sink.snapshot()
+	events := capturedEvents(sink.snapshot())
 	joined := ""
 	var sawEuro, sawInput, sawRedaction bool
 	for _, event := range events {
@@ -193,7 +193,7 @@ func TestLiveCollectorKeepsMultilineTerminalControlsPrivate(t *testing.T) {
 	if err := collector.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	events := sink.snapshot()
+	events := capturedEvents(sink.snapshot())
 	if len(events) != 1 || events[0].Kind != EventProviderOutput || events[0].Text != "beforeafter\n" {
 		t.Fatalf("terminal payload leaked or split a question: %+v", events)
 	}
@@ -208,7 +208,7 @@ func TestLiveCollectorPreservesRecordsAfterInvalidUTF8(t *testing.T) {
 	if err := collector.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	events := sink.snapshot()
+	events := capturedEvents(sink.snapshot())
 	if len(events) != 2 || events[0].OmittedReason != OmittedInvalidUTF8 || events[0].ByteCount != 2 || events[1].Text != "recoverable output\n" {
 		t.Fatalf("invalid record discarded a recoverable valid record: %+v", events)
 	}
@@ -226,7 +226,7 @@ func TestLiveCollectorRetainsLongValidInteraction(t *testing.T) {
 	if err := collector.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	events := sink.snapshot()
+	events := capturedEvents(sink.snapshot())
 	if len(events) != 1 || events[0].Text != content || events[0].OmittedReason != "" {
 		t.Fatalf("long interaction was not retained: %+v", events)
 	}
@@ -242,9 +242,152 @@ func TestLiveCollectorBoundsOversizedUnterminatedInteraction(t *testing.T) {
 	if err := collector.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	events := sink.snapshot()
+	events := capturedEvents(sink.snapshot())
 	if len(events) != 1 || events[0].Text != "" || events[0].OmittedReason != OmittedBufferLimit || events[0].ByteCount != len(content) || events[0].ContentHash == "" {
 		t.Fatalf("oversized interaction was not bounded with explicit metadata: %+v", events)
+	}
+}
+
+// TestLiveCollectorHandlesANSISequenceSplitAcrossManyChunks is a correctness
+// check: an ANSI escape sequence arriving one byte per call must still be
+// recognized once it completes, not treated as a record boundary partway
+// through.
+func TestLiveCollectorHandlesANSISequenceSplitAcrossManyChunks(t *testing.T) {
+	sink := &memorySink{}
+	collector := NewLiveCollector(sink, 8, true, nil, EventProviderOutput)
+	session := Session{SessionID: "split-ansi-sequence", Provider: "codex"}
+
+	const paramBytes = 50
+	collector.ObserveOutputChunk(session, []byte("\x1b[")) // begin a CSI sequence
+	for i := 0; i < paramBytes; i++ {
+		collector.ObserveOutputChunk(session, []byte("0")) // valid CSI parameter byte
+	}
+	collector.ObserveOutputChunk(session, []byte("m\n")) // terminate, then close the record
+
+	collector.SessionEnded(session)
+	if err := collector.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	events := capturedEvents(sink.snapshot())
+	wantBytes := len("\x1b[") + paramBytes + len("m\n")
+	if len(events) != 1 || events[0].ByteCount != wantBytes || events[0].OmittedReason != "" {
+		t.Fatalf("events=%+v, want one retained interaction of %d bytes", events, wantBytes)
+	}
+}
+
+// TestLiveCollectorDesyncSplitsOversizedValidTextFromInvalidTail is a
+// correctness regression test for a Copilot review finding on this PR: an
+// earlier version of the fix bounded the UTF-8 desync check (see
+// advanceUTF8State) to a fixed buffer size to avoid re-validating the whole
+// accumulated buffer on every call, which silently disabled the desync
+// split once the pending buffer exceeded that size — merging a large valid
+// record with a later invalid tail into a single invalid_utf8 omission
+// instead of preserving the valid text as its own record. advanceUTF8State
+// tracks state incrementally instead of size-gating, so this must still
+// split correctly well past any such threshold.
+func TestLiveCollectorDesyncSplitsOversizedValidTextFromInvalidTail(t *testing.T) {
+	sink := &memorySink{}
+	collector := NewLiveCollector(sink, 8, true, nil, EventProviderOutput)
+	session := Session{SessionID: "oversized-then-invalid", Provider: "codex"}
+
+	validText := strings.Repeat("x", 20000) // well past the old 16 KiB bound
+	collector.ObserveOutputChunk(session, []byte(validText))
+	collector.ObserveOutputChunk(session, []byte{0xff, '\n'})
+	collector.SessionEnded(session)
+	if err := collector.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	events := capturedEvents(sink.snapshot())
+	if len(events) != 2 || events[0].Text != validText || events[0].OmittedReason != "" ||
+		events[1].OmittedReason != OmittedInvalidUTF8 || events[1].ByteCount != 2 {
+		t.Fatalf("desync check did not split oversized valid text from the invalid tail: got %d events, want 2 (valid text=%d bytes, then invalid_utf8=2 bytes)", len(events), len(validText))
+	}
+}
+
+// TestLiveCollectorSingleLongIncompleteANSISequenceStaysLinear is a
+// regression test for a Copilot review finding on this PR: the resume
+// cursor fixed in nextInteractionBoundary only prevented rescanning
+// *resolved* prefix data — a single ANSI escape sequence that itself grows
+// across many chunks (e.g. a long CSI parameter list delivered a few bytes
+// at a time, with no newline) still made ansiSequenceEnd re-scan the whole
+// open sequence from its start on every call, leaving the same O(n^2)
+// failure mode up to the 1MB flush. ansiSequenceEndFrom's own resume cursor
+// (escStart/escScanned) must keep this linear too.
+func TestLiveCollectorSingleLongIncompleteANSISequenceStaysLinear(t *testing.T) {
+	sink := &memorySink{}
+	collector := NewLiveCollector(sink, 8, true, nil, EventProviderOutput)
+	session := Session{SessionID: "long-incomplete-ansi-sequence", Provider: "codex"}
+
+	const paramBytes = 50000
+	start := time.Now()
+	collector.ObserveOutputChunk(session, []byte("\x1b[")) // begin an unterminated CSI sequence
+	for i := 0; i < paramBytes; i++ {
+		// '0' (0x30) is a valid CSI parameter byte, so the sequence never
+		// terminates — every call must re-examine it as still-incomplete.
+		collector.ObserveOutputChunk(session, []byte("0"))
+	}
+	collector.ObserveOutputChunk(session, []byte("m\n")) // terminate the sequence, then close the record
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("feeding %d one-byte chunks of a single open escape sequence took %v, want well under 2s (quadratic regression?)", paramBytes, elapsed)
+	}
+
+	collector.SessionEnded(session)
+	if err := collector.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	events := capturedEvents(sink.snapshot())
+	wantBytes := len("\x1b[") + paramBytes + len("m\n")
+	if len(events) != 1 || events[0].ByteCount != wantBytes || events[0].OmittedReason != "" {
+		t.Fatalf("events=%+v, want one retained interaction of %d bytes", events, wantBytes)
+	}
+}
+
+// TestLiveCollectorManyChunksWithoutBoundaryStaysLinear reproduces the
+// CPU-usage bug behind a real bridgectl deployment reporting "server start"
+// pinning a CPU core under an active, chatty TUI session. A full-screen
+// redraw TUI (common for interactive coding agents) repositions the cursor
+// with short, complete ANSI sequences rather than emitting \r/\n, so
+// pending output can grow for a long stretch with no record boundary. Three
+// independent O(n^2) costs compounded here, all scaling with the total
+// bytes buffered before a boundary appears rather than the bytes in each
+// chunk:
+//  1. nextInteractionBoundary rescanned data from byte 0 on every call.
+//  2. observeInteraction's UTF-8 desync check (utf8.Valid) re-validated the
+//     entire accumulated buffer on every call.
+//  3. trimFrameBuffer removed leading runes one at a time, re-encoding the
+//     entire remaining (still large) rune slice on every iteration just to
+//     recheck its byte length.
+//
+// Confirmed via a live pprof CPU profile during an attached codex session:
+// appendChunk -> ObserveProviderChunk -> observeInteraction ->
+// nextInteractionBoundary/ansiSequenceEnd/utf8.Valid accounted for 100% of
+// sampled CPU time. Before these fixes, this test's chunk count took
+// multiple seconds (trimFrameBuffer alone) to well over a minute (all
+// three); after, it completes in milliseconds.
+func TestLiveCollectorManyChunksWithoutBoundaryStaysLinear(t *testing.T) {
+	sink := &memorySink{}
+	collector := NewLiveCollector(sink, 8, true, nil, EventProviderOutput)
+	session := Session{SessionID: "slow-redraw-stream", Provider: "codex"}
+
+	const chunkCount = 5000
+	const chunk = "\x1b[2K\x1b[1;32mx" // short, complete ANSI sequences + text, no boundary
+	start := time.Now()
+	for i := 0; i < chunkCount; i++ {
+		collector.ObserveOutputChunk(session, []byte(chunk))
+	}
+	collector.ObserveOutputChunk(session, []byte("\n"))
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("feeding %d chunks with no boundary took %v, want well under 2s (quadratic regression?)", chunkCount, elapsed)
+	}
+
+	collector.SessionEnded(session)
+	if err := collector.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	events := capturedEvents(sink.snapshot())
+	wantBytes := chunkCount*len(chunk) + len("\n")
+	if len(events) != 1 || events[0].ByteCount != wantBytes || events[0].OmittedReason != "" {
+		t.Fatalf("events=%+v, want one retained interaction of %d bytes", events, wantBytes)
 	}
 }
 
@@ -312,7 +455,7 @@ func TestLiveCollectorContextDiscoveryDoesNotBlockSessionIO(t *testing.T) {
 	if err := collector.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	events := sink.snapshot()
+	events := capturedEvents(sink.snapshot())
 	if len(events) != 4 || events[0].Kind != EventSessionStarted || events[1].Kind != EventSessionContext || events[2].Kind != EventProviderOutput || events[3].Kind != EventSessionEnded || events[1].Context == nil {
 		t.Fatalf("discovery changed lifecycle/event order: %+v", events)
 	}
@@ -358,4 +501,16 @@ func TestFramerDoesNotTreatANSIPrivateMarkerAsQuestion(t *testing.T) {
 	if len(frames) != 2 || !strings.Contains(frames[0], "ready") || frames[1] != "Proceed?" {
 		t.Fatalf("frames=%q", frames)
 	}
+}
+
+// Capture assertions concern sequenced data. Checkpoint content and loss
+// reporting are covered separately in completeness_test.go.
+func capturedEvents(events []Event) []Event {
+	var captured []Event
+	for _, event := range events {
+		if event.Kind != EventTelemetryCheckpoint {
+			captured = append(captured, event)
+		}
+	}
+	return captured
 }

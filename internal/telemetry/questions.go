@@ -90,6 +90,7 @@ type Event struct {
 	OmittedReason    string          `json:"omitted_reason,omitempty"`
 	LatencyMS        int64           `json:"latency_ms,omitempty"`
 	Context          *SessionContext `json:"context,omitempty"`
+	Completeness     *Completeness   `json:"completeness,omitempty"`
 	contextDiscovery *sessionContextDiscovery
 }
 

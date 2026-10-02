@@ -18,6 +18,9 @@ import (
 
 // Config is the top-level bridge daemon configuration.
 type Config struct {
+	// Name is the human-friendly server name used when enrolling with Bridge.
+	// bridgectl login falls back to the OS hostname when it is empty.
+	Name         string                    `yaml:"name"`
 	Server       ServerConfig              `yaml:"server"`
 	Security     SecurityConfig            `yaml:"security"`
 	StepCA       StepCAYAMLConfig          `yaml:"step_ca"`
@@ -31,6 +34,7 @@ type Config struct {
 	Runtime      RuntimeConfig             `yaml:"runtime"`
 	RepoSetup    RepoSetupConfig           `yaml:"repo_setup"`
 	Telemetry    TelemetryConfig           `yaml:"telemetry"`
+	Control      ControlConfig             `yaml:"control"`
 	Providers    map[string]ProviderConfig `yaml:"providers"`
 	AllowedPaths []string                  `yaml:"allowed_paths"`
 	Logging      LoggingConfig             `yaml:"logging"`
@@ -171,6 +175,30 @@ func (r RepoSetupConfig) IsEnabled() bool {
 	return r.Enabled == nil || *r.Enabled
 }
 
+// ControlConfig holds bridgectl's optional outbound Bridge control-plane
+// WebSocket client configuration. It is populated by `bridgectl bridge
+// login` alongside the telemetry block (see cmd/bridgectl's
+// configureBridgeTelemetry), never hand-written.
+//
+// Unlike TelemetryConfig, Control has no local/offline fallback: an empty
+// Endpoint or CredentialFile simply disables the control client entirely.
+// This is the expected, non-error state for standalone bridgectl (no Bridge
+// enrollment) and for an enrollment created before Bridge added
+// control-plane support (schema_version < 2, no control_endpoint/
+// control_credential).
+type ControlConfig struct {
+	// Endpoint is the control-plane WebSocket URL (e.g.
+	// "wss://control.bridge.orchael.dev/v1/control"), taken verbatim from
+	// Bridge's enrollment response.
+	Endpoint string `yaml:"endpoint"`
+	// CredentialFile points at the JSON file holding the bri_ control
+	// credential (never the brc_ telemetry credential).
+	CredentialFile string `yaml:"credential_file"`
+	// ManagedByBridge records that `bridgectl bridge login` wrote this
+	// block, so `bridgectl bridge logout` knows it owns removing it.
+	ManagedByBridge bool `yaml:"managed_by_bridge"`
+}
+
 type ServerConfig struct {
 	Listen                   string   `yaml:"listen"`
 	SANs                     []string `yaml:"san"`
@@ -258,7 +286,8 @@ type ProviderConfig struct {
 	// is unavailable at session start time. At most 2 entries are allowed.
 	Fallbacks []string `yaml:"fallbacks"`
 	// Transport selects the provider transport backend. Supported values are
-	// "" (default PTY/stdio), and "opencode_server" (headless OpenCode HTTP/SSE).
+	// "" (native provider with structured reporting where supported),
+	// "stdio" (plain PTY/stdio), and "opencode_server" (OpenCode HTTP/SSE).
 	Transport string `yaml:"transport"`
 	// Hostname is the address to bind the OpenCode server to. Only used when
 	// Transport is "opencode_server". Defaults to "127.0.0.1".
@@ -330,6 +359,28 @@ func HasExplicitServerListen(path string) (bool, error) {
 		return false, fmt.Errorf("parse config: %w", err)
 	}
 	return raw.Server.Listen != nil && strings.TrimSpace(*raw.Server.Listen) != "", nil
+}
+
+// ExplicitLogging reports the logging.level and logging.format values exactly
+// as set in a YAML config file, before Load applies its "info"/"json"
+// defaults. This lets callers distinguish "the user configured this" from
+// "Load filled in a default", so a CLI flag default doesn't silently shadow
+// a value the user actually set in the file.
+func ExplicitLogging(path string) (level, format string, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", fmt.Errorf("read config: %w", err)
+	}
+	var raw struct {
+		Logging struct {
+			Level  string `yaml:"level"`
+			Format string `yaml:"format"`
+		} `yaml:"logging"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return "", "", fmt.Errorf("parse config: %w", err)
+	}
+	return raw.Logging.Level, raw.Logging.Format, nil
 }
 
 // ParseDuration is a helper that parses a duration string with a fallback.
@@ -428,7 +479,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Sessions.StopGracePeriod = "10s"
 	}
 	if cfg.Sessions.IdleTimeout == "" {
-		cfg.Sessions.IdleTimeout = "30m"
+		cfg.Sessions.IdleTimeout = "24h"
 	}
 	if cfg.Sessions.MaxSubscribersPerSession == 0 {
 		cfg.Sessions.MaxSubscribersPerSession = 10
@@ -479,7 +530,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Telemetry.RollingWindow = "168h"
 	}
 	if cfg.Telemetry.FlushInterval == "" {
-		cfg.Telemetry.FlushInterval = "10s"
+		cfg.Telemetry.FlushInterval = telemetry.DefaultFlushInterval.String()
 	}
 	if cfg.Telemetry.RetryInterval == "" {
 		cfg.Telemetry.RetryInterval = "1s"
@@ -697,10 +748,10 @@ func validate(cfg *Config) error {
 		}
 		if provider.Transport != "" {
 			switch provider.Transport {
-			case "opencode_server":
+			case "opencode_server", "stdio":
 				// valid
 			default:
-				return fmt.Errorf("config: providers.%s.transport must be one of: opencode_server; got %q", name, provider.Transport)
+				return fmt.Errorf("config: providers.%s.transport must be one of: stdio, opencode_server; got %q", name, provider.Transport)
 			}
 		}
 		if provider.PortRange != "" {

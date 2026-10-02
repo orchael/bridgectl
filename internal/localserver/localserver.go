@@ -7,9 +7,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -27,6 +24,7 @@ import (
 	bridgev1 "github.com/orchael/bridgectl/gen/bridge/v1"
 	"github.com/orchael/bridgectl/internal/auth"
 	"github.com/orchael/bridgectl/internal/bridge"
+	"github.com/orchael/bridgectl/internal/bridgecontrol"
 	"github.com/orchael/bridgectl/internal/certprovider"
 	"github.com/orchael/bridgectl/internal/config"
 	"github.com/orchael/bridgectl/internal/pki"
@@ -34,7 +32,6 @@ import (
 	"github.com/orchael/bridgectl/internal/redact"
 	"github.com/orchael/bridgectl/internal/reposetup"
 	"github.com/orchael/bridgectl/internal/server"
-	"github.com/orchael/bridgectl/internal/telemetry"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -61,6 +58,13 @@ func StateDir() string {
 // rejected the same way regardless of how it got there.
 var CollectorCredentialPattern = regexp.MustCompile(`^brc_[A-Za-z0-9_-]{43}$`)
 
+// ControlCredentialPattern matches Bridge's documented bri_ control-only
+// credential format (bri_ followed by base64url(32 random bytes), 43
+// characters). It must never match a brc_ telemetry credential and vice
+// versa; the two are never interchangeable. Shared between the enrollment
+// write path (cmd/bridgectl) and this server-start read path.
+var ControlCredentialPattern = regexp.MustCompile(`^bri_[A-Za-z0-9_-]{43}$`)
+
 // SecureReadFile reads path only if it is a regular, non-symlink file with
 // no group/world permission bits set, restoring 0600 afterward. A permissive
 // or replaced credential file (e.g. bridge-credentials.json) must not be
@@ -80,7 +84,13 @@ func SecureReadFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = os.Chmod(path, 0600)
+	// Only chmod when permissions actually need correcting: this is called
+	// on a tight poll (every 100ms, for the server's entire lifetime, by
+	// startEnrollmentReload) and an unconditional chmod syscall on every
+	// call was pure overhead in the overwhelmingly common already-0600 case.
+	if info.Mode().Perm() != 0600 {
+		_ = os.Chmod(path, 0600)
+	}
 	return b, nil
 }
 
@@ -125,15 +135,17 @@ func ServerNamePath() string {
 
 // Server wraps all the components needed for a local bridge server.
 type Server struct {
-	grpcServer *grpc.Server
-	supervisor *bridge.Supervisor
-	store      bridge.SessionStore // non-nil when persistence is enabled
-	registry   *bridge.Registry
-	listener   net.Listener
-	logger     *slog.Logger
-	stateDir   string
-	mu         sync.Mutex
-	stopped    bool
+	grpcServer   *grpc.Server
+	supervisor   *bridge.Supervisor
+	store        bridge.SessionStore // non-nil when persistence is enabled
+	registry     *bridge.Registry
+	listener     net.Listener
+	logger       *slog.Logger
+	stateDir     string
+	mu           sync.Mutex
+	stopped      bool
+	reloadCancel context.CancelFunc
+	reloadDone   <-chan struct{}
 
 	// providerFallbacks is the resolved fallback map passed to the bridge
 	// server. Nil when the feature flag is disabled.
@@ -318,7 +330,7 @@ type Config struct {
 	EventBufferSize int
 
 	// IdleTimeout overrides the session idle-timeout. Zero uses the
-	// default (30 minutes).
+	// default (24 hours).
 	IdleTimeout time.Duration
 
 	// Explicit TLS cert paths. When set, these override auto-PKI generation
@@ -387,6 +399,7 @@ func Start(cfg Config) (*Server, error) {
 	repoSetupDefaultTimeout := 2 * time.Minute
 	repoSetupMaxTimeout := 15 * time.Minute
 	telemetryCfg := config.TelemetryConfig{}
+	controlCfg := config.ControlConfig{}
 	configHasServerListen := false
 	if cfg.ConfigPath != "" {
 		var err error
@@ -400,6 +413,7 @@ func Start(cfg Config) (*Server, error) {
 		}
 		if fileCfg != nil {
 			telemetryCfg = fileCfg.Telemetry
+			controlCfg = fileCfg.Control
 			if len(fileCfg.Providers) > 0 {
 				configProviderDefs = fileCfg.Providers
 			}
@@ -517,7 +531,7 @@ func Start(cfg Config) (*Server, error) {
 		cfg.EventBufferSize = 8 << 20
 	}
 	if cfg.IdleTimeout <= 0 {
-		cfg.IdleTimeout = 30 * time.Minute
+		cfg.IdleTimeout = 24 * time.Hour
 	}
 	if cfg.RepoSetupEnabled != nil {
 		repoSetupEnabled = *cfg.RepoSetupEnabled
@@ -600,8 +614,8 @@ func Start(cfg Config) (*Server, error) {
 			ProviderRoot:   providerRoot,
 		}
 		var p bridge.Provider
-		switch {
-		case pc.Transport == "opencode_server":
+		switch pc.Transport {
+		case "opencode_server":
 			osCfg := provider.OpenCodeServerConfig{
 				ProviderID:     id,
 				Binary:         pc.Binary,
@@ -622,10 +636,8 @@ func Start(cfg Config) (*Server, error) {
 				osCfg.PortRangeEnd = end
 			}
 			p = provider.NewOpenCodeServerProvider(osCfg)
-		case id == "codex":
-			p = provider.NewCodexProvider(sc)
 		default:
-			p = provider.NewStdioProvider(sc)
+			p = sessionProvider(sc, pc.Transport)
 		}
 		if err := registry.Register(p); err != nil {
 			logger.Warn("skip config provider", "provider", id, "error", err)
@@ -671,12 +683,7 @@ func Start(cfg Config) (*Server, error) {
 			RequiredEnv:    pd.RequiredEnv,
 			StreamJSON:     pd.StreamJSON,
 		}
-		var p bridge.Provider
-		if pd.ID == "codex" {
-			p = provider.NewCodexProvider(sc)
-		} else {
-			p = provider.NewStdioProvider(sc)
-		}
+		p := sessionProvider(sc, "")
 		if err := registry.Register(p); err != nil {
 			logger.Warn("skip provider", "provider", pd.ID, "error", err)
 			continue
@@ -716,142 +723,34 @@ func Start(cfg Config) (*Server, error) {
 		}
 		supOpts = append(supOpts, bridge.WithStore(store))
 	}
-	if telemetryCfg.Enabled {
-		spoolDir := TelemetrySpoolDir(telemetryCfg.SpoolDir, stateDir)
-		sourceID, err := telemetry.ResolveSourceID(telemetryCfg.SourceID, filepath.Join(stateDir, "telemetry", "source-id"))
-		if err != nil {
-			if store != nil {
-				_ = store.Close()
-			}
-			return nil, fmt.Errorf("configure telemetry source identity: %w", err)
+	reporting := &reportingObservers{}
+	observer, telemetryErr := newTelemetryObserver(telemetryCfg, stateDir, cfg.Version, logger)
+	if telemetryErr != nil {
+		if store != nil {
+			_ = store.Close()
 		}
-		identityKeyPath := filepath.Join(stateDir, "telemetry", "identity-key")
-		if telemetryCfg.IdentityKeyFile != "" {
-			identityKeyPath = expandTelemetryPath(telemetryCfg.IdentityKeyFile)
-		}
-		identityKey, err := telemetry.LoadOrCreateIdentityKey(identityKeyPath)
-		if err != nil {
-			if store != nil {
-				_ = store.Close()
-			}
-			return nil, fmt.Errorf("configure telemetry context identity: %w", err)
-		}
-		maxDiskBytes, err := config.ParseByteSize(telemetryCfg.MaxDiskSpace)
-		if err != nil {
-			if store != nil {
-				_ = store.Close()
-			}
-			return nil, fmt.Errorf("configure telemetry disk budget: %w", err)
-		}
-		segmentSpool, err := telemetry.NewSegmentSpool(spoolDir, telemetryCfg.MaxSegmentBytes, maxDiskBytes, func(segment telemetry.Segment) {
-			logger.Warn("telemetry spool evicted oldest segment", "segment_id", segment.ID, "bytes", segment.Size)
-		})
-		if err != nil {
-			if store != nil {
-				_ = store.Close()
-			}
-			return nil, fmt.Errorf("configure telemetry spool: %w", err)
-		}
-		var eventSink telemetry.Sink
-		destination := "local"
-		if telemetryCfg.CollectorURL != "" && telemetryCfg.CollectorTarget == "" {
-			credentialPath := telemetryCfg.CollectorCredentialFile
-			if credentialPath == "" {
-				credentialPath = filepath.Join(stateDir, "bridge-credentials.json")
-			}
-			credentialData, readErr := SecureReadFile(expandTelemetryPath(credentialPath))
-			if readErr != nil {
-				if store != nil {
-					_ = store.Close()
-				}
-				return nil, fmt.Errorf("read telemetry collector credential: %w", readErr)
-			}
-			var credential struct {
-				CollectorCredential string `json:"collector_credential"`
-			}
-			if readErr = json.Unmarshal(credentialData, &credential); readErr != nil || !CollectorCredentialPattern.MatchString(credential.CollectorCredential) {
-				if store != nil {
-					_ = store.Close()
-				}
-				return nil, fmt.Errorf("invalid telemetry collector credential")
-			}
-			eventSink = telemetry.NewHTTPForwardingSink(segmentSpool, telemetryCfg.CollectorURL, credential.CollectorCredential, cfg.Version, config.ParseDuration(telemetryCfg.FlushInterval, time.Second), config.ParseDuration(telemetryCfg.RetryInterval, time.Second), func(err error) { logger.Warn("telemetry delivery", "error", err) })
-			destination = "https_collector"
-		} else if telemetryCfg.CollectorTarget != "" {
-			var transportCredentials credentials.TransportCredentials
-			if telemetryCfg.CollectorInsecure {
-				transportCredentials = insecure.NewCredentials()
-			} else {
-				host, _, _ := net.SplitHostPort(telemetryCfg.CollectorTarget)
-				serverName := telemetryCfg.CollectorServerName
-				if serverName == "" {
-					serverName = host
-				}
-				tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName}
-				if telemetryCfg.CollectorCA != "" {
-					caPEM, readErr := os.ReadFile(expandTelemetryPath(telemetryCfg.CollectorCA))
-					if readErr != nil {
-						if store != nil {
-							_ = store.Close()
-						}
-						return nil, fmt.Errorf("read telemetry collector CA: %w", readErr)
-					}
-					roots, poolErr := x509.SystemCertPool()
-					if poolErr != nil {
-						roots = x509.NewCertPool()
-					}
-					if !roots.AppendCertsFromPEM(caPEM) {
-						if store != nil {
-							_ = store.Close()
-						}
-						return nil, fmt.Errorf("parse telemetry collector CA: no certificates found")
-					}
-					tlsConfig.RootCAs = roots
-				}
-				transportCredentials = credentials.NewTLS(tlsConfig)
-			}
-			conn, err := grpc.NewClient(telemetryCfg.CollectorTarget, grpc.WithTransportCredentials(transportCredentials))
-			if err != nil {
-				if store != nil {
-					_ = store.Close()
-				}
-				return nil, fmt.Errorf("configure telemetry collector: %w", err)
-			}
-			eventSink = telemetry.NewGRPCForwardingSink(
-				segmentSpool,
-				bridgev1.NewTelemetryCollectorServiceClient(conn),
-				conn,
-				config.ParseDuration(telemetryCfg.FlushInterval, time.Second),
-				config.ParseDuration(telemetryCfg.RetryInterval, time.Second),
-				func(err error) { logger.Warn("telemetry delivery", "error", err) },
-			)
-			destination = "grpc_collector"
-		} else {
-			eventSink = telemetry.NewLocalSpoolingSink(segmentSpool,
-				config.ParseDuration(telemetryCfg.FlushInterval, 10*time.Second),
-				func(err error) { logger.Warn("telemetry local flush", "error", err) },
-			)
-		}
-		kinds := make([]telemetry.EventKind, 0, len(telemetryCfg.Kinds))
-		for _, kind := range telemetryCfg.Kinds {
-			kinds = append(kinds, telemetry.EventKind(kind))
-		}
-		collector := telemetry.NewLiveCollectorWithIdentity(
-			eventSink,
-			telemetryCfg.QueueSize,
-			telemetryCfg.IncludeRedactedText,
-			telemetry.LiveIdentity{SourceID: sourceID, ActorID: telemetryCfg.ActorID, SourceLabel: telemetryCfg.SourceLabel, ContextKey: identityKey},
-			func(err error) { logger.Warn("telemetry persistence", "error", err) },
-			kinds...,
-		)
-		supOpts = append(supOpts, bridge.WithTelemetry(collector))
-		logger.Info("telemetry enabled", "source_id", sourceID, "destination", destination, "kinds", telemetryCfg.Kinds, "rolling_window", telemetryCfg.RollingWindow)
+		return nil, telemetryErr
 	}
-
+	reporting.telemetry = observer
+	supOpts = append(supOpts, bridge.WithTelemetry(reporting), bridge.WithControlObserver(reporting))
 	sup := bridge.NewSupervisor(registry, policy, cfg.EventBufferSize, cfg.IdleTimeout, supOpts...)
+	historyLoaded := true
 	if store != nil {
 		if err := sup.LoadHistory(); err != nil {
 			logger.Warn("failed to load session history", "error", err)
+			historyLoaded = false
+		}
+	}
+	// Never publish an authoritative snapshot of incomplete recovered state.
+	if historyLoaded {
+		controlClient, err := newControlClient(controlCfg, stateDir, cfg.Version, logger, sup)
+		if err != nil {
+			logger.Warn("bridge control disabled", "error", err)
+		} else if controlClient != nil {
+			reporting.mu.Lock()
+			reporting.control = bridgecontrol.NewSupervisorObserver(controlClient)
+			reporting.mu.Unlock()
+			controlClient.Start(context.Background())
 		}
 	}
 
@@ -996,7 +895,7 @@ func Start(cfg Config) (*Server, error) {
 
 	providerFallbacks := cfg.ProviderFallbacks
 
-	bridgeServer := server.New(sup, registry, logger, cfg.RateLimits, instanceID, providerFallbacks, jwtVerifier, CertsDir(stateDir))
+	bridgeServer := server.New(sup, registry, logger, cfg.RateLimits, instanceID, providerFallbacks, jwtVerifier, CertsDir(stateDir), cfg.Version)
 	bridgev1.RegisterBridgeServiceServer(grpcServer, bridgeServer)
 
 	// Listen: TCP for secure mode, unix socket for local mode.
@@ -1088,6 +987,10 @@ func Start(cfg Config) (*Server, error) {
 		s.renewCancel = renewCancel
 		go s.certRenewalLoop(renewCtx)
 	}
+
+	// Install the reload listener before advertising gRPC health: login may
+	// submit its request as soon as ensureServer observes the daemon.
+	s.reloadCancel, s.reloadDone = s.startEnrollmentReload(reporting, cfg.Version, historyLoaded)
 
 	go func() {
 		if err := grpcServer.Serve(ln); err != nil {
@@ -1324,6 +1227,10 @@ func (s *Server) Stop() {
 	s.stopped = true
 
 	s.logger.Info("stopping local server")
+	if s.reloadCancel != nil {
+		s.reloadCancel()
+		<-s.reloadDone
+	}
 
 	// Cancel the background cert renewal goroutine if running.
 	if s.renewCancel != nil {
@@ -1712,6 +1619,16 @@ func knownProviders() []providerDef {
 		},
 		{
 			ID:             "codex",
+			Binary:         "codex",
+			Args:           nil,
+			StartupTimeout: 60 * time.Second,
+			StartupProbe:   "prompt",
+			PromptPattern:  `(?m)(>\s*$|›)`,
+		},
+		{
+			// Compatibility alias: ordinary codex also uses structured
+			// app-server reporting. transport: stdio explicitly opts out.
+			ID:             "codex-app-server",
 			Binary:         "codex",
 			Args:           nil,
 			StartupTimeout: 60 * time.Second,

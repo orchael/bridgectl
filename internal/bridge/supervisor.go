@@ -109,12 +109,16 @@ type Supervisor struct {
 	histMu    sync.RWMutex
 	history   map[string]SessionInfo
 	telemetry TelemetryObserver
+
+	controlCloseOnce sync.Once
+	control          ControlObserver
 }
 
 type managedSession struct {
 	mu           sync.Mutex
 	telemetryMu  sync.Mutex
 	info         SessionInfo
+	startConfig  SessionConfig // the SessionConfig Start was called with, for InteractionWatcher
 	provider     Provider
 	cmd          *exec.Cmd
 	ptmx         *os.File       // non-nil for PTY-backed sessions
@@ -356,11 +360,36 @@ func (s *Supervisor) cleanupLoop() {
 		case <-s.done:
 			return
 		case <-ticker.C:
-			// No-op: sessions are only stopped explicitly via Stop() or
-			// when the supervisor shuts down via Close(). The idle timeout
-			// field is retained for future use but does not reap running
-			// or attached sessions.
+			s.reapIdleSessions()
 		}
+	}
+}
+
+// reapIdleSessions stops sessions that have had no attached client and no
+// activity for longer than idleTimeout. Sessions with a writer attached
+// transition to SessionStateAttached and are skipped by the state check
+// below, but a read-only AttachRoleObserver client leaves the state at
+// SessionStateRunning, so the observers check is required too — otherwise a
+// session someone is actively watching (just not driving) could be killed
+// out from under them. This only cleans up orphaned sessions left running in
+// the background (e.g. from repeated `session start` retries).
+func (s *Supervisor) reapIdleSessions() {
+	if s.idleTimeout <= 0 {
+		return
+	}
+	var idle []string
+	s.mu.RLock()
+	for id, ms := range s.sessions {
+		ms.mu.Lock()
+		if ms.info.State == SessionStateRunning && len(ms.observers) == 0 && time.Since(ms.lastActivity) > s.idleTimeout {
+			idle = append(idle, id)
+		}
+		ms.mu.Unlock()
+	}
+	s.mu.RUnlock()
+	for _, id := range idle {
+		slog.Info("reaping idle session", "session_id", id, "idle_timeout", s.idleTimeout)
+		_ = s.Stop(id, false)
 	}
 }
 
@@ -481,6 +510,7 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 	}
 
 	now := nowUTC()
+	interactionCaps := interactionCapabilitiesFor(provider)
 	ms := &managedSession{
 		info: SessionInfo{
 			SessionID: cfg.SessionID,
@@ -491,7 +521,15 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 			CreatedAt: now,
 			Cols:      cfg.InitialCols,
 			Rows:      cfg.InitialRows,
+			Interaction: Interaction{
+				State:          InteractionUnknown,
+				UpdatedAt:      now,
+				LastActivityAt: now,
+				Evidence:       InteractionEvidence{Capability: interactionCaps},
+			},
+			InteractionCapabilities: interactionCaps,
 		},
+		startConfig:  cfg,
 		provider:     provider,
 		cmd:          cmd,
 		streamJSON:   useStreamJSON,
@@ -587,6 +625,7 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 		go s.readLoop(ms)
 		go s.waitLoop(ms)
 	}
+	s.startInteractionWatcher(sessionCtx, provider, ms)
 
 	info := ms.snapshotInfo()
 	s.persistSession(info)
@@ -685,6 +724,7 @@ func (s *Supervisor) readLoopStreamJSON(ms *managedSession, r io.ReadCloser) {
 				}
 			}
 		}
+		s.observeStreamJSONInteraction(ms, ev.Type)
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
 				slog.Warn("session stream-JSON read error", "session_id", ms.info.SessionID, "provider", ms.info.Provider, "error", err)
@@ -699,6 +739,72 @@ func (s *Supervisor) readLoopStreamJSON(ms *managedSession, r io.ReadCloser) {
 			return
 		}
 	}
+}
+
+// observeStreamJSONInteraction derives an authoritative Working/Idle
+// interaction-state transition from the Anthropic Messages streaming
+// protocol's own turn-boundary events (message_start / message_stop). This
+// is structural, not a heuristic: these are the real event types the
+// protocol emits to mark a turn beginning/ending, not an inference over
+// output text. It never claims WaitingForInput or WaitingForApproval —
+// stream-json as currently invoked by bridgectl (see claude_chat.go) has no
+// wired channel for a permission/approval request, so a provider only
+// gains that capability by explicitly declaring
+// ApprovalStateSupported and being wired to a real request event.
+func (s *Supervisor) observeStreamJSONInteraction(ms *managedSession, eventType string) {
+	caps := ms.info.InteractionCapabilities
+	if !caps.InteractionStateSupported {
+		return
+	}
+	var state InteractionStateValue
+	switch eventType {
+	case "message_start":
+		state = InteractionWorking
+	case "message_stop":
+		state = InteractionIdle
+	default:
+		return
+	}
+	source := ms.info.Provider + "-stream-json"
+	if err := s.UpdateInteraction(ms.info.SessionID, Interaction{
+		State:    state,
+		Evidence: InteractionEvidence{Source: source, Capability: caps},
+	}); err != nil {
+		slog.Debug("interaction update failed", "session_id", ms.info.SessionID, "error", err)
+	}
+}
+
+// startInteractionWatcher launches provider's InteractionWatcher, if it
+// implements one, and forwards every value it emits into UpdateInteraction.
+// A watcher that fails to start (e.g. its companion connection never comes
+// up) only logs — it never fails or delays session startup, matching every
+// other optional-observer path in this file (control, telemetry).
+func (s *Supervisor) startInteractionWatcher(ctx context.Context, provider Provider, ms *managedSession) {
+	watcher, ok := provider.(InteractionWatcher)
+	if !ok {
+		return
+	}
+	sessionID, cfg := ms.info.SessionID, ms.startConfig
+	go func() {
+		ch, err := watcher.WatchInteraction(ctx, sessionID, cfg)
+		if err != nil {
+			slog.Debug("interaction watcher failed to start", "session_id", sessionID, "error", err)
+			return
+		}
+		for {
+			select {
+			case interaction, ok := <-ch:
+				if !ok {
+					return
+				}
+				if updErr := s.UpdateInteraction(sessionID, interaction); updErr != nil {
+					slog.Debug("interaction watcher update failed", "session_id", sessionID, "error", updErr)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 }
 
 func signalReaderDone(ms *managedSession) {
@@ -838,6 +944,7 @@ func (s *Supervisor) waitLoop(ms *managedSession) {
 		slog.Info("session process exited", "session_id", ms.info.SessionID, "provider", ms.info.Provider, "exit_code", exitCode)
 	}
 	tsession := telemetry.Session{SessionID: ms.info.SessionID, ProjectID: ms.info.ProjectID, Provider: ms.info.Provider, RepoPath: ms.info.RepoPath}
+	infoCopy := ms.info
 	ms.telemetryMu.Lock()
 	ms.cancel()
 	ms.mu.Unlock()
@@ -845,6 +952,7 @@ func (s *Supervisor) waitLoop(ms *managedSession) {
 		s.telemetry.SessionEnded(tsession)
 	}
 	ms.telemetryMu.Unlock()
+	s.notifyControl(infoCopy)
 
 	s.persistSession(ms.snapshotInfo())
 }
@@ -869,7 +977,9 @@ func (s *Supervisor) Stop(sessionID string, force bool) error {
 		ms.forceStop = force
 		pid := ms.info.ProcessID
 		grace := ms.stopGrace
+		infoCopy := ms.info
 		ms.mu.Unlock()
+		s.notifyControl(infoCopy)
 
 		if force {
 			if pid > 0 {
@@ -887,8 +997,10 @@ func (s *Supervisor) Stop(sessionID string, force bool) error {
 					ms.info.State = SessionStateStopped
 					ms.info.StoppedAt = nowUTC()
 					ms.info.ProcessID = 0
+					stoppedInfo := ms.info
 					ms.mu.Unlock()
 					s.persistSession(ms.snapshotInfo())
+					s.notifyControl(stoppedInfo)
 					return
 				}
 				time.Sleep(100 * time.Millisecond)
@@ -900,8 +1012,10 @@ func (s *Supervisor) Stop(sessionID string, force bool) error {
 			ms.info.State = SessionStateStopped
 			ms.info.StoppedAt = nowUTC()
 			ms.info.ProcessID = 0
+			stoppedInfo := ms.info
 			ms.mu.Unlock()
 			s.persistSession(ms.snapshotInfo())
+			s.notifyControl(stoppedInfo)
 		}()
 		return nil
 	}
@@ -910,7 +1024,9 @@ func (s *Supervisor) Stop(sessionID string, force bool) error {
 	pid := ms.cmd.Process.Pid
 	grace := ms.stopGrace
 	stdin := ms.stdin
+	infoCopy := ms.info
 	ms.mu.Unlock()
+	s.notifyControl(infoCopy)
 
 	// Closing stdin signals EOF to stream-JSON providers that read from stdin.
 	if stdin != nil {
@@ -985,6 +1101,48 @@ func (s *Supervisor) WriteInput(sessionID, clientID string, data []byte) (int, e
 	}
 	n, err := ptmx.Write(data)
 	return n, err
+}
+
+// UpdateInteraction records a new authoritative interaction-state report for
+// sessionID. Callers must only invoke this from a real provider/runtime
+// signal (see InteractionEvidence.Source) — never in response to bridgectl
+// merely writing bytes to a session's stdin/PTY (WriteInput does not, and
+// must not, call this). next.Evidence.Source identifies that signal; an
+// empty Source is rejected.
+//
+// The stored revision and UpdatedAt only advance when next actually differs
+// from the current state (a different State, or a different Pending
+// request identity/summary — see Interaction.changed); a repeated report of
+// the same value still refreshes LastActivityAt and is still forwarded to
+// the optional ControlObserver so Bridge's staleness reasoning has a fresh
+// timestamp to work with, but never fabricates a new state transition.
+func (s *Supervisor) UpdateInteraction(sessionID string, next Interaction) error {
+	if next.Evidence.Source == "" {
+		return fmt.Errorf("bridge: UpdateInteraction requires a non-empty evidence source")
+	}
+	s.mu.RLock()
+	ms, ok := s.sessions[sessionID]
+	s.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("%w: %q", ErrSessionNotFound, sessionID)
+	}
+	now := nowUTC()
+	ms.mu.Lock()
+	cur := ms.info.Interaction
+	next.LastActivityAt = now
+	if cur.changed(next) {
+		next.Revision = cur.Revision + 1
+		next.UpdatedAt = now
+	} else {
+		next.Revision = cur.Revision
+		next.UpdatedAt = cur.UpdatedAt
+		next.Pending = cur.Pending
+	}
+	ms.info.Interaction = next
+	info := ms.info
+	ms.mu.Unlock()
+	s.notifyControl(info)
+	return nil
 }
 
 func (s *Supervisor) Resize(sessionID, clientID string, cols, rows uint32) error {
@@ -1094,6 +1252,7 @@ func (s *Supervisor) Attach(sessionID, clientID string, afterSeq uint64, role At
 		ms.info.Attached = true
 		ms.info.AttachedClientID = clientID
 		ms.info.State = SessionStateAttached
+		s.notifyControl(ms.info)
 	}
 	ms.info.ObserverCount = s.countObservers(ms)
 	ms.lastActivity = time.Now()
@@ -1164,6 +1323,7 @@ func (s *Supervisor) Detach(sessionID, clientID string) (wasWriter bool, err err
 	ms.info.ObserverCount = s.countObservers(ms)
 	if len(ms.observers) == 0 && ms.info.State == SessionStateAttached {
 		ms.info.State = SessionStateRunning
+		s.notifyControl(ms.info)
 	}
 	return wasWriter, nil
 }
@@ -1233,11 +1393,13 @@ func (s *Supervisor) Shutdown(ctx context.Context) error {
 		s.stopSessions(s.nonTerminalSessionIDs(), true)
 		s.waitBestEffort(2 * time.Second)
 		s.closeTelemetryBestEffort()
+		s.closeControlBestEffort()
 		return err
 	}
 	flushCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	s.closeTelemetry(flushCtx)
+	s.closeControl(flushCtx)
 	return nil
 }
 
@@ -1307,12 +1469,27 @@ func (s *Supervisor) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	s.closeTelemetry(ctx)
+	s.closeControl(ctx)
 }
 
 func (s *Supervisor) observeSessionStarted(ms *managedSession) {
 	if s.telemetry != nil {
 		s.telemetry.SessionStarted(telemetrySession(ms))
 	}
+	s.notifyControl(ms.snapshotInfo())
+}
+
+// notifyControl forwards a session's current state to the optional
+// ControlObserver. It is safe to call with or without ms.mu held by the
+// caller: pass an already-copied SessionInfo (e.g. ms.info while holding
+// ms.mu, since SessionInfo is a plain value type) rather than re-deriving it
+// via ms.snapshotInfo(), which itself locks ms.mu and would deadlock if
+// called while that lock is already held.
+func (s *Supervisor) notifyControl(info SessionInfo) {
+	if s.control == nil {
+		return
+	}
+	s.control.SessionChanged(info)
 }
 
 func telemetrySession(ms *managedSession) telemetry.Session {
@@ -1330,6 +1507,23 @@ func (s *Supervisor) closeTelemetry(ctx context.Context) {
 			slog.Warn("telemetry flush failed", "error", err)
 		}
 	})
+}
+
+func (s *Supervisor) closeControl(ctx context.Context) {
+	if s.control == nil {
+		return
+	}
+	s.controlCloseOnce.Do(func() {
+		if err := s.control.Close(ctx); err != nil {
+			slog.Warn("control observer close failed", "error", err)
+		}
+	})
+}
+
+func (s *Supervisor) closeControlBestEffort() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	s.closeControl(ctx)
 }
 
 func (s *Supervisor) closeTelemetryBestEffort() {
