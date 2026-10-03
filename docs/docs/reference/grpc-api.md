@@ -12,6 +12,7 @@ service BridgeService {
   rpc StopSession(StopSessionRequest) returns (StopSessionResponse);
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc DiagnoseSession(DiagnoseSessionRequest) returns (DiagnoseSessionResponse);
   rpc AttachSession(AttachSessionRequest) returns (stream AttachSessionEvent);
   rpc WriteInput(WriteInputRequest) returns (WriteInputResponse);
   rpc ResizeSession(ResizeSessionRequest) returns (ResizeSessionResponse);
@@ -34,6 +35,11 @@ service BridgeService {
 | `repo_path` | Absolute path on the bridge host. |
 | `provider` | `claude`, `codex`, `opencode`, or `gemini`. |
 | `initial_cols`, `initial_rows` | Optional initial PTY size. |
+
+`DiagnoseSession` returns the bounded, schema-versioned diagnostic snapshot of a
+session as one JSON document (`report_json`; field reference under
+`session diagnose` in the CLI reference). It is authorized like `GetSession` and
+returns `NOT_FOUND` for an unknown session.
 
 `StopSession` stops a running session. `force` skips graceful shutdown.
 

@@ -19,12 +19,15 @@ import (
 	"github.com/orchael/bridgectl/pkg/bridgeclient"
 )
 
-// sessionGetter fetches one session through the local server's public
-// GetSession API. It is a seam for tests; production dials the local server.
-type sessionGetter func(ctx context.Context, sessionID string) (*bridgev1.GetSessionResponse, error)
+// reportFetcher obtains the diagnostic Report for a session. It is a seam for
+// tests; production asks the local daemon.
+type reportFetcher func(ctx context.Context, sessionID string) (*diagnose.Report, error)
 
 func newSessionDiagnoseCmd() *cobra.Command {
-	var jsonOutput bool
+	var (
+		jsonOutput                         bool
+		remote, cert, key, jwtKey, srvName string
+	)
 	cmd := &cobra.Command{
 		Use:   "diagnose <session-id>",
 		Short: "Report what bridgectl currently believes about a session",
@@ -36,32 +39,79 @@ func newSessionDiagnoseCmd() *cobra.Command {
 			"Use --json for the versioned (schema_version 1) machine-readable form.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSessionDiagnose(cmd.Context(), cmd.OutOrStdout(), args[0], jsonOutput, getSessionLocal, time.Now())
+			fetch := func(ctx context.Context, id string) (*diagnose.Report, error) {
+				return fetchReportFrom(ctx, id, remote, cert, key, jwtKey, srvName)
+			}
+			return runSessionDiagnose(cmd.Context(), cmd.OutOrStdout(), args[0], jsonOutput, fetch)
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit the schema-versioned diagnostic as a single JSON object")
+	addRemoteFlags(cmd, &remote, &cert, &key, &jwtKey, &srvName)
 	return cmd
 }
 
-func getSessionLocal(ctx context.Context, sessionID string) (*bridgev1.GetSessionResponse, error) {
-	client, err := connectClient("", 5*time.Second)
+// fetchReportFrom asks the local daemon, or the --remote one, for the report.
+// The daemon builds it from its own state, so a remote report describes the
+// remote machine's control status and revisions, not this one's.
+func fetchReportFrom(ctx context.Context, sessionID, remote, cert, key, jwtKey, serverName string) (*diagnose.Report, error) {
+	client, err := connectClientForHost(remote, 5*time.Second, cert, key, jwtKey, serverName)
 	if err != nil {
 		return nil, errServerUnavailable
 	}
 	defer func() { _ = client.Close() }()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	return client.GetSession(ctx, &bridgev1.GetSessionRequest{SessionId: sessionID})
+	return fetchReport(ctx, sessionID,
+		func(ctx context.Context, id string) ([]byte, error) {
+			resp, err := client.DiagnoseSession(ctx, &bridgev1.DiagnoseSessionRequest{SessionId: id})
+			if err != nil {
+				return nil, err
+			}
+			return resp.GetReportJson(), nil
+		},
+		func(ctx context.Context, id string) (*bridgev1.GetSessionResponse, error) {
+			if remote != "" {
+				// Building from GetSession would mix a remote session with
+				// this machine's control files.
+				return nil, errors.New("remote bridgectl server does not support DiagnoseSession")
+			}
+			return client.GetSession(ctx, &bridgev1.GetSessionRequest{SessionId: id})
+		})
+}
+
+// fetchReport asks the daemon to build the report (DiagnoseSession). A daemon
+// that predates that RPC answers Unimplemented — common while an older server
+// is still running after an upgrade — in which case the same Report is built
+// locally from GetSession plus this machine's control files.
+func fetchReport(ctx context.Context, sessionID string,
+	diagnoseRPC func(context.Context, string) ([]byte, error),
+	getSession func(context.Context, string) (*bridgev1.GetSessionResponse, error),
+) (*diagnose.Report, error) {
+	raw, err := diagnoseRPC(ctx, sessionID)
+	switch {
+	case err == nil:
+		var rep diagnose.Report
+		if uerr := json.Unmarshal(raw, &rep); uerr != nil || rep.SchemaVersion != diagnose.SchemaVersion {
+			return nil, errors.New("unsupported diagnostic response from server")
+		}
+		return &rep, nil
+	case status.Code(err) != codes.Unimplemented:
+		return nil, err
+	}
+	resp, err := getSession(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return diagnose.Build(resp, diagnose.LoadInputs(localserver.StateDir(), sessionID, version, time.Now())), nil
 }
 
 var errServerUnavailable = errors.New("local bridgectl server unavailable")
 
-// runSessionDiagnose is the whole command: fetch via the public session API,
-// build the canonical Report, then serialize it (--json) or render it. On
-// failure it emits a fixed-vocabulary error (a JSON error object under
-// --json) and returns a non-zero-exit error; it never echoes server error
-// text, which could carry provider output.
-func runSessionDiagnose(ctx context.Context, out io.Writer, sessionID string, jsonOutput bool, get sessionGetter, now time.Time) error {
+// runSessionDiagnose is the whole command: fetch the canonical Report, then
+// serialize it (--json) or render it. On failure it emits a fixed-vocabulary
+// error (a JSON error object under --json) and returns a non-zero-exit error;
+// it never echoes server error text, which could carry provider output.
+func runSessionDiagnose(ctx context.Context, out io.Writer, sessionID string, jsonOutput bool, fetch reportFetcher) error {
 	fail := func(code diagnose.ErrorCode) error {
 		rep := diagnose.NewErrorReport(code)
 		if jsonOutput {
@@ -75,7 +125,7 @@ func runSessionDiagnose(ctx context.Context, out io.Writer, sessionID string, js
 	if _, err := uuid.Parse(sessionID); err != nil {
 		return fail(diagnose.CodeInvalidSessionID)
 	}
-	resp, err := get(ctx, sessionID)
+	rep, err := fetch(ctx, sessionID)
 	switch {
 	case err == nil:
 	case errors.Is(err, bridgeclient.ErrSessionNotFound):
@@ -86,7 +136,6 @@ func runSessionDiagnose(ctx context.Context, out io.Writer, sessionID string, js
 		return fail(diagnose.CodeInternal)
 	}
 
-	rep := diagnose.Build(resp, diagnose.LoadInputs(localserver.StateDir(), sessionID, version, now))
 	if jsonOutput {
 		b, err := rep.MarshalJSON()
 		if err != nil {

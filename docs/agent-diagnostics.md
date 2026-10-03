@@ -20,7 +20,7 @@ The JSON form is the stable integration surface. Start with `schema_version: 1` 
 - interaction state (`working`, `waiting_for_input`, `waiting_for_approval`, `idle`, `unknown`) and the five interaction capability flags
 - lifecycle and interaction revisions, each labelled with its source (see Revisions below)
 - `created_at`; `interaction_updated_at` (`Interaction.UpdatedAt`, last change of state or pending identity) and `interaction_last_report_at` (`Interaction.LastActivityAt`, last authoritative report, even a repeat). Neither is a session-wide "last activity" time, and the names must not imply one
-- pending request identity/type, and `summary_available` (a boolean). Provider summary text is never emitted: Codex approval summaries embed the working directory and full command
+- pending request identity/type, a fixed-vocabulary `kind`, and `summary_available` (a boolean). Provider summary text is never emitted: Codex approval summaries embed the working directory and full command
 - active-writer presence, without client secrets
 - local control connection status when available: the persisted `bridge-control-status.json` state and its `updated_at`, which is the time of the last state change (or heartbeat), `last_connected_at` (recorded by the control client, `null` if never recorded), plus whether that file is older than `bridgecontrol.StatusStaleAfter`. Report `unknown` when the status path is not configured.
 - the bridgectl version and diagnostic schema version
@@ -51,9 +51,10 @@ Security tests must prove forbidden raw fields cannot enter serialized diagnosti
 
 ## Bridge integration notes
 
-- The model is built by pure functions over plain data (`diagnose.Build`, `diagnose.Inputs`), with no CLI or gRPC dependency beyond the `GetSessionResponse` message, so the control client can serve the same `Report` over its existing outbound connection later. This change adds no inbound port, no Bridge dependency, and no automatic upload.
+- The daemon builds the report (`DiagnoseSession` RPC → `diagnose.Build` over `GetSession`-equivalent state plus `diagnose.LoadInputs`), so local and `--remote` callers get one implementation. `Build` is a pure function over plain data, so the control client can serve the same `Report` over its existing outbound connection (the remaining gating item for Bridge); the report JSON is already a single transport-independent document. This change adds no inbound port, no Bridge dependency, and no automatic upload.
 - Bridge should compare `interaction_revision_wire` / `lifecycle_revision_wire` with its replica; `interaction_revision_local` is for local debugging only.
 - `control` reads a persisted file, so it can lag reality by up to the heartbeat interval; it is not a live reachability probe.
+- `pending_request.kind` (`command|file_change|tool|question|other|unknown`) is provider-assigned from structured data (Codex request shape, Claude hook tool name) and is the safe replacement for summary text. It is local-only: it is not on the Bridge control wire.
 - Deferred: a fixed-vocabulary code for `SessionInfo.Error` / control `last_error`.
 - There is deliberately no session-wide "last activity" time: the only authoritative timestamps are the interaction ones, and a provider activity buffer is bounded (15 minutes) and not part of `SessionInfo`.
 

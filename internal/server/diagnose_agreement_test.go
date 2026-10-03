@@ -2,8 +2,11 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,7 +14,10 @@ import (
 	bridgev1 "github.com/orchael/bridgectl/gen/bridge/v1"
 	"github.com/orchael/bridgectl/internal/auth"
 	"github.com/orchael/bridgectl/internal/bridge"
+	"github.com/orchael/bridgectl/internal/bridgecontrol"
 	"github.com/orchael/bridgectl/internal/diagnose"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // diagProvider is a real Provider whose process is `cat` (stays running) or
@@ -49,7 +55,7 @@ func newDiagServer(t *testing.T) (*BridgeServer, *bridge.Supervisor) {
 	}
 	sup := bridge.NewSupervisor(reg, bridge.DefaultPolicy(), 1024*1024, time.Minute)
 	t.Cleanup(sup.Close)
-	return New(sup, reg, slog.Default(), RateLimitConfig{}, "test", nil, nil, "", ""), sup
+	return New(sup, reg, slog.Default(), RateLimitConfig{}, "test", nil, nil, "", "test"), sup
 }
 
 func diagStart(t *testing.T, s *BridgeServer, id, prov string) {
@@ -274,5 +280,100 @@ func TestDiagnoseUnknownSessionIsError(t *testing.T) {
 	ctx := auth.ContextWithClaims(context.Background(), &auth.BridgeClaims{ProjectID: "proj"})
 	if _, err := s.GetSession(ctx, &bridgev1.GetSessionRequest{SessionId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"}); err == nil {
 		t.Fatal("GetSession for unknown session must fail so diagnose reports an error, not an empty snapshot")
+	}
+}
+
+// ---- DiagnoseSession RPC ----
+
+func diagnoseRPC(t *testing.T, s *BridgeServer, project, id string) (*diagnose.Report, []byte, error) {
+	t.Helper()
+	ctx := auth.ContextWithClaims(context.Background(), &auth.BridgeClaims{ProjectID: project})
+	resp, err := s.DiagnoseSession(ctx, &bridgev1.DiagnoseSessionRequest{SessionId: id})
+	if err != nil {
+		return nil, nil, err
+	}
+	var rep diagnose.Report
+	if err := json.Unmarshal(resp.ReportJson, &rep); err != nil {
+		t.Fatalf("report_json is not a Report: %v\n%s", err, resp.ReportJson)
+	}
+	return &rep, resp.ReportJson, nil
+}
+
+func TestDiagnoseSessionRPC_AgreesWithGetSessionAndSupervisor(t *testing.T) {
+	s, sup := newDiagServer(t)
+	const id = "f1f1f1f1-f1f1-4f1f-8f1f-f1f1f1f1f1f1"
+	diagStart(t, s, id, "capable")
+	caps := bridge.InteractionCapabilities{InteractionStateSupported: true, ApprovalStateSupported: true, PendingSummarySupported: true}
+	if err := sup.UpdateInteraction(id, bridge.Interaction{State: bridge.InteractionWaitingForApproval,
+		Evidence: bridge.InteractionEvidence{Source: "test", Capability: caps},
+		Pending:  &bridge.PendingRequest{ID: "a-1", Type: bridge.PendingRequestApproval, Kind: bridge.PendingKindCommand, Summary: "Run once in /home/dev/SECRET: curl SECRET"}}); err != nil {
+		t.Fatal(err)
+	}
+	rep, raw, err := diagnoseRPC(t, s, "proj", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, resp := diagnoseViaPublicAPI(t, s, id)
+	assertAgrees(t, sup, rep, resp)
+	if rep.PendingRequest.Kind != "command" || !rep.PendingRequest.SummaryAvailable {
+		t.Fatalf("pending = %+v", rep.PendingRequest)
+	}
+	if strings.Contains(string(raw), "SECRET") || strings.Contains(string(raw), "/home/dev") {
+		t.Fatalf("summary text leaked over the RPC: %s", raw)
+	}
+	if rep.BridgectlVersion != "test" {
+		t.Fatalf("bridgectl_version = %q, want the daemon's version", rep.BridgectlVersion)
+	}
+}
+
+func TestDiagnoseSessionRPC_ReadsDaemonStateDir(t *testing.T) {
+	s, _ := newDiagServer(t)
+	const id = "f2f2f2f2-f2f2-4f2f-8f2f-f2f2f2f2f2f2"
+	diagStart(t, s, id, "plain")
+
+	rep, _, err := diagnoseRPC(t, s, "proj", id)
+	if err != nil || rep.Control.State != "unknown" || rep.LifecycleRevisionWire != nil {
+		t.Fatalf("without a state dir control must be unknown: %+v %v", rep, err)
+	}
+
+	dir := t.TempDir()
+	if err := bridgecontrol.WriteStatus(filepath.Join(dir, bridgecontrol.StatusFileName),
+		bridgecontrol.Status{State: bridgecontrol.StateConnected, UpdatedAt: time.Now(), LastConnectedAt: time.Now(), LastError: "SECRET"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, bridgecontrol.RevisionFileName), []byte(`{"`+id+`":8}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.SetDiagnoseStateDir(dir)
+	rep, raw, err := diagnoseRPC(t, s, "proj", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Control.State != "connected" || rep.Control.LastConnectedAt == nil || rep.LifecycleRevisionWire == nil || *rep.LifecycleRevisionWire != 8 {
+		t.Fatalf("report = %+v", rep)
+	}
+	if strings.Contains(string(raw), "SECRET") {
+		t.Fatal("control last_error leaked")
+	}
+}
+
+func TestDiagnoseSessionRPC_Errors(t *testing.T) {
+	s, _ := newDiagServer(t)
+	const id = "f3f3f3f3-f3f3-4f3f-8f3f-f3f3f3f3f3f3"
+	diagStart(t, s, id, "plain")
+	for name, tc := range map[string]struct {
+		project, id string
+		want        codes.Code
+	}{
+		"unknown session": {"proj", "f4f4f4f4-f4f4-4f4f-8f4f-f4f4f4f4f4f4", codes.NotFound},
+		"malformed id":    {"proj", "nope", codes.InvalidArgument},
+		"other project":   {"someone-else", id, codes.PermissionDenied},
+	} {
+		if _, _, err := diagnoseRPC(t, s, tc.project, tc.id); status.Code(err) != tc.want {
+			t.Errorf("%s: code = %v, want %v (%v)", name, status.Code(err), tc.want, err)
+		}
+	}
+	if _, err := s.DiagnoseSession(context.Background(), &bridgev1.DiagnoseSessionRequest{SessionId: id}); err == nil {
+		t.Error("a call without claims must be rejected")
 	}
 }

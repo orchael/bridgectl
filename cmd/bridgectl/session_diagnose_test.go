@@ -17,13 +17,22 @@ import (
 
 	bridgev1 "github.com/orchael/bridgectl/gen/bridge/v1"
 	"github.com/orchael/bridgectl/internal/bridgecontrol"
+	"github.com/orchael/bridgectl/internal/diagnose"
 	"github.com/orchael/bridgectl/pkg/bridgeclient"
 )
 
 const diagSessionID = "11111111-1111-4111-8111-111111111111"
 
-func diagGetter(resp *bridgev1.GetSessionResponse, err error) sessionGetter {
-	return func(context.Context, string) (*bridgev1.GetSessionResponse, error) { return resp, err }
+// diagGetter adapts a canned GetSession result into a reportFetcher that goes
+// through the same fallback path production uses against an older daemon.
+func diagGetter(resp *bridgev1.GetSessionResponse, err error) reportFetcher {
+	return func(ctx context.Context, id string) (*diagnose.Report, error) {
+		return fetchReport(ctx, id,
+			func(context.Context, string) ([]byte, error) {
+				return nil, status.Error(codes.Unimplemented, "old daemon")
+			},
+			func(context.Context, string) (*bridgev1.GetSessionResponse, error) { return resp, err })
+	}
 }
 
 func diagResp() *bridgev1.GetSessionResponse {
@@ -38,7 +47,7 @@ func diagResp() *bridgev1.GetSessionResponse {
 func TestSessionDiagnoseJSON(t *testing.T) {
 	t.Setenv("BRIDGECTL_STATE_DIR", t.TempDir())
 	var out bytes.Buffer
-	if err := runSessionDiagnose(context.Background(), &out, diagSessionID, true, diagGetter(diagResp(), nil), time.Now()); err != nil {
+	if err := runSessionDiagnose(context.Background(), &out, diagSessionID, true, diagGetter(diagResp(), nil)); err != nil {
 		t.Fatal(err)
 	}
 	var m map[string]any
@@ -62,7 +71,7 @@ func TestSessionDiagnoseJSON(t *testing.T) {
 func TestSessionDiagnoseHumanMatchesJSONValues(t *testing.T) {
 	t.Setenv("BRIDGECTL_STATE_DIR", t.TempDir())
 	var out bytes.Buffer
-	if err := runSessionDiagnose(context.Background(), &out, diagSessionID, false, diagGetter(diagResp(), nil), time.Now()); err != nil {
+	if err := runSessionDiagnose(context.Background(), &out, diagSessionID, false, diagGetter(diagResp(), nil)); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{diagSessionID, "claude", "proj", "running", "unknown"} {
@@ -86,7 +95,7 @@ func TestSessionDiagnoseReadsControlFilesWhenBridgeDisconnected(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := runSessionDiagnose(context.Background(), &out, diagSessionID, true, diagGetter(diagResp(), nil), time.Now()); err != nil {
+	if err := runSessionDiagnose(context.Background(), &out, diagSessionID, true, diagGetter(diagResp(), nil)); err != nil {
 		t.Fatalf("diagnose must work while Bridge is unavailable: %v", err)
 	}
 	var m map[string]any
@@ -103,7 +112,7 @@ func TestSessionDiagnoseErrors(t *testing.T) {
 	cases := []struct {
 		name     string
 		id       string
-		get      sessionGetter
+		get      reportFetcher
 		wantCode string
 	}{
 		{"malformed id", "not-a-uuid", diagGetter(nil, errors.New("must not be called")), "invalid_session_id"},
@@ -117,7 +126,7 @@ func TestSessionDiagnoseErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, jsonOut := range []bool{true, false} {
 				var out bytes.Buffer
-				err := runSessionDiagnose(context.Background(), &out, tc.id, jsonOut, tc.get, time.Now())
+				err := runSessionDiagnose(context.Background(), &out, tc.id, jsonOut, tc.get)
 				if err == nil {
 					t.Fatal("want non-zero exit (error)")
 				}
@@ -152,5 +161,34 @@ func TestSessionDiagnoseRegistered(t *testing.T) {
 	}
 	if cmd.Flags().Lookup("json") == nil {
 		t.Fatal("--json flag missing")
+	}
+}
+
+func TestFetchReportUsesDaemonReportWhenSupported(t *testing.T) {
+	want := diagnose.Build(diagResp(), diagnose.Inputs{Version: "daemon-v9", Now: time.Now()})
+	raw, _ := want.MarshalJSON()
+	got, err := fetchReport(context.Background(), diagSessionID,
+		func(context.Context, string) ([]byte, error) { return raw, nil },
+		func(context.Context, string) (*bridgev1.GetSessionResponse, error) {
+			t.Fatal("GetSession fallback must not run when the daemon supports DiagnoseSession")
+			return nil, nil
+		})
+	if err != nil || got.BridgectlVersion != "daemon-v9" || got.SessionID != diagSessionID {
+		t.Fatalf("got %+v err %v", got, err)
+	}
+}
+
+func TestFetchReportRejectsUnknownSchemaAndPropagatesErrors(t *testing.T) {
+	noFallback := func(context.Context, string) (*bridgev1.GetSessionResponse, error) {
+		t.Fatal("no fallback")
+		return nil, nil
+	}
+	if _, err := fetchReport(context.Background(), diagSessionID,
+		func(context.Context, string) ([]byte, error) { return []byte(`{"schema_version":2}`), nil }, noFallback); err == nil {
+		t.Fatal("a future schema version must be rejected, not rendered")
+	}
+	if _, err := fetchReport(context.Background(), diagSessionID,
+		func(context.Context, string) ([]byte, error) { return nil, bridgeclient.ErrSessionNotFound }, noFallback); !errors.Is(err, bridgeclient.ErrSessionNotFound) {
+		t.Fatalf("NotFound must propagate without fallback, got %v", err)
 	}
 }

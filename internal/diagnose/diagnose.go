@@ -85,6 +85,11 @@ type Capability struct {
 type Pending struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
+	// Kind is the provider-assigned category: command, file_change, tool,
+	// question, other, or unknown when the provider did not classify it. Any
+	// other value from a provider is reported as other, so this can never
+	// carry free text.
+	Kind string `json:"kind"`
 	// SummaryAvailable reports that the provider supplied a pending summary.
 	// The text itself is never included: provider summaries (e.g. Codex
 	// approvals) can embed working directories, full commands and anything
@@ -217,11 +222,22 @@ func Build(resp *bridgev1.GetSessionResponse, in Inputs) *Report {
 	}
 
 	if p := ia.GetPendingRequest(); p != nil {
-		pending := &Pending{ID: truncate(sanitize(p.GetId()), MaxIDRunes), Type: p.GetType()}
+		pending := &Pending{ID: truncate(sanitize(p.GetId()), MaxIDRunes), Type: p.GetType(), Kind: normalizeKind(p.GetKind())}
 		pending.SummaryAvailable = caps.PendingSummarySupported && strings.TrimSpace(p.GetSummary()) != ""
 		r.PendingRequest = pending
 	}
 	return r
+}
+
+func normalizeKind(k string) string {
+	switch k {
+	case "":
+		return "unknown"
+	case "command", "file_change", "tool", "question", "other":
+		return k
+	default:
+		return "other"
+	}
 }
 
 func buildControl(in Inputs) Control {

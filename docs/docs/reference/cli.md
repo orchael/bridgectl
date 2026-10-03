@@ -98,13 +98,18 @@ Remote session commands accept:
 
 `session diagnose` reports what the local bridgectl server currently believes
 about one session, for developers and AI agents debugging a mismatch with
-Bridge or another replica. It reads the server's public session API plus two
-small local control-client files. It does not read telemetry, Bridge, terminal
-output or logs, and it never infers interaction state.
+Bridge or another replica. The daemon builds the report (`DiagnoseSession` RPC)
+from its Supervisor state plus the control client's local status and revision
+files. It does not read telemetry, Bridge, terminal output or logs, and it never
+infers interaction state. Against a daemon that predates the RPC (for example
+one not yet restarted after an upgrade), the command builds the same report
+locally from `GetSession`.
 
 - It is a **snapshot of current authoritative state, not an event replay.**
-- It is local only (no `--remote`) and works the same when Bridge is
-  unavailable or not enrolled. It opens no port and sends nothing to Bridge.
+- It works the same when Bridge is unavailable or not enrolled, opens no port
+  and sends nothing to Bridge. With `--remote <host>` the report describes that
+  machine's daemon (its control status and revisions); `bridgectl_version` is the
+  daemon's version.
 - **Privacy boundary:** the output contains no PTY output, transcript, prompts,
   responses, chain-of-thought, environment variables, credentials, OAuth
   material, filesystem contents or paths, session `error` text, control
@@ -144,7 +149,7 @@ Example `--json` output (pretty-printed here; the real output is one line):
   },
   "interaction_updated_at": "2026-03-01T10:01:00Z",
   "interaction_last_report_at": "2026-03-01T10:02:00Z",
-  "pending_request": {"id": "req-1", "type": "approval", "summary_available": true},
+  "pending_request": {"id": "req-1", "type": "approval", "kind": "command", "summary_available": true},
   "lifecycle_revision_wire": 4,
   "interaction_revision_wire": 3,
   "interaction_revision_local": 7,
@@ -157,7 +162,7 @@ Example `--json` output (pretty-printed here; the real output is one line):
 | Field | Meaning |
 | --- | --- |
 | `schema_version` | Always first. Fields of a published version never change; incompatible changes bump it. |
-| `bridgectl_version` | Version of the bridgectl binary that ran the command. |
+| `bridgectl_version` | Version of the bridgectl daemon that built the report. |
 | `session_id`, `provider`, `project_id` | Session identity. |
 | `status` | Supervisor `SessionState`: `starting`, `running`, `attached`, `stopping`, `stopped`, `failed` (`unknown` if unreported). |
 | `exit_code` | Process exit code once recorded, else `null`. |
@@ -166,7 +171,7 @@ Example `--json` output (pretty-printed here; the real output is one line):
 | `interaction_capability` | The five provider capability flags. `null` = capability unknown (server reported none); all `false` = explicitly unsupported, so `interaction_state` can only be `unknown`. |
 | `interaction_updated_at` | Last change of interaction state or pending-request identity. Not a session-wide "last activity" time. |
 | `interaction_last_report_at` | Last authoritative provider report, including repeats. |
-| `pending_request` | `null`, or `{id, type (input\|approval), summary_available}`. `summary_available` is true when the provider supplied a summary; its text is never included. |
+| `pending_request` | `null`, or `{id, type (input\|approval), kind, summary_available}`. `kind` is a provider-assigned category from a fixed vocabulary: `command`, `file_change`, `tool`, `question`, `other`, or `unknown` (provider did not classify it; any other provider value is reported as `other`). `summary_available` is true when the provider supplied a summary; its text is never included. |
 | `lifecycle_revision_wire` | Lifecycle revision last allocated by the Bridge control client for this session; `null` if it has none (not enrolled, or forgotten after a terminal state). |
 | `interaction_revision_wire` | The interaction revision Bridge compares; `null` likewise. |
 | `interaction_revision_local` | The Supervisor's own interaction revision. Not restart-durable and a different sequence from the wire revisions; never compare them to each other. |

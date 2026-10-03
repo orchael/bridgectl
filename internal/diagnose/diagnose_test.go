@@ -46,7 +46,7 @@ func fullResp() *bridgev1.GetSessionResponse {
 		UpdatedAt:      timestamppb.New(t0.Add(time.Minute)),
 		LastActivityAt: timestamppb.New(t0.Add(2 * time.Minute)),
 		Source:         "codex-app-server",
-		PendingRequest: &bridgev1.PendingInteractionRequest{Id: "req-1", Type: "approval", Summary: "Run command: go test"},
+		PendingRequest: &bridgev1.PendingInteractionRequest{Id: "req-1", Type: "approval", Kind: "command", Summary: "Run command: go test"},
 		Capability: &bridgev1.InteractionCapability{
 			InteractionStateSupported: true, ApprovalStateSupported: true, PendingSummarySupported: true,
 			RemoteResponseSupported: true, StructuredApprovalSupported: true,
@@ -258,6 +258,20 @@ func TestPendingSummaryTextIsNeverIncluded(t *testing.T) {
 			if strings.Contains(out, frag) {
 				t.Errorf("%s leaked summary fragment %q: %s", where, frag, out)
 			}
+		}
+	}
+}
+
+func TestPendingKindIsFixedVocabulary(t *testing.T) {
+	cases := map[string]string{
+		"command": "command", "file_change": "file_change", "tool": "tool", "question": "question", "other": "other",
+		"": "unknown", "rm -rf /home/dev": "other", "Run once in /home/dev: curl": "other",
+	}
+	for in, want := range cases {
+		r := fullResp()
+		r.Interaction.PendingRequest.Kind = in
+		if got := Build(r, Inputs{Now: now}).PendingRequest.Kind; got != want {
+			t.Errorf("kind %q -> %q, want %q", in, got, want)
 		}
 	}
 }
@@ -513,7 +527,7 @@ var allowedStringFields = map[string]bool{
 	"interaction_last_report_at": true, // timestamp
 	"pending_request.id":         true, // provider request identity, bounded
 	"pending_request.type":       true, // enum
-	"pending_request.summary":    true, // provider-declared safe summary, bounded+sanitized
+	"pending_request.kind":       true, // normalized fixed vocabulary
 	"control.state":              true, // enum
 	"control.updated_at":         true, // timestamp
 	"control.last_connected_at":  true, // timestamp

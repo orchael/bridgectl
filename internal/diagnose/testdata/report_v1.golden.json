@@ -21,6 +21,7 @@
   "pending_request": {
     "id": "req-1",
     "type": "approval",
+    "kind": "command",
     "summary_available": true
   },
   "lifecycle_revision_wire": 4,

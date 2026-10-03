@@ -113,3 +113,23 @@ func TestProxyStructuredApproval(t *testing.T) {
 		})
 	}
 }
+
+// TestPendingKinds covers the provider-assigned, fixed-vocabulary kind for each
+// request shape, which replaces free-text summaries in diagnostics.
+func TestPendingKinds(t *testing.T) {
+	exec := pendingFromExecApproval(envelope{Params: mustJSON(map[string]any{"callId": "c1", "command": []string{"ls"}})})
+	patch := pendingFromApplyPatch(envelope{Params: mustJSON(map[string]any{"callId": "c2"})})
+	input := pendingFromUserInput(envelope{Params: mustJSON(map[string]any{"itemId": "i1"})})
+	v2 := approvalPending(envelope{ID: json.RawMessage(`1`)}, commandApprovalParams{ThreadID: "t", TurnID: "u", ItemID: "i", Cwd: "/x", Command: "ls"})
+	for name, tc := range map[string]struct {
+		got  *bridge.PendingRequest
+		want bridge.PendingRequestKind
+	}{
+		"exec": {exec, bridge.PendingKindCommand}, "patch": {patch, bridge.PendingKindFileChange},
+		"input": {input, bridge.PendingKindQuestion}, "v2 approval": {v2, bridge.PendingKindCommand},
+	} {
+		if tc.got == nil || tc.got.Kind != tc.want {
+			t.Errorf("%s: %+v, want kind %q", name, tc.got, tc.want)
+		}
+	}
+}

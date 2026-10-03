@@ -22,7 +22,7 @@ func interactionToProto(i bridge.Interaction) *bridgev1.SessionInteraction {
 		out.LastActivityAt = timestamppb.New(i.LastActivityAt)
 	}
 	if i.Pending != nil {
-		out.PendingRequest = &bridgev1.PendingInteractionRequest{Id: i.Pending.ID, Type: string(i.Pending.Type), Summary: i.Pending.Summary}
+		out.PendingRequest = &bridgev1.PendingInteractionRequest{Id: i.Pending.ID, Type: string(i.Pending.Type), Summary: i.Pending.Summary, Kind: string(i.Pending.Kind)}
 	}
 	return out
 }
