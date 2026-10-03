@@ -20,3 +20,4 @@ Revisions
 Bridge control (local status file)
   state                      connected
   updated                    2026-03-01T10:59:50Z
+  last connected             2026-03-01T10:59:50Z

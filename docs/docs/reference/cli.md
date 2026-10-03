@@ -150,7 +150,7 @@ Example `--json` output (pretty-printed here; the real output is one line):
   "interaction_revision_local": 7,
   "active_writer": true,
   "observer_count": 2,
-  "control": {"state": "connected", "updated_at": "2026-03-01T10:59:50Z", "stale": false}
+  "control": {"state": "connected", "updated_at": "2026-03-01T10:59:50Z", "last_connected_at": "2026-03-01T10:59:50Z", "stale": false}
 }
 ```
 
@@ -173,7 +173,8 @@ Example `--json` output (pretty-printed here; the real output is one line):
 | `active_writer` | Whether a writer is attached (boolean only). |
 | `observer_count` | Read-only observers attached. |
 | `control.state` | Local control status file: `not_provisioned`, `connecting`, `connected`, `disconnected`, `auth_rejected`, `unavailable`, or `unknown` (no file, unreadable, unrecognized). |
-| `control.updated_at` | When that status last changed or heartbeated. It is **not** a last-successful-connection time; bridgectl does not record one. |
+| `control.updated_at` | When that status last changed or heartbeated. |
+| `control.last_connected_at` | Last time the control client was observed connected; kept across later failures and daemon restarts. `null` if never recorded (including status files from older bridgectl versions). |
 | `control.stale` | `updated_at` is older than two minutes. A stale `connected` entry means no live client is behind it. |
 
 Without `--json`, the same fields are printed as a short sectioned report

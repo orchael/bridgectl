@@ -99,9 +99,12 @@ type Control struct {
 	// status path is not configured, unreadable, or holds an unrecognized value.
 	State string `json:"state"`
 	// UpdatedAt is when the status last changed (or, while connected, last
-	// heartbeated) — not a "last successful connection" time, which bridgectl
-	// does not record.
+	// heartbeated).
 	UpdatedAt *string `json:"updated_at"`
+	// LastConnectedAt is the last time the control client was observed
+	// connected, or null if never recorded (including status files written
+	// by older versions).
+	LastConnectedAt *string `json:"last_connected_at"`
 	// Stale is true when UpdatedAt is older than bridgecontrol.StatusStaleAfter.
 	// A stale "connected" entry means no live client is behind it.
 	Stale bool `json:"stale"`
@@ -236,6 +239,7 @@ func buildControl(in Inputs) Control {
 		c.UpdatedAt = formatTime(st.UpdatedAt, true)
 		c.Stale = in.Now.Sub(st.UpdatedAt) > bridgecontrol.StatusStaleAfter
 	}
+	c.LastConnectedAt = formatTime(st.LastConnectedAt, true)
 	return c
 }
 

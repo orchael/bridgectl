@@ -58,6 +58,12 @@ type Status struct {
 	InstallationID string    `json:"installation_id,omitempty"`
 	LastError      string    `json:"last_error,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
+	// LastConnectedAt is the last time the client was observed connected
+	// (connect or heartbeat). It survives later non-connected states and
+	// daemon restarts, so it answers "when did this last work" while
+	// UpdatedAt only answers "when did the state last change". Absent in
+	// status files written by older versions.
+	LastConnectedAt time.Time `json:"last_connected_at,omitempty"`
 }
 
 // WriteStatus atomically persists st to path. Errors are the caller's to

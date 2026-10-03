@@ -22,7 +22,7 @@ The JSON form is the stable integration surface. Start with `schema_version: 1` 
 - `created_at`; `interaction_updated_at` (`Interaction.UpdatedAt`, last change of state or pending identity) and `interaction_last_report_at` (`Interaction.LastActivityAt`, last authoritative report, even a repeat). Neither is a session-wide "last activity" time, and the names must not imply one
 - pending request identity/type, and `summary_available` (a boolean). Provider summary text is never emitted: Codex approval summaries embed the working directory and full command
 - active-writer presence, without client secrets
-- local control connection status when available: the persisted `bridge-control-status.json` state and its `updated_at`, which is the time of the last state change rather than the last successful connection, plus whether that file is older than `bridgecontrol.StatusStaleAfter`. Report `unknown` when the status path is not configured. A "last successful connection" time is only included if the control client starts recording one
+- local control connection status when available: the persisted `bridge-control-status.json` state and its `updated_at`, which is the time of the last state change (or heartbeat), `last_connected_at` (recorded by the control client, `null` if never recorded), plus whether that file is older than `bridgecontrol.StatusStaleAfter`. Report `unknown` when the status path is not configured.
 - the bridgectl version and diagnostic schema version
 
 Free-form strings that the Supervisor or control client store (`SessionInfo.Error`, the control status `last_error`) and `RepoPath` are not in the list above. Include them only as a fixed-vocabulary code or after an explicit redaction decision, because they can carry provider stderr or filesystem paths.
@@ -54,7 +54,8 @@ Security tests must prove forbidden raw fields cannot enter serialized diagnosti
 - The model is built by pure functions over plain data (`diagnose.Build`, `diagnose.Inputs`), with no CLI or gRPC dependency beyond the `GetSessionResponse` message, so the control client can serve the same `Report` over its existing outbound connection later. This change adds no inbound port, no Bridge dependency, and no automatic upload.
 - Bridge should compare `interaction_revision_wire` / `lifecycle_revision_wire` with its replica; `interaction_revision_local` is for local debugging only.
 - `control` reads a persisted file, so it can lag reality by up to the heartbeat interval; it is not a live reachability probe.
-- Deferred: a fixed-vocabulary code for `SessionInfo.Error` / control `last_error`, and a recorded last-successful-connection time.
+- Deferred: a fixed-vocabulary code for `SessionInfo.Error` / control `last_error`.
+- There is deliberately no session-wide "last activity" time: the only authoritative timestamps are the interaction ones, and a provider activity buffer is bounded (15 minutes) and not part of `SessionInfo`.
 
 ## Follow-up
 

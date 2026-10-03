@@ -31,6 +31,7 @@
   "control": {
     "state": "connected",
     "updated_at": "2026-03-01T10:59:50Z",
+    "last_connected_at": "2026-03-01T10:59:50Z",
     "stale": false
   }
 }

@@ -110,10 +110,12 @@ type Client struct {
 	identityMu     sync.Mutex
 	organizationID string
 	installationID string
-	cfg            Config
-	revisions      *RevisionStore
-	rng            *rand.Rand
-	rngMu          sync.Mutex
+	// lastConnectedAt is guarded by identityMu; see Status.LastConnectedAt.
+	lastConnectedAt time.Time
+	cfg             Config
+	revisions       *RevisionStore
+	rng             *rand.Rand
+	rngMu           sync.Mutex
 
 	// interactions allocates bridgecontrol's own restart-durable wire
 	// revision for interaction-state updates, independent of the session
@@ -319,7 +321,19 @@ func (c *Client) setStatus(state State, lastErr string) {
 	if installationID == "" {
 		installationID = c.cfg.InstallationID
 	}
-	st := Status{State: state, InstallationID: installationID, LastError: lastErr, UpdatedAt: time.Now().UTC()}
+	now := time.Now().UTC()
+	c.identityMu.Lock()
+	if state == StateConnected {
+		c.lastConnectedAt = now
+	} else if c.lastConnectedAt.IsZero() {
+		// Carry the value across a daemon restart.
+		if prev, err := ReadStatus(c.cfg.StatusPath); err == nil {
+			c.lastConnectedAt = prev.LastConnectedAt
+		}
+	}
+	lastConnected := c.lastConnectedAt
+	c.identityMu.Unlock()
+	st := Status{State: state, InstallationID: installationID, LastError: lastErr, UpdatedAt: now, LastConnectedAt: lastConnected}
 	if err := WriteStatus(c.cfg.StatusPath, st); err != nil {
 		c.cfg.Logger.Warn("bridgecontrol: failed to persist status", "error", err)
 	}

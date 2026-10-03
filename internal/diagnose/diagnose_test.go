@@ -59,7 +59,7 @@ func connectedControl() Inputs {
 	return Inputs{
 		Version:                 "v1.2.3",
 		Now:                     now,
-		Control:                 ControlInput{Configured: true, Status: &bridgecontrol.Status{State: bridgecontrol.StateConnected, UpdatedAt: now.Add(-10 * time.Second)}},
+		Control:                 ControlInput{Configured: true, Status: &bridgecontrol.Status{State: bridgecontrol.StateConnected, UpdatedAt: now.Add(-10 * time.Second), LastConnectedAt: now.Add(-10 * time.Second)}},
 		LifecycleRevisionWire:   ptr(int64(4)),
 		InteractionRevisionWire: ptr(int64(3)),
 	}
@@ -389,6 +389,20 @@ func TestControlStatus(t *testing.T) {
 	}
 }
 
+func TestControlLastConnectedAt(t *testing.T) {
+	last := now.Add(-3 * time.Hour)
+	in := Inputs{Now: now, Control: ControlInput{Configured: true, Status: &bridgecontrol.Status{
+		State: bridgecontrol.StateUnavailable, UpdatedAt: now.Add(-time.Second), LastConnectedAt: last}}}
+	c := Build(baseResp(), in).Control
+	if c.LastConnectedAt == nil || *c.LastConnectedAt != "2026-03-01T08:00:00Z" {
+		t.Fatalf("last_connected_at = %v", c.LastConnectedAt)
+	}
+	in.Control.Status.LastConnectedAt = time.Time{}
+	if Build(baseResp(), in).Control.LastConnectedAt != nil {
+		t.Fatal("last_connected_at must be null when never recorded")
+	}
+}
+
 func TestControlLastErrorIsNeverIncluded(t *testing.T) {
 	in := Inputs{Now: now, Control: ControlInput{Configured: true, Status: &bridgecontrol.Status{
 		State: bridgecontrol.StateUnavailable, UpdatedAt: now, LastError: "dial tcp: token=sekrit-token-value", InstallationID: "inst-secret-1",
@@ -502,6 +516,7 @@ var allowedStringFields = map[string]bool{
 	"pending_request.summary":    true, // provider-declared safe summary, bounded+sanitized
 	"control.state":              true, // enum
 	"control.updated_at":         true, // timestamp
+	"control.last_connected_at":  true, // timestamp
 }
 
 func TestReportHasNoUnreviewedStringFields(t *testing.T) {

@@ -56,6 +56,7 @@ func Render(w io.Writer, r *Report) {
 	}
 	p("state", state)
 	p("updated", timeOr(r.Control.UpdatedAt, "not reported"))
+	p("last connected", timeOr(r.Control.LastConnectedAt, "not reported"))
 }
 
 func yesNo(b bool) string {
