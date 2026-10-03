@@ -221,3 +221,25 @@ func TestHookTransportPrivacyAndAuthentication(t *testing.T) {
 		t.Fatal("nonlocal receiver accepted")
 	}
 }
+
+// TestPendingKindIsClassifiedFromToolName covers the fixed-vocabulary kind
+// derived from the structured tool name, never from tool input or text.
+func TestPendingKindIsClassifiedFromToolName(t *testing.T) {
+	cases := map[string]bridge.PendingRequestKind{
+		"Bash": bridge.PendingKindCommand, "Edit": bridge.PendingKindFileChange, "Write": bridge.PendingKindFileChange,
+		"AskUserQuestion": bridge.PendingKindQuestion, "WebFetch": bridge.PendingKindTool, "": bridge.PendingKindOther,
+	}
+	for tool, want := range cases {
+		s := &state{pending: map[string]pending{}, tools: map[string]string{}}
+		if _, ok := s.apply(Event{SessionID: "s", Name: "SessionStart"}); !ok {
+			t.Fatal("SessionStart ignored")
+		}
+		got, ok := s.apply(Event{SessionID: "s", Name: "PermissionRequest", Tool: tool})
+		if !ok || got.Pending == nil {
+			t.Fatalf("%q: no pending request", tool)
+		}
+		if got.Pending.Kind != want {
+			t.Errorf("tool %q: kind = %q, want %q", tool, got.Pending.Kind, want)
+		}
+	}
+}
