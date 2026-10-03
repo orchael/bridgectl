@@ -72,12 +72,10 @@ Read and follow these rule files in `.codex/rules/` when they apply:
 - `.codex/rules/common/local-dev-license.md` — Rules for common/local-dev-license
 - `.codex/rules/common/docs.md` — Rules for common/docs
 - `.codex/rules/common/cicd.md` — Rules for common/cicd
-- `.codex/rules/common/observability.md` — Rules for common/observability
 - `.codex/rules/common/publishing.md` — Rules for common/publishing
-- `.codex/rules/common/publishing-apps.md` — Rules for common/publishing-apps
 - `.codex/rules/common/publishing-cli.md` — Rules for common/publishing-cli
 - `.codex/rules/common/publishing-libraries.md` — Rules for common/publishing-libraries
-- `.codex/rules/common/publishing-sdks.md` — Rules for common/publishing-sdks
+- `.codex/rules/common/publishing-apps.md` — Rules for common/publishing-apps
 - `.codex/rules/common/git-hooks.md` — Rules for common/git-hooks
 - `.codex/rules/typescript/typescript-linting.md` — Rules for typescript/linting
 - `.codex/rules/typescript/typescript-logging.md` — Rules for typescript/logging

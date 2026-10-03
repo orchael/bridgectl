@@ -7,7 +7,6 @@
     "local-dev",
     "docs",
     "cicd",
-    "observability",
     "publishing",
     "linting",
     "logging",
@@ -59,5 +58,10 @@
       "corepack"
     ]
   },
-  "deploymentModel": "none"
+  "deploymentModel": "none",
+  "publishingProfiles": [
+    "cli",
+    "libraries",
+    "apps"
+  ]
 }

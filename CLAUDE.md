@@ -29,12 +29,10 @@ Read and follow these rule files in `.claude/rules/` when they apply:
 - `.claude/rules/common/local-dev-license.md` — Rules for common/local-dev-license
 - `.claude/rules/common/docs.md` — Rules for common/docs
 - `.claude/rules/common/cicd.md` — Rules for common/cicd
-- `.claude/rules/common/observability.md` — Rules for common/observability
 - `.claude/rules/common/publishing.md` — Rules for common/publishing
-- `.claude/rules/common/publishing-apps.md` — Rules for common/publishing-apps
 - `.claude/rules/common/publishing-cli.md` — Rules for common/publishing-cli
 - `.claude/rules/common/publishing-libraries.md` — Rules for common/publishing-libraries
-- `.claude/rules/common/publishing-sdks.md` — Rules for common/publishing-sdks
+- `.claude/rules/common/publishing-apps.md` — Rules for common/publishing-apps
 - `.claude/rules/common/git-hooks.md` — Rules for common/git-hooks
 - `.claude/rules/typescript/typescript-linting.md` — Rules for typescript/linting
 - `.claude/rules/typescript/typescript-logging.md` — Rules for typescript/logging
