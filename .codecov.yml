@@ -6,3 +6,13 @@ coverage:
     patch:
       default:
         target: 50%
+
+# _windows.go files can never be exercised by this repo's Linux-only CI
+# runners, so every line in them is permanently "uncovered" from codecov's
+# point of view regardless of how well-tested the Windows-specific logic
+# actually is. Excluding them keeps patch/project coverage meaningful instead
+# of penalizing every windows-side change in the existing _unix.go/_windows.go
+# split pattern (cmd/bridgectl/signal_windows.go, internal/bridge/process_windows.go,
+# etc.).
+ignore:
+  - "**/*_windows.go"

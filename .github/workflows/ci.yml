@@ -60,6 +60,44 @@ jobs:
           flags: go
           name: go-coverage
 
+  go-build-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Cross-compile for windows/amd64
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: go build ./...
+
+  windows-smoke:
+    # Cross-compiling (above) only proves the code compiles; it never executes
+    # on an actual Windows process. This job builds and runs bridgectl.exe
+    # natively on a GitHub-hosted windows-latest runner so the client-only
+    # commands documented as working today (see README.md's Windows Install
+    # section) are actually exercised, not just assumed.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build bridgectl.exe
+        run: go build -o bridgectl.exe ./cmd/bridgectl
+
+      - name: Run bridgectl.exe --version
+        run: ./bridgectl.exe --version
+
+      - name: Run bridgectl.exe doctor
+        run: ./bridgectl.exe doctor
+
   typescript-lint:
     runs-on: ubuntu-latest
     steps:
