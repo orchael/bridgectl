@@ -185,6 +185,12 @@ func New(cfg Config) *Client {
 // An empty base path (revision persistence disabled) stays empty, matching
 // RevisionStore's own in-memory-only fallback.
 func interactionRevisionPath(base string) string {
+	return InteractionRevisionPath(base)
+}
+
+// InteractionRevisionPath is the exported form of interactionRevisionPath for
+// read-only consumers (see `bridgectl session diagnose`).
+func InteractionRevisionPath(base string) string {
 	if base == "" {
 		return ""
 	}

@@ -1,0 +1,22 @@
+Session 11111111-1111-4111-8111-111111111111 (schema v1, bridgectl v1.2.3)
+  provider                   claude
+  project                    proj
+  created                    2026-03-01T10:00:00Z
+Runtime
+  status                     running
+  active writer              yes
+  observers                  2
+Interaction
+  state                      waiting_for_approval
+  capability                 state=yes approval=yes summary=yes remote_response=yes structured_approval=yes
+  pending request            req-1 (approval)
+  pending summary            Run command: go test
+  updated                    2026-03-01T10:01:00Z
+  last report                2026-03-01T10:02:00Z
+Revisions
+  lifecycle (wire)           4
+  interaction (wire)         3
+  interaction (local)        7
+Bridge control (local status file)
+  state                      connected
+  updated                    2026-03-01T10:59:50Z

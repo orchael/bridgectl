@@ -42,6 +42,16 @@ const (
 // tolerate normal scheduling jitter.
 const StatusStaleAfter = 2 * time.Minute
 
+// StatusFileName and RevisionFileName are the state-dir-relative names under
+// which the daemon persists the control client's status and lifecycle
+// revision counters (the interaction counters live at
+// InteractionRevisionPath(<RevisionFileName path>)). Read-only consumers such
+// as `bridgectl session diagnose` use them to locate the same files.
+const (
+	StatusFileName   = "bridge-control-status.json"
+	RevisionFileName = "bridge-control-revisions.json"
+)
+
 // Status is the JSON shape persisted to disk and read back by `doctor`.
 type Status struct {
 	State          State     `json:"state"`

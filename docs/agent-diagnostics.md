@@ -4,7 +4,7 @@ bridgectl is authoritative for local agent execution and session state. This con
 
 ## CLI contract
 
-The implementation target is:
+Implemented as:
 
 ```bash
 bridgectl session diagnose <session-id>
@@ -16,14 +16,20 @@ The command MUST read the current Supervisor/session APIs rather than reconstruc
 The JSON form is the stable integration surface. Start with `schema_version: 1` and include:
 
 - session identity, provider and project ID
-- runtime status
-- interaction state and capability flags
-- lifecycle and interaction revisions
-- created/updated/last-activity timestamps when available
+- runtime status, using the Supervisor's `SessionState` values (`starting`, `running`, `attached`, `stopping`, `stopped`, `failed`) plus the exit code once the process has exited
+- interaction state (`working`, `waiting_for_input`, `waiting_for_approval`, `idle`, `unknown`) and the five interaction capability flags
+- lifecycle and interaction revisions, each labelled with its source (see Revisions below)
+- `created_at`; `interaction_updated_at` (`Interaction.UpdatedAt`, last change of state or pending identity) and `interaction_last_report_at` (`Interaction.LastActivityAt`, last authoritative report, even a repeat). Neither is a session-wide "last activity" time, and the names must not imply one
 - pending request identity/type and provider-supplied safe summary when available
 - active-writer presence, without client secrets
-- local control connection status and last successful connection time when available
+- local control connection status when available: the persisted `bridge-control-status.json` state and its `updated_at`, which is the time of the last state change rather than the last successful connection, plus whether that file is older than `bridgecontrol.StatusStaleAfter`. Report `unknown` when the status path is not configured. A "last successful connection" time is only included if the control client starts recording one
 - the bridgectl version and diagnostic schema version
+
+Free-form strings that the Supervisor or control client store (`SessionInfo.Error`, the control status `last_error`) and `RepoPath` are not in the list above. Include them only as a fixed-vocabulary code or after an explicit redaction decision, because they can carry provider stderr or filesystem paths.
+
+The JSON field names, types and enum values are part of the contract once published. They are defined in a single Go type (`internal/diagnose.Report`) with golden-file tests (`internal/diagnose/testdata/`). The user-facing field reference and an example response are in `docs/docs/reference/cli.md` under `session diagnose`.
+
+An unknown session ID is a distinct error with a non-zero exit code (for `--json`, a JSON error object with `schema_version`), not an empty snapshot. Like `bridgectl doctor`, failure exits non-zero. Error codes: `invalid_session_id`, `session_not_found`, `server_unavailable`, `internal`; the error object carries only a fixed message and never echoes server error text or caller input.
 
 Do not include PTY output, prompts, responses, chain-of-thought, environment variables, credentials, filesystem contents, OAuth material, or arbitrary provider payloads.
 
@@ -35,11 +41,20 @@ Unknown and unsupported are explicit states. Never infer interaction state from 
 
 Revisions retain their existing meanings. Consumers may use them to identify stale replicas but MUST NOT assume lifecycle and interaction revisions share one sequence.
 
+There are two interaction revisions today. `bridge.Interaction.Revision` is Supervisor-local and is not restart-durable. The wire revision that Bridge compares is allocated by `internal/bridgecontrol` (`RevisionStore`, persisted at `RevisionPath`), as is the session lifecycle revision, which the Supervisor does not hold at all. Report them as separate fields (for example `interaction_revision_local` and `interaction_revision_wire`, `lifecycle_revision_wire`), and `null` when the control client is not configured or has forgotten the session. Do not present a Supervisor-local value under a name Bridge also uses for its wire value.
+
 ## Verification
 
-Tests should construct Supervisor sessions and assert that JSON diagnostics agree with the existing public session/status APIs for starting, running, waiting for input, waiting for approval, idle, stopped and failed states where the provider supports them.
+Tests should construct Supervisor sessions and assert that JSON diagnostics agree with the existing public session/status APIs. Runtime status and interaction state are independent axes, so cover them separately: every `SessionState` (`starting`, `running`, `attached`, `stopping`, `stopped`, `failed`) and every interaction state (`working`, `waiting_for_input`, `waiting_for_approval`, `idle`, `unknown`) where the provider supports it, including a provider with no interaction capability, which must report `unknown`.
 
 Security tests must prove forbidden raw fields cannot enter serialized diagnostics.
+
+## Bridge integration notes
+
+- The model is built by pure functions over plain data (`diagnose.Build`, `diagnose.Inputs`), with no CLI or gRPC dependency beyond the `GetSessionResponse` message, so the control client can serve the same `Report` over its existing outbound connection later. This change adds no inbound port, no Bridge dependency, and no automatic upload.
+- Bridge should compare `interaction_revision_wire` / `lifecycle_revision_wire` with its replica; `interaction_revision_local` is for local debugging only.
+- `control` reads a persisted file, so it can lag reality by up to the heartbeat interval; it is not a live reachability probe.
+- Deferred: a fixed-vocabulary code for `SessionInfo.Error` / control `last_error`, and a recorded last-successful-connection time.
 
 ## Follow-up
 

@@ -177,8 +177,8 @@ func newControlClient(controlCfg config.ControlConfig, stateDir, version string,
 		Endpoint:         controlCfg.Endpoint,
 		Credential:       credential.ControlCredential,
 		BridgectlVersion: version,
-		StatusPath:       filepath.Join(stateDir, "bridge-control-status.json"),
-		RevisionPath:     filepath.Join(stateDir, "bridge-control-revisions.json"),
+		StatusPath:       filepath.Join(stateDir, bridgecontrol.StatusFileName),
+		RevisionPath:     filepath.Join(stateDir, bridgecontrol.RevisionFileName),
 		Logger:           logger,
 		SnapshotFunc: func() []bridgecontrol.SessionSnapshot {
 			if sup == nil {

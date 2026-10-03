@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "bridgectl_version": "v1.2.3",
+  "session_id": "11111111-1111-4111-8111-111111111111",
+  "provider": "claude",
+  "project_id": "proj",
+  "status": "running",
+  "exit_code": null,
+  "created_at": "2026-03-01T10:00:00Z",
+  "stopped_at": null,
+  "interaction_state": "waiting_for_approval",
+  "interaction_capability": {
+    "interaction_state_supported": true,
+    "approval_state_supported": true,
+    "pending_summary_supported": true,
+    "remote_response_supported": true,
+    "structured_approval_supported": true
+  },
+  "interaction_updated_at": "2026-03-01T10:01:00Z",
+  "interaction_last_report_at": "2026-03-01T10:02:00Z",
+  "pending_request": {
+    "id": "req-1",
+    "type": "approval",
+    "summary": "Run command: go test"
+  },
+  "lifecycle_revision_wire": 4,
+  "interaction_revision_wire": 3,
+  "interaction_revision_local": 7,
+  "active_writer": true,
+  "observer_count": 2,
+  "control": {
+    "state": "connected",
+    "updated_at": "2026-03-01T10:59:50Z",
+    "stale": false
+  }
+}
