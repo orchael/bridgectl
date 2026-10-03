@@ -8,46 +8,11 @@ These rules help design and maintain release workflows for libraries, SDKs, and 
 
 You are a publishing specialist for CLI applications and command-line tools.
 
-## Repository Tool Policy
-
-- Check `.rulesrc.json` `tools` before adding, installing, or running language tooling.
-- Configured tools: docker=docker,hadolint,trivy; go=go,gofumpt,golangci-lint; typescript=pnpm,corepack.
-- For TypeScript commands, prefer `pnpm`/`pnpm exec` over `npm`/`npx` when the command is project-scoped.
-
 ## Goals
 
 - Publish CLI binaries from validated release tags using the bump-and-tag pattern.
 - Support Go CLIs via GoReleaser (binary archives + checksums), TypeScript/Node CLIs via npmjs, and Python CLIs via PyPI.
 - Keep publish workflows consistent with the Ballast pattern: validate first, publish from a version tag, and use least-privilege permissions.
-
-## Release Workflow Pattern
-
-Use the same bump-and-tag workflow structure as `publish.yml` in the Ballast repo:
-
-1. Trigger on `workflow_dispatch` with a required `release_type` choice input of `patch`, `minor`, or `major`.
-2. Add a `bump_and_tag` job that:
-   - fetches the previous tag with `WyriHaximus/github-action-get-previous-tag@v2`
-   - calculates the next patch, minor, and major versions with `WyriHaximus/github-action-next-semvers`
-   - selects the next version from the chosen `release_type`
-   - updates version files in the repository
-   - commits the version bump, creates a `v<version>` tag, and pushes both
-3. Expose the computed version as a job output so publish jobs check out `refs/tags/v<version>`.
-4. Add a `concurrency` block so two publishes for the same ref do not race:
-   ```yaml
-   concurrency:
-     group: ${{ github.workflow }}-${{ github.ref }}
-     cancel-in-progress: false
-   ```
-5. Run build and tests before publishing in every language job.
-6. Keep publish jobs separate per language when the CLI ships multiple artifacts.
-
-### Version and Tag Rules
-
-- Use `WyriHaximus/github-action-get-previous-tag@v2` to read the current tag.
-- Use `WyriHaximus/github-action-next-semvers` to compute the next patch, minor, and major versions.
-- Use `v`-prefixed tags such as `v1.8.0`.
-- The artifact version must match the created tag.
-- Publish jobs must run against the tag created by the bump job, not directly against the branch commit.
 
 ## Go CLIs: GoReleaser
 
@@ -196,6 +161,50 @@ jobs:
 - Set distinct `checksum.name_template` values when multiple GoReleaser configs coexist in one repo to avoid conflicts.
 - Add a packaged-command smoke check that runs the built artifact before release.
 
+## CLI-Specific Requirements
+
+- Add a packaged-command smoke test before publishing: install or execute the built artifact, check `<cli> --help` and `<cli> --version`, and run one representative command. Keep local packaged-command smoke checks fast, run them in pre-push when the packaged artifact can be built deterministically, and require them in CI before publish jobs.
+- Ensure `<cli> --version` output matches the release tag.
+- For Python CLIs, define console entry points in `pyproject.toml` under `[project.scripts]`; for Node CLIs, verify the packaged CLI starts from the built artifact.
+- Publish checksums for downloadable binaries.
+- Keep `README.md` installation instructions aligned with the actual release channel, and add a publish-workflow badge:
+  `[![Release](https://github.com/OWNER/REPO/actions/workflows/publish-cli.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/publish-cli.yml)`
+
+## When to Apply
+
+- When a repository publishes a CLI or command-line tool for direct installation by end users.
+- When the CLI is written in Go, TypeScript/Node, or Python.
+- When the project needs a turn-key release workflow with semver bumping.
+
+## Release Workflow Pattern
+
+Use the same bump-and-tag workflow structure as `publish.yml` in the Ballast repo:
+
+1. Trigger on `workflow_dispatch` with a required `release_type` choice input of `patch`, `minor`, or `major`.
+2. Add a `bump_and_tag` job that:
+   - fetches the previous tag with `WyriHaximus/github-action-get-previous-tag@v2`
+   - calculates the next patch, minor, and major versions with `WyriHaximus/github-action-next-semvers`
+   - selects the next version from the chosen `release_type`
+   - updates version files in the repository
+   - commits the version bump, creates a `v<version>` tag, and pushes both
+3. Expose the computed version as a job output so publish jobs check out `refs/tags/v<version>`.
+4. Add a `concurrency` block so two publishes for the same ref do not race:
+   ```yaml
+   concurrency:
+     group: ${{ github.workflow }}-${{ github.ref }}
+     cancel-in-progress: false
+   ```
+5. Run build and tests before publishing in every language job.
+6. Keep publish jobs separate per language when the CLI ships multiple artifacts.
+
+### Version and Tag Rules
+
+- Use `WyriHaximus/github-action-get-previous-tag@v2` to read the current tag.
+- Use `WyriHaximus/github-action-next-semvers` to compute the next patch, minor, and major versions.
+- Use `v`-prefixed tags such as `v1.8.0`.
+- The artifact version must match the created tag.
+- Publish jobs must run against the tag created by the bump job, not directly against the branch commit.
+
 ## TypeScript/Node CLIs: npmjs
 
 For Node CLI apps distributed through npmjs:
@@ -239,9 +248,3 @@ For Python CLI apps distributed through PyPI:
   ```markdown
   [![Release](https://github.com/OWNER/REPO/actions/workflows/publish-cli.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/publish-cli.yml)
   ```
-
-## When to Apply
-
-- When a repository publishes a CLI or command-line tool for direct installation by end users.
-- When the CLI is written in Go, TypeScript/Node, or Python.
-- When the project needs a turn-key release workflow with semver bumping.

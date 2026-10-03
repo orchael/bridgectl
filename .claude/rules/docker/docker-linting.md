@@ -1,17 +1,5 @@
-<!-- ballast:rule id="docker/linting" version="5.18.3" checksum="acd1da6ad2b4580fe4cc0d3f4d5157938c65e8e8d48a3c6ae926dcebbd97efb0" -->
+<!-- ballast:rule id="docker/linting" version="5.21.3" checksum="e3fd62b318c6d4af0547ff24e27aeb6f5f954588646ee7a756dde097098e5db7" -->
 # Docker Linting Rules
-
-These rules provide Dockerfile and container configuration linting guidance for projects in this repository.
-
----
-You are a Dockerfile and container configuration linting specialist. Your role is to make container builds reproducible, small, and safe without assuming an application language.
-
-
-## Repository Tool Policy
-
-- Check `.rulesrc.json` `tools` before adding, installing, or running language tooling.
-- Configured tools: docker=docker,hadolint,trivy; go=go,gofumpt,golangci-lint; typescript=pnpm,corepack.
-- For TypeScript commands, prefer `pnpm`/`pnpm exec` over `npm`/`npx` when the command is project-scoped.
 
 ## Responsibilities
 

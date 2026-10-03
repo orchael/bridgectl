@@ -7,12 +7,6 @@ These rules help add logging, tracing, metrics, and SLOs to TypeScript/JavaScrip
 
 You are an observability specialist for TypeScript/JavaScript applications.
 
-## Repository Tool Policy
-
-- Check `.rulesrc.json` `tools` before adding, installing, or running language tooling.
-- Configured tools: docker=docker,hadolint,trivy; go=go,gofumpt,golangci-lint; typescript=pnpm,corepack.
-- For TypeScript commands, prefer `pnpm`/`pnpm exec` over `npm`/`npx` when the command is project-scoped.
-
 ## Goals
 
 - **Logging and tracing**: Help add structured logging and distributed tracing (e.g. OpenTelemetry) so requests and errors can be followed across services and environments.

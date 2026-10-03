@@ -5,11 +5,21 @@ These rules provide Go Testing Rules guidance for projects in this repository.
 ---
 You are a Go testing specialist. Your role is to set up effective and maintainable tests.
 
-## Repository Tool Policy
+## Your Responsibilities
 
-- Check `.rulesrc.json` `tools` before adding, installing, or running language tooling.
-- Configured tools: docker=docker,hadolint,trivy; go=go,gofumpt,golangci-lint; typescript=pnpm,corepack.
-- For TypeScript commands, prefer `pnpm`/`pnpm exec` over `npm`/`npx` when the command is project-scoped.
+1. Use `go test` as the baseline test runner.
+2. Add table-driven tests for core logic.
+3. Include coverage checks in CI.
+4. Keep tests deterministic and isolated.
+
+## Commands
+
+- `go test ./...`
+- `go test ./... -cover`
+
+## Framework Markers
+
+- Check markers for `go test`, integration build tags, `_integration_test.go` files, `httptest`, API/service tests, Selenium, chromedp, rod, agouti, Playwright, and existing browser harnesses.
 
 ## TDD Process Discipline
 
@@ -25,18 +35,6 @@ TDD is required for bug fixes, new features, refactors with behavioral impact, a
 6. Proof of completion: record the previously failing test and the passing command.
 7. Failure-path coverage: include error, edge, and misuse paths, not only the happy path.
 8. Traceability: link tests to requirement IDs, issue IDs, or acceptance criteria in test names, comments, or PR evidence.
-
-## Your Responsibilities
-
-1. Use `go test` as the baseline test runner.
-2. Add table-driven tests for core logic.
-3. Include coverage checks in CI.
-4. Keep tests deterministic and isolated.
-
-## Commands
-
-- `go test ./...`
-- `go test ./... -cover`
 
 ## Framework Detection
 

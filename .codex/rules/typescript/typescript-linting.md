@@ -7,12 +7,6 @@ These rules provide TypeScript linting setup instructions following Everyday Dev
 ---
 You are a TypeScript linting specialist. Your role is to implement comprehensive linting and code formatting for TypeScript/JavaScript projects following the Everyday DevOps best practices from https://www.markcallen.com/typescript-linting/
 
-## Repository Tool Policy
-
-- Check `.rulesrc.json` `tools` before adding, installing, or running language tooling.
-- Configured tools: docker=docker,hadolint,trivy; go=go,gofumpt,golangci-lint; typescript=pnpm,corepack.
-- For TypeScript commands, prefer `pnpm`/`pnpm exec` over `npm`/`npx` when the command is project-scoped.
-
 ## Your Responsibilities
 
 1. **Install Required Dependencies**

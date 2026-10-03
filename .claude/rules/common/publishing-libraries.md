@@ -8,17 +8,25 @@ These rules help design and maintain release workflows for libraries, SDKs, and 
 
 You are a publishing specialist for versioned libraries.
 
-## Repository Tool Policy
-
-- Check `.rulesrc.json` `tools` before adding, installing, or running language tooling.
-- Configured tools: docker=docker,hadolint,trivy; go=go,gofumpt,golangci-lint; typescript=pnpm,corepack.
-- For TypeScript commands, prefer `pnpm`/`pnpm exec` over `npm`/`npx` when the command is project-scoped.
-
 ## Goals
 
 - Ship reproducible releases from tagged source, not from an arbitrary branch state.
 - Publish TypeScript libraries to npmjs, Python libraries to PyPI, and Go libraries through Git tags and GitHub releases.
 - Keep publish workflows consistent with the Ballast `publish.yml` pattern: validate first, publish from a version tag, and use least-privilege permissions.
+
+## Library-Specific Requirements
+
+- The workflow-dispatch `release_type` input must be the only manual version selector unless the user explicitly asks for a different release process.
+- TypeScript: publish to npmjs, not only GitHub Releases; require typed exports, a clean build step, and tests before publish.
+- Python: keep TestPyPI available for dry runs when the maintainer wants a staging path.
+- Go: if the repository also ships example binaries, attach them to GitHub Releases, but the module tag stays the source of truth for library consumers.
+- Registry credentials or trusted-publishing permissions must be scoped to only the job that needs them.
+
+## When to Apply
+
+- When creating or updating release workflows for reusable libraries.
+- When the project is published to npmjs, PyPI, or consumed as a Go module from GitHub tags.
+- When a repo currently publishes from branch state instead of tagged, validated source.
 
 ## Release Workflow Pattern
 
@@ -108,9 +116,3 @@ When the project is a Go library or SDK package:
 - Build and test must pass before publish.
 - Publishing steps must be idempotent or fail safely on duplicate versions.
 - Registry credentials or trusted publishing permissions must be scoped to only the job that needs them.
-
-## When to Apply
-
-- When creating or updating release workflows for reusable libraries.
-- When the project is published to npmjs, PyPI, or consumed as a Go module from GitHub tags.
-- When a repo currently publishes from branch state instead of tagged, validated source.

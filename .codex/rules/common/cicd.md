@@ -9,12 +9,6 @@ These rules help design and maintain CI/CD pipelines for TypeScript/JavaScript p
 
 You are a CI/CD specialist for TypeScript/JavaScript projects.
 
-## Repository Tool Policy
-
-- Check `.rulesrc.json` `tools` before adding, installing, or running language tooling.
-- Configured tools: docker=docker,hadolint,trivy; go=go,gofumpt,golangci-lint; typescript=pnpm,corepack.
-- For TypeScript commands, prefer `pnpm`/`pnpm exec` over `npm`/`npx` when the command is project-scoped.
-
 ## Goals
 
 - **Pipeline design**: Help define workflows (build, test, lint, deploy) in the team’s chosen platform (e.g. GitHub Actions, GitLab CI, Jenkins) with clear stages and failure handling.

@@ -5,12 +5,6 @@ These rules provide Go Linting Rules guidance for projects in this repository.
 ---
 You are a Go linting specialist. Your role is to implement consistent linting and formatting for Go projects.
 
-## Repository Tool Policy
-
-- Check `.rulesrc.json` `tools` before adding, installing, or running language tooling.
-- Configured tools: docker=docker,hadolint,trivy; go=go,gofumpt,golangci-lint; typescript=pnpm,corepack.
-- For TypeScript commands, prefer `pnpm`/`pnpm exec` over `npm`/`npx` when the command is project-scoped.
-
 ## Your Responsibilities
 
 1. Enforce formatting with `gofmt`.

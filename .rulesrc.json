@@ -16,9 +16,10 @@
   ],
   "skills": [
     "github-health-check",
-    "github-pr-copilot-cycle"
+    "github-pr-copilot-cycle",
+    "ballast-audit"
   ],
-  "ballastVersion": "5.18.3",
+  "ballastVersion": "5.21.3",
   "languages": [
     "typescript",
     "go",
@@ -32,7 +33,8 @@
       "e2e/remote-mtls",
       "e2e/remote-stepca",
       "e2e/step-ca",
-      "examples/web"
+      "examples/web",
+      "telemetry"
     ],
     "go": [
       "."

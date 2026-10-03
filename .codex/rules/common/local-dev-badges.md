@@ -9,12 +9,6 @@ Add standard badges (CI, Release, License, GitHub Release; plus npm for publishe
 
 When setting up or improving project documentation, add standard badges near the top of `README.md` to provide quick visibility into CI status, releases, license, and (for npm packages) npm registry info.
 
-## Repository Tool Policy
-
-- Check `.rulesrc.json` `tools` before adding, installing, or running language tooling.
-- Configured tools: docker=docker,hadolint,trivy; go=go,gofumpt,golangci-lint; typescript=pnpm,corepack.
-- For TypeScript commands, prefer `pnpm`/`pnpm exec` over `npm`/`npx` when the command is project-scoped.
-
 ## Your Responsibilities
 
 1. **Add badges at the top of README.md**
@@ -33,6 +27,21 @@ When setting up or improving project documentation, add standard badges near the
    - If the project has a `package.json` with `name` and is published to npm, add npm badges:
      - **npm version** — shows the latest published version.
      - **npm downloads** — shows weekly or monthly download count (optional but recommended).
+
+## Implementation Order
+
+1. Determine the GitHub `OWNER/REPO` (from git remote, package.json repository field, or user input).
+2. List workflows in `.github/workflows/` to identify CI and release workflow filenames.
+3. Check `package.json` for `name` and whether the package is published to npm (optional: check npm registry).
+4. Add badges at the top of `README.md`, after the title and before the first `##` heading.
+5. Use the correct workflow filenames; do not assume `ci.yml` or `release.yml` if different names exist.
+
+## When to Apply
+
+- When creating a new project with a README.
+- When a README lacks badges at the top.
+- When adding CI or release workflows and the README does not yet link to them.
+- When publishing an npm package and the README does not show npm badges.
 
 ## Badge Markdown Examples
 
@@ -79,18 +88,3 @@ If the workflow is named `publish.yml` instead of `release.yml`, use:
 
 Project description...
 ```
-
-## Implementation Order
-
-1. Determine the GitHub `OWNER/REPO` (from git remote, package.json repository field, or user input).
-2. List workflows in `.github/workflows/` to identify CI and release workflow filenames.
-3. Check `package.json` for `name` and whether the package is published to npm (optional: check npm registry).
-4. Add badges at the top of `README.md`, after the title and before the first `##` heading.
-5. Use the correct workflow filenames; do not assume `ci.yml` or `release.yml` if different names exist.
-
-## When to Apply
-
-- When creating a new project with a README.
-- When a README lacks badges at the top.
-- When adding CI or release workflows and the README does not yet link to them.
-- When publishing an npm package and the README does not show npm badges.

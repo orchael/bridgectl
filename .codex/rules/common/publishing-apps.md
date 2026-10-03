@@ -10,61 +10,11 @@ These rules help design and maintain release workflows for libraries, SDKs, and 
 
 You are a publishing specialist for installable apps and CLIs.
 
-## Repository Tool Policy
-
-- Check `.rulesrc.json` `tools` before adding, installing, or running language tooling.
-- Configured tools: docker=docker,hadolint,trivy; go=go,gofumpt,golangci-lint; typescript=pnpm,corepack.
-- For TypeScript commands, prefer `pnpm`/`pnpm exec` over `npm`/`npx` when the command is project-scoped.
-
 ## Goals
 
 - Publish installable applications from validated release tags.
 - Use the Ballast `publish.yml` workflow pattern: version input or tag trigger, build verification, then publish.
 - Publish TypeScript apps to npmjs when they are distributed as Node packages, Python apps to PyPI when they are installed as Python packages, and Go apps to GitHub Releases.
-
-## Release Workflow Pattern
-
-Use a release workflow structure similar to Ballast `publish.yml`:
-
-1. Trigger on `workflow_dispatch` with a required `release_type` choice input of `patch`, `minor`, or `major`, and on `push.tags`.
-2. Add a `bump_and_tag` job that:
-   - fetches the previous tag with `WyriHaximus/github-action-get-previous-tag@v2`
-   - calculates the next patch, minor, and major versions with `WyriHaximus/github-action-next-semvers`
-   - selects the next version from the chosen `release_type`
-   - updates app version files
-   - commits the version bump
-   - creates and pushes `v<version>`
-3. Expose the computed version as a job output and have publish jobs check out `refs/tags/v<version>`.
-4. Check out the release tag, not the branch head.
-5. Run build verification before publish.
-6. Publish per language or distribution target in separate jobs.
-7. Use only the permissions required by each job.
-
-### Version and Tag Rules
-
-- Use semantic versioning for the app release version.
-- Use `WyriHaximus/github-action-get-previous-tag@v2` to read the current release tag.
-- Use `WyriHaximus/github-action-next-semvers` to compute the next patch, minor, and major versions.
-- Use `v`-prefixed tags such as `v1.8.0`.
-- The built artifact version must match the created tag.
-- The publish jobs must run against the tag created by the bump job, not directly against the branch commit.
-
-## TypeScript Apps: npmjs
-
-For TypeScript or Node CLI apps distributed through npmjs:
-
-- Ensure `package.json` has:
-  - `bin` entries for executables
-  - `files` or package contents narrowed to runtime assets
-  - `engines` if runtime support matters
-- Release job guidance:
-  - `actions/setup-node`
-  - install with lockfile
-  - build the app
-  - run tests
-  - publish with `npm publish --access public --provenance`
-- Prefer npm trusted publishing with `id-token: write`.
-- Verify the packaged CLI starts successfully from the built artifact before publishing.
 
 ## App Deployment Model
 
@@ -128,6 +78,64 @@ For a web app release workflow, generate:
 - Do not hide deployment state changes inside a shell script with no visible diff or audit trail.
 - Do not assume Kubernetes-specific Helm or ArgoCD ownership when `deploymentModel` is not `kubernetes`.
 
+## App-Specific Requirements
+
+- Smoke-test the installed app or CLI from the built artifact before publish, and ensure its version output matches the release tag.
+- Publish checksums for downloadable binaries when the app ships archives.
+- Keep `README.md` installation instructions aligned with the actual release channel.
+- The workflow-dispatch `release_type` input decides whether the next app tag is patch, minor, or major.
+
+## When to Apply
+
+- When a repository publishes a CLI, desktop helper, or installable service package.
+- When the release artifact is intended for direct installation by end users.
+- When a project needs app-focused packaging guidance instead of library-only rules.
+- When a web app is released as a container image and deployed through a separate Helm chart repository.
+
+## Release Workflow Pattern
+
+Use a release workflow structure similar to Ballast `publish.yml`:
+
+1. Trigger on `workflow_dispatch` with a required `release_type` choice input of `patch`, `minor`, or `major`, and on `push.tags`.
+2. Add a `bump_and_tag` job that:
+   - fetches the previous tag with `WyriHaximus/github-action-get-previous-tag@v2`
+   - calculates the next patch, minor, and major versions with `WyriHaximus/github-action-next-semvers`
+   - selects the next version from the chosen `release_type`
+   - updates app version files
+   - commits the version bump
+   - creates and pushes `v<version>`
+3. Expose the computed version as a job output and have publish jobs check out `refs/tags/v<version>`.
+4. Check out the release tag, not the branch head.
+5. Run build verification before publish.
+6. Publish per language or distribution target in separate jobs.
+7. Use only the permissions required by each job.
+
+### Version and Tag Rules
+
+- Use semantic versioning for the app release version.
+- Use `WyriHaximus/github-action-get-previous-tag@v2` to read the current release tag.
+- Use `WyriHaximus/github-action-next-semvers` to compute the next patch, minor, and major versions.
+- Use `v`-prefixed tags such as `v1.8.0`.
+- The built artifact version must match the created tag.
+- The publish jobs must run against the tag created by the bump job, not directly against the branch commit.
+
+## TypeScript Apps: npmjs
+
+For TypeScript or Node CLI apps distributed through npmjs:
+
+- Ensure `package.json` has:
+  - `bin` entries for executables
+  - `files` or package contents narrowed to runtime assets
+  - `engines` if runtime support matters
+- Release job guidance:
+  - `actions/setup-node`
+  - install with lockfile
+  - build the app
+  - run tests
+  - publish with `npm publish --access public --provenance`
+- Prefer npm trusted publishing with `id-token: write`.
+- Verify the packaged CLI starts successfully from the built artifact before publishing.
+
 ## Python Apps: PyPI
 
 For Python apps or CLIs distributed through PyPI:
@@ -166,13 +174,6 @@ For Go apps and CLIs:
 - Ensure version output from the binary or CLI matches the release tag.
 - For web apps, keep the published container image and Helm chart update linked by version or digest in release notes or workflow outputs.
 - The workflow-dispatch `release_type` input should decide whether the next app tag is patch, minor, or major.
-
-## When to Apply
-
-- When a repository publishes a CLI, desktop helper, or installable service package.
-- When the release artifact is intended for direct installation by end users.
-- When a project needs app-focused packaging guidance instead of library-only rules.
-- When a web app is released as a container image and deployed through a separate Helm chart repository.
 
 ## Web Apps: Docker Image + Separate Helm Chart Repo
 

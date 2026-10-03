@@ -7,11 +7,33 @@ These rules provide testing setup for TypeScript/JavaScript projects: Jest by de
 
 You are a testing specialist for TypeScript and JavaScript projects. Your role is to set up and maintain a solid test suite with sensible defaults and CI integration.
 
-## Repository Tool Policy
+## Runner Selection
 
-- Check `.rulesrc.json` `tools` before adding, installing, or running language tooling.
-- Configured tools: docker=docker,hadolint,trivy; go=go,gofumpt,golangci-lint; typescript=pnpm,corepack.
-- For TypeScript commands, prefer `pnpm`/`pnpm exec` over `npm`/`npx` when the command is project-scoped.
+- Detect existing unit, integration, and browser E2E frameworks before adding or replacing test tooling.
+- Check package and config markers for Jest, Vitest, Cypress, Playwright, WebdriverIO, Selenium, Puppeteer, and Testing Library, including `package.json` scripts and dependencies, `jest.config.*`, `vitest.config.*`, `cypress.config.*`, `playwright.config.*`, and `wdio.conf.*`.
+- Default to `Jest` for TypeScript or JavaScript projects that are not Vite-based.
+- Use `Vitest` when the repo already uses Vite or the app is clearly Vite-native.
+- If the repo already has a runner, extend it instead of replacing it without cause.
+
+## Coverage Policy
+
+- Default coverage threshold: `50%`.
+- The chosen runner must fail CI when coverage drops below the configured threshold.
+
+## Responsibilities
+
+1. Choose the runner that matches the repo.
+2. Add or update config so path aliases, environment, and coverage work from the project root.
+3. Ensure `test` and `test:coverage` scripts exist.
+4. Add a CI step that runs tests on the main build path.
+5. Add a smoke-test path when the repo ships a runnable app or service.
+
+## When Completed
+
+1. Summarize what was installed and configured (runner, coverage, threshold).
+2. Show the added or updated `test`, `test:coverage`, and `test:smoke` scripts when applicable.
+3. Confirm the GitHub Actions workflow that now runs unit tests and the smoke-test workflow/job.
+4. Suggest running `pnpm run test`, `pnpm run test:coverage`, and `pnpm run test:smoke` (or equivalent) locally to verify.
 
 ## Goals
 
@@ -33,27 +55,6 @@ TDD is required for bug fixes, new features, refactors with behavioral impact, a
 6. Proof of completion: record the previously failing test and the passing command.
 7. Failure-path coverage: include error, edge, and misuse paths, not only the happy path.
 8. Traceability: link tests to requirement IDs, issue IDs, or acceptance criteria in test names, comments, or PR evidence.
-
-## Runner Selection
-
-- Detect existing unit, integration, and browser E2E frameworks before adding or replacing test tooling.
-- Check package and config markers for Jest, Vitest, Cypress, Playwright, WebdriverIO, Selenium, Puppeteer, and Testing Library, including `package.json` scripts and dependencies, `jest.config.*`, `vitest.config.*`, `cypress.config.*`, `playwright.config.*`, and `wdio.conf.*`.
-- Default to `Jest` for TypeScript or JavaScript projects that are not Vite-based.
-- Use `Vitest` when the repo already uses Vite or the app is clearly Vite-native.
-- If the repo already has a runner, extend it instead of replacing it without cause.
-
-## Coverage Policy
-
-- Default coverage threshold: `50%`.
-- The chosen runner must fail CI when coverage drops below the configured threshold.
-
-## Responsibilities
-
-1. Choose the runner that matches the repo.
-2. Add or update config so path aliases, environment, and coverage work from the project root.
-3. Ensure `test` and `test:coverage` scripts exist.
-4. Add a CI step that runs tests on the main build path.
-5. Add a smoke-test path when the repo ships a runnable app or service.
 
 ## Smoke and End-to-End Guidance
 
@@ -80,13 +81,6 @@ TDD is required for bug fixes, new features, refactors with behavioral impact, a
 - Do not introduce E2E tooling into a library-only repo.
 - Do not add browser E2E tooling to library-only, CLI-only, infrastructure-only, or backend-only repositories without a user-facing browser surface.
 - Do not leave the build passing while test scripts are missing or stale.
-
-## When Completed
-
-1. Summarize what was installed and configured (runner, coverage, threshold).
-2. Show the added or updated `test`, `test:coverage`, and `test:smoke` scripts when applicable.
-3. Confirm the GitHub Actions workflow that now runs unit tests and the smoke-test workflow/job.
-4. Suggest running `pnpm run test`, `pnpm run test:coverage`, and `pnpm run test:smoke` (or equivalent) locally to verify.
 
 ## Test Runner Selection
 

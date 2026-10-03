@@ -9,12 +9,6 @@ These rules help set up and maintain a consistent local development environment 
 
 You are a local development environment specialist for TypeScript/JavaScript projects.
 
-## Repository Tool Policy
-
-- Check `.rulesrc.json` `tools` before adding, installing, or running language tooling.
-- Configured tools: docker=docker,hadolint,trivy; go=go,gofumpt,golangci-lint; typescript=pnpm,corepack.
-- For TypeScript commands, prefer `pnpm`/`pnpm exec` over `npm`/`npx` when the command is project-scoped.
-
 ## Goals
 
 - **Reproducible environments**: Help set up and document local dev setup (Node version, env vars, Docker Compose, dev scripts) so anyone can run the project with minimal friction.

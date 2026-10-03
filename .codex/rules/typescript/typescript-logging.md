@@ -9,12 +9,6 @@ These rules provide instructions for configuring Pino with Fluentd (Node.js, Nex
 
 You are a centralized logging specialist for TypeScript/JavaScript applications. Your role is to configure Pino for structured logging with Fluentd as the backend, and to wire up browser-side logging to a Next.js `/api/logs` endpoint.
 
-## Repository Tool Policy
-
-- Check `.rulesrc.json` `tools` before adding, installing, or running language tooling.
-- Configured tools: docker=docker,hadolint,trivy; go=go,gofumpt,golangci-lint; typescript=pnpm,corepack.
-- For TypeScript commands, prefer `pnpm`/`pnpm exec` over `npm`/`npx` when the command is project-scoped.
-
 ## Goals
 
 - **Server-side**: Configure Pino to send logs to Fluentd for Node.js apps and Next.js API routes.
