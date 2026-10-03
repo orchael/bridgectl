@@ -206,11 +206,19 @@ func accessSectionLines() []string {
 	configPath := defaultServerConfigPath(localserver.StateDir())
 	var configured []string
 	if configPath != "" {
-		if fileCfg, err := config.Load(configPath); err == nil {
-			configured = fileCfg.AllowedPaths
+		fileCfg, err := config.Load(configPath)
+		if err != nil {
+			// A discovered-but-unloadable config is a real problem: the
+			// daemon would hit the same error on startup, so doctor must
+			// not silently fall through and report success.
+			return []string{fmt.Sprintf("  allowed paths ! could not load %s: %v", configPath, err)}
 		}
+		configured = fileCfg.AllowedPaths
 	}
-	effective := localserver.EffectiveAllowedPaths(configured)
+	effective, err := localserver.EffectiveAllowedPaths(configured)
+	if err != nil {
+		return []string{fmt.Sprintf("  allowed paths ! %v", err)}
+	}
 	return []string{fmt.Sprintf("  allowed paths ✓ %s", strings.Join(effective, ", "))}
 }
 

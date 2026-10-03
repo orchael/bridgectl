@@ -704,11 +704,15 @@ func Start(cfg Config) (*Server, error) {
 	}
 
 	// Policy
+	effectiveAllowedPaths, allowedPathsErr := EffectiveAllowedPaths(cfg.AllowedPaths)
+	if allowedPathsErr != nil {
+		return nil, fmt.Errorf("determine session allowed paths: %w", allowedPathsErr)
+	}
 	policy := bridge.Policy{
 		MaxPerProject: 10,
 		MaxGlobal:     20,
 		MaxInputBytes: 65536,
-		AllowedPaths:  EffectiveAllowedPaths(cfg.AllowedPaths),
+		AllowedPaths:  effectiveAllowedPaths,
 	}
 
 	// Supervisor options: persistence store when DBPath is set.
@@ -1189,13 +1193,24 @@ func BuildServerSANs(listenAddr string, extra []string) []string {
 // path on the filesystem (see its own "no patterns configured" fast path),
 // which is the opposite of what a safe default should be for a tool that
 // hands an AI agent a working directory to operate in.
-func EffectiveAllowedPaths(configured []string) []string {
-	paths := make([]string, 0, len(configured)+1)
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		paths = append(paths, home)
+//
+// It errors rather than silently falling back to an unrestricted policy if
+// $HOME cannot be resolved: a caller that ignored the error and used only
+// `configured` would, with no configured paths either, pass an empty slice
+// to bridge.Policy and end up installing exactly the unrestricted policy
+// this function exists to prevent. Callers must fail startup on error.
+func EffectiveAllowedPaths(configured []string) ([]string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolve $HOME for the default session allow-list: %w", err)
 	}
+	if home == "" {
+		return nil, errors.New("resolve $HOME for the default session allow-list: empty result")
+	}
+	paths := make([]string, 0, len(configured)+1)
+	paths = append(paths, home)
 	paths = append(paths, configured...)
-	return paths
+	return paths, nil
 }
 
 func localDialAddr(addr string) string {

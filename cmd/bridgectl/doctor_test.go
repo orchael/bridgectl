@@ -314,3 +314,23 @@ func TestAccessSectionLinesIsAdditiveWithConfig(t *testing.T) {
 		t.Fatalf("expected both $HOME %q and /srv/repos in the allowed-paths line, got %v", home, lines)
 	}
 }
+
+// TestAccessSectionLinesReportsMalformedConfig covers the Copilot review
+// finding on PR #279: a discovered-but-unloadable bridge.yaml must surface
+// as a "!" finding (and, via doctor's exit-code handling, a non-zero exit),
+// not be silently swallowed into a false "allowed paths ✓ ..." success line.
+func TestAccessSectionLinesReportsMalformedConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stateDir := t.TempDir()
+	t.Setenv("BRIDGECTL_STATE_DIR", stateDir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	configPath := filepath.Join(stateDir, "bridge.yaml")
+	if err := os.WriteFile(configPath, []byte("not: valid: yaml: at: all:\n  - ][\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	lines := accessSectionLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "!") {
+		t.Fatalf("expected a \"!\" finding for the malformed config, got %v", lines)
+	}
+}

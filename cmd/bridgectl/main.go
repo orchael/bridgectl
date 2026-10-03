@@ -68,6 +68,14 @@ Running bridgectl with no subcommand is shorthand for
 
 	root.AddGroup(&cobra.Group{ID: providerShortcutGroupID, Title: "Provider shortcuts:"})
 	for _, providerID := range providerShortcutIDs() {
+		if commandNameReserved(root, providerID) {
+			// A provider named e.g. "doctor" or "help" would otherwise
+			// create a duplicate/conflicting top-level command. Skip the
+			// shortcut; the provider is still reachable via
+			// `session start --provider <name>`. Flagged by Copilot
+			// review on PR #279.
+			continue
+		}
 		shortcut := newProviderShortcutCmd(providerID)
 		shortcut.GroupID = providerShortcutGroupID
 		root.AddCommand(shortcut)
@@ -83,6 +91,28 @@ Running bridgectl with no subcommand is shorthand for
 		}
 		os.Exit(1)
 	}
+}
+
+// commandNameReserved reports whether name collides with a command or
+// alias already registered on root, or with one of Cobra's own
+// auto-registered commands ("help", "completion") that are not yet present
+// in root.Commands() at the point providerShortcutIDs is consulted (Cobra
+// adds them lazily during Execute).
+func commandNameReserved(root *cobra.Command, name string) bool {
+	if name == "help" || name == "completion" {
+		return true
+	}
+	for _, c := range root.Commands() {
+		if c.Name() == name {
+			return true
+		}
+		for _, alias := range c.Aliases {
+			if alias == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // providerShortcutIDs returns the provider names that get a top-level

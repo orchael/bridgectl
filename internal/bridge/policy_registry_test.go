@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"regexp"
 	"testing"
@@ -74,5 +75,32 @@ func TestPolicyValidationAndRegistryHealth(t *testing.T) {
 	results := registry.HealthAll(context.Background())
 	if results["healthy"] != nil || results["broken"] == nil {
 		t.Fatalf("HealthAll=%v", results)
+	}
+}
+
+// TestValidateRepoPathRejectsSamePrefixSibling guards against a path-boundary
+// bug: an allowed directory like "/home/mark" must not also permit the
+// sibling "/home/mark-other", which it would under a bare string-prefix
+// check since "/home/mark-other" literally starts with "/home/mark".
+// Flagged by Copilot review on PR #279.
+func TestValidateRepoPathRejectsSamePrefixSibling(t *testing.T) {
+	base := t.TempDir()
+	allowed := base + "/mark"
+	sibling := base + "/mark-other"
+	for _, dir := range []string{allowed, sibling} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	policy := Policy{AllowedPaths: []string{allowed}}
+	if err := policy.ValidateRepoPath(allowed); err != nil {
+		t.Fatalf("ValidateRepoPath(allowed): %v", err)
+	}
+	if err := policy.ValidateRepoPath(allowed + "/subdir"); err != nil {
+		t.Fatalf("ValidateRepoPath(allowed subdir): %v", err)
+	}
+	if err := policy.ValidateRepoPath(sibling); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("ValidateRepoPath(sibling) error=%v want %v", err, ErrInvalidArgument)
 	}
 }
