@@ -5,6 +5,12 @@
 
 services:
   server:
+    # image is set explicitly (in addition to build) so a caller can pin the
+    # server to an already-pulled, immutable artifact (e.g. a published
+    # release digest) via BRIDGECTL_SERVER_IMAGE and skip the build step —
+    # see `make test-remote-mtls-published`. Local `make test-remote-mtls`
+    # always passes --build, so this tag is just a stable local name there.
+    image: ${BRIDGECTL_SERVER_IMAGE:-bridgectl-e2e-remote-mtls-server:dev}
     build:
       context: ../..
       dockerfile: Dockerfile

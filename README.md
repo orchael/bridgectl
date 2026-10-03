@@ -404,7 +404,7 @@ bridgectl server uninstall-agent
 
 Unsigned local builds remain available via `make build-cli` — see [Build and install](#2-build-and-install).
 
-**Windows** is not yet supported natively (tracked in [#259](https://github.com/orchael/bridgectl/issues/259)). Use Docker Desktop with `ghcr.io/orchael/bridgectl`, or WSL2 with the Ubuntu package below.
+**Windows** binaries are published starting with this release (see [Windows Install](#windows-install) below), but the interactive session/PTY path is not yet functional there — see that section for what works today and [#259](https://github.com/orchael/bridgectl/issues/259) for the rest.
 
 ### Ubuntu Package Install
 
@@ -468,6 +468,31 @@ sudo systemctl enable --now bridgectl
 ```
 
 The packaged service installs a minimal config at `/etc/bridgectl/bridge.yaml` and listens on `127.0.0.1:9445` by default. It does not bundle provider CLIs or API keys. For production use you must install the provider CLIs separately, add provider configuration, and decide how the service account should access the target repositories.
+
+### Windows Install
+
+1. Download `bridgectl_<version>_windows_amd64.zip` from [GitHub Releases](https://github.com/orchael/bridgectl/releases).
+2. Extract it and put `bridgectl.exe` on your `PATH`.
+3. Install Node.js 24, which the provider CLIs run through:
+
+   ```powershell
+   winget install OpenJS.NodeJS --version 24
+   ```
+
+4. Verify the install:
+
+   ```powershell
+   bridgectl.exe --version
+   ```
+
+**What works today:** the Windows build cross-compiles and ships a release artifact. CI runs `bridgectl.exe --version` and `bridgectl.exe doctor` natively on a Windows runner on every change, so the client-only and diagnostic commands are verified to actually run, not just compile.
+
+**What does not work yet:** the interactive session path (`bridgectl.exe session start`, `bridgectl.exe run`) depends on a pseudo-terminal, and this build has no real PTY support on Windows (the underlying `creack/pty` dependency compiles but returns an "unsupported" error for every call on this platform) — it fails with a clear error rather than hanging or behaving unpredictably. Real interactive support needs ConPTY integration, tracked in [#259](https://github.com/orchael/bridgectl/issues/259).
+
+Until interactive sessions work natively, use one of:
+
+- **Docker Desktop**: `docker run ... ghcr.io/orchael/bridgectl:latest` (see [Docker](#docker) above).
+- **WSL2 + apt**: run the [Ubuntu Package Install](#ubuntu-package-install) steps inside a WSL2 distro.
 
 ---
 

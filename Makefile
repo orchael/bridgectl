@@ -294,6 +294,38 @@ test-remote-mtls:
 	docker compose -f e2e/remote-mtls/docker-compose.yml down -v; \
 	exit $$rc
 
+.PHONY: test-remote-mtls-published
+test-remote-mtls-published:
+	@if [ -z "$$BRIDGECTL_SERVER_IMAGE" ]; then \
+		echo "BRIDGECTL_SERVER_IMAGE must be set to the published image reference (e.g. ghcr.io/orchael/bridgectl@sha256:...)" >&2; \
+		exit 1; \
+	fi; \
+	set +e; \
+	CF=e2e/remote-mtls/docker-compose.yml; \
+	OUT_DIR="$${RESULTS_OUT_DIR:-dist/e2e-results/remote-mtls}"; \
+	mkdir -p "$$OUT_DIR"; \
+	docker pull "$$BRIDGECTL_SERVER_IMAGE" || exit 1; \
+	docker compose -f $$CF up --abort-on-container-exit --exit-code-from remote-client; \
+	rc=$$?; \
+	echo "digest=$$BRIDGECTL_SERVER_IMAGE" > "$$OUT_DIR/image.txt"; \
+	docker compose -f $$CF logs --no-color > "$$OUT_DIR/compose.log" 2>&1; \
+	docker compose -f $$CF cp remote-client:/results/. "$$OUT_DIR" 2>/dev/null; \
+	cp_rc=$$?; \
+	if [ $$rc -eq 0 ] && { [ $$cp_rc -ne 0 ] || [ ! -f "$$OUT_DIR/remote-mtls-e2e.xml" ]; }; then \
+		echo "ERROR: tests reported success but JUnit results were not extracted to $$OUT_DIR" >&2; \
+		rc=1; \
+	fi; \
+	echo ""; \
+	echo "========================================"; \
+	if [ $$rc -eq 0 ]; then \
+		echo "  test-remote-mtls-published: PASSED (image=$$BRIDGECTL_SERVER_IMAGE)"; \
+	else \
+		echo "  test-remote-mtls-published: FAILED (exit $$rc, image=$$BRIDGECTL_SERVER_IMAGE)"; \
+	fi; \
+	echo "========================================"; \
+	docker compose -f $$CF down -v; \
+	exit $$rc
+
 .PHONY: test-remote-stepca
 test-remote-stepca:
 	@set +e; \
@@ -318,6 +350,50 @@ test-remote-stepca:
 		echo "  test-remote-stepca: PASSED"; \
 	else \
 		echo "  test-remote-stepca: FAILED (exit $$rc)"; \
+	fi; \
+	echo "========================================"; \
+	docker compose -f $$CF down -v; \
+	exit $$rc
+
+.PHONY: test-remote-stepca-published
+test-remote-stepca-published:
+	@if [ -z "$$BRIDGECTL_SERVER_IMAGE" ]; then \
+		echo "BRIDGECTL_SERVER_IMAGE must be set to the published image reference (e.g. ghcr.io/orchael/bridgectl@sha256:...)" >&2; \
+		exit 1; \
+	fi; \
+	set +e; \
+	CF=e2e/remote-stepca/docker-compose.yml; \
+	OUT_DIR="$${RESULTS_OUT_DIR:-dist/e2e-results/remote-stepca}"; \
+	mkdir -p "$$OUT_DIR"; \
+	rc=0; \
+	docker pull "$$BRIDGECTL_SERVER_IMAGE" || exit 1; \
+	docker compose -f $$CF up -d || rc=$$?; \
+	if [ $$rc -eq 0 ]; then \
+		docker compose -f $$CF logs -f remote-client & \
+		LOG_PID=$$!; \
+		if CLIENT_ID=$$(docker compose -f $$CF ps -a -q remote-client) && [ -n "$$CLIENT_ID" ]; then \
+			rc=$$(docker wait "$$CLIENT_ID") || rc=$$?; \
+			case "$$rc" in ''|*[!0-9]*) rc=1 ;; esac; \
+		else \
+			echo "ERROR: could not find remote-client container" >&2; \
+			rc=1; \
+		fi; \
+		kill $$LOG_PID 2>/dev/null; wait $$LOG_PID 2>/dev/null; \
+	fi; \
+	echo "digest=$$BRIDGECTL_SERVER_IMAGE" > "$$OUT_DIR/image.txt"; \
+	docker compose -f $$CF logs --no-color > "$$OUT_DIR/compose.log" 2>&1; \
+	docker compose -f $$CF cp remote-client:/results/. "$$OUT_DIR" 2>/dev/null; \
+	cp_rc=$$?; \
+	if [ $$rc -eq 0 ] && { [ $$cp_rc -ne 0 ] || [ ! -f "$$OUT_DIR/remote-stepca-e2e.xml" ]; }; then \
+		echo "ERROR: tests reported success but JUnit results were not extracted to $$OUT_DIR" >&2; \
+		rc=1; \
+	fi; \
+	echo ""; \
+	echo "========================================"; \
+	if [ $$rc -eq 0 ]; then \
+		echo "  test-remote-stepca-published: PASSED (image=$$BRIDGECTL_SERVER_IMAGE)"; \
+	else \
+		echo "  test-remote-stepca-published: FAILED (exit $$rc, image=$$BRIDGECTL_SERVER_IMAGE)"; \
 	fi; \
 	echo "========================================"; \
 	docker compose -f $$CF down -v; \

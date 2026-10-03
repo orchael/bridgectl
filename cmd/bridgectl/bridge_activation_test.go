@@ -118,6 +118,15 @@ func TestActivateBridgeEnrollmentConnectsRunningDaemon(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BRIDGECTL_STATE_DIR", dir)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	// EffectiveAllowedPaths (issue #238) makes $HOME the default session
+	// allow-list entry, so the session's RepoPath must live under a $HOME
+	// this test controls rather than an unrelated t.TempDir().
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	repoPath := filepath.Join(fakeHome, "repo")
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(dir, "bridge.yaml")
 	if err := os.WriteFile(path, []byte("telemetry:\n  enabled: false\nproviders:\n  testprovider:\n    binary: cat\n    startup_probe: none\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -133,7 +142,7 @@ func TestActivateBridgeEnrollmentConnectsRunningDaemon(t *testing.T) {
 	}
 	defer func() { _ = client.Close() }()
 	preLoginSessionID := uuid.NewString()
-	if _, err := client.StartSession(ctx, &bridgev1.StartSessionRequest{SessionId: preLoginSessionID, ProjectId: "test", RepoPath: t.TempDir(), Provider: "testprovider"}); err != nil {
+	if _, err := client.StartSession(ctx, &bridgev1.StartSessionRequest{SessionId: preLoginSessionID, ProjectId: "test", RepoPath: repoPath, Provider: "testprovider"}); err != nil {
 		t.Fatal(err)
 	}
 	tok.BridgeURL = controlServer.URL

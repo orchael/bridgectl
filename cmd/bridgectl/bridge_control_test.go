@@ -216,9 +216,10 @@ func TestDoctor_ControlNotProvisioned(t *testing.T) {
 	cmd := newDoctorCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	if err := cmd.RunE(cmd, nil); err != nil {
-		t.Fatal(err)
-	}
+	// This fixture has no telemetry credential file, so doctor's "!" exit
+	// (issue #238) is expected here; this test asserts on the control line
+	// specifically, not on overall doctor health.
+	_ = cmd.RunE(cmd, nil)
 	if !strings.Contains(out.String(), "control       - not provisioned — run bridgectl bridge login --force") {
 		t.Fatalf("expected not-provisioned control line: %s", out.String())
 	}
@@ -244,9 +245,10 @@ func TestDoctor_ControlConnectedFromStatusFile(t *testing.T) {
 	cmd := newDoctorCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	if err := cmd.RunE(cmd, nil); err != nil {
-		t.Fatal(err)
-	}
+	// BridgeURL is a fake https://bridge.example, so doctor's network
+	// check always reports "!" here regardless of the control status this
+	// test actually exercises (issue #238's exit-1 behavior is orthogonal).
+	_ = cmd.RunE(cmd, nil)
 	if !strings.Contains(out.String(), "control       ✓ connected") {
 		t.Fatalf("expected connected control line: %s", out.String())
 	}
@@ -274,9 +276,10 @@ func TestDoctor_ControlStaleConnectedStatusReportsDisconnected(t *testing.T) {
 	cmd := newDoctorCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	if err := cmd.RunE(cmd, nil); err != nil {
-		t.Fatal(err)
-	}
+	// BridgeURL is a fake https://bridge.example, so doctor's network
+	// check always reports "!" here regardless of the control status this
+	// test actually exercises (issue #238's exit-1 behavior is orthogonal).
+	_ = cmd.RunE(cmd, nil)
 	if !strings.Contains(out.String(), "control       ! disconnected") {
 		t.Fatalf("expected a stale connected status to report disconnected: %s", out.String())
 	}
@@ -320,9 +323,10 @@ func TestWhoamiAndDoctor_ControlIndependentOfBrokenTelemetryCredential(t *testin
 	doctorCmd := newDoctorCmd()
 	var doctorOut bytes.Buffer
 	doctorCmd.SetOut(&doctorOut)
-	if err := doctorCmd.RunE(doctorCmd, nil); err != nil {
-		t.Fatal(err)
-	}
+	// This test deliberately sets up a malformed telemetry credential, so
+	// doctor's "!" exit (issue #238) is expected; the assertions below are
+	// about which specific lines report ok vs. broken, not overall health.
+	_ = doctorCmd.RunE(doctorCmd, nil)
 	if !strings.Contains(doctorOut.String(), "telemetry     ! credential missing") {
 		t.Fatalf("expected telemetry credential missing: %s", doctorOut.String())
 	}
@@ -345,9 +349,10 @@ func TestDoctor_ControlDisconnectedWhenNoStatusFileYet(t *testing.T) {
 	cmd := newDoctorCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	if err := cmd.RunE(cmd, nil); err != nil {
-		t.Fatal(err)
-	}
+	// BridgeURL is a fake https://bridge.example, so doctor's network
+	// check always reports "!" here regardless of the control status this
+	// test actually exercises (issue #238's exit-1 behavior is orthogonal).
+	_ = cmd.RunE(cmd, nil)
 	if !strings.Contains(out.String(), "control       ! disconnected") {
 		t.Fatalf("expected disconnected control line: %s", out.String())
 	}

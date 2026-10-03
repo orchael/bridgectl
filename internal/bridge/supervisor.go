@@ -15,7 +15,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -244,14 +243,6 @@ func (s *Supervisor) recoverProcess(info *SessionInfo) bool {
 	s.persistSession(ms.snapshotInfo())
 	go s.monitorRecoveredProcess(ms)
 	return true
-}
-
-func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 func (s *Supervisor) monitorRecoveredProcess(ms *managedSession) {
@@ -542,11 +533,7 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 	}
 
 	if useStreamJSON {
-		if cmd.SysProcAttr == nil {
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		} else {
-			cmd.SysProcAttr.Setpgid = true
-		}
+		setNewProcessGroup(cmd)
 		stdinPipe, err := cmd.StdinPipe()
 		if err != nil {
 			cancel()
@@ -982,11 +969,9 @@ func (s *Supervisor) Stop(sessionID string, force bool) error {
 		s.notifyControl(infoCopy)
 
 		if force {
-			if pid > 0 {
-				_ = syscall.Kill(-pid, syscall.SIGKILL)
-			}
-		} else if pid > 0 {
-			_ = syscall.Kill(-pid, syscall.SIGTERM)
+			killProcessGroup(pid)
+		} else {
+			terminateProcessGroup(pid)
 		}
 
 		go func() {
@@ -1006,7 +991,7 @@ func (s *Supervisor) Stop(sessionID string, force bool) error {
 				time.Sleep(100 * time.Millisecond)
 			}
 			if !force && pid > 0 && processAlive(pid) {
-				_ = syscall.Kill(-pid, syscall.SIGKILL)
+				killProcessGroup(pid)
 			}
 			ms.mu.Lock()
 			ms.info.State = SessionStateStopped
@@ -1034,14 +1019,10 @@ func (s *Supervisor) Stop(sessionID string, force bool) error {
 	}
 
 	if force {
-		if pid > 0 {
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
-		}
+		killProcessGroup(pid)
 		return nil
 	}
-	if pid > 0 {
-		_ = syscall.Kill(-pid, syscall.SIGTERM)
-	}
+	terminateProcessGroup(pid)
 
 	go func() {
 		time.Sleep(grace)
@@ -1050,7 +1031,7 @@ func (s *Supervisor) Stop(sessionID string, force bool) error {
 		pid := ms.cmd.Process.Pid
 		ms.mu.Unlock()
 		if state == SessionStateStopping && pid > 0 {
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
+			killProcessGroup(pid)
 		}
 	}()
 	return nil

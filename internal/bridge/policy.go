@@ -41,10 +41,13 @@ func (p *Policy) ValidateRepoPath(repoPath string) error {
 		if matched {
 			return nil
 		}
-		// Also check if abs starts with the pattern prefix (for directory trees)
-		// e.g. pattern "/home/*/repos" should match "/home/mark/repos/myproject"
+		// Also check if abs is under the pattern's directory tree, respecting
+		// path-component boundaries: pattern "/home/mark" must match
+		// "/home/mark/repo" but not the sibling "/home/mark-other", which a
+		// bare strings.HasPrefix would incorrectly allow.
 		patternDir := strings.TrimRight(pattern, "*?")
-		if strings.HasPrefix(abs, patternDir) {
+		patternDir = strings.TrimSuffix(patternDir, string(filepath.Separator))
+		if patternDir != "" && (abs == patternDir || strings.HasPrefix(abs, patternDir+string(filepath.Separator))) {
 			return nil
 		}
 	}

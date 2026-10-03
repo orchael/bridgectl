@@ -384,12 +384,12 @@ func newAttachCmd() *cobra.Command {
 			defer restore()
 
 			sigCh := make(chan os.Signal, 2)
-			signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGWINCH, syscall.SIGQUIT)
+			setupSignals(sigCh)
 			defer signal.Stop(sigCh)
 			go func() {
 				for sig := range sigCh {
-					switch sig {
-					case syscall.SIGWINCH:
+					switch {
+					case isSigwinch(sig):
 						cols, rows := currentTTYSize()
 						_, _ = client.ResizeSession(context.Background(), &bridgev1.ResizeSessionRequest{
 							SessionId: sessionID,
@@ -397,7 +397,7 @@ func newAttachCmd() *cobra.Command {
 							Cols:      cols,
 							Rows:      rows,
 						})
-					case syscall.SIGQUIT:
+					case sig == syscall.SIGQUIT:
 						// Ctrl+\ — detach cleanly without stopping the session.
 						restore()
 						fmt.Fprintln(os.Stderr, "\r\n[bridge] detached")

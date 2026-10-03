@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -114,12 +113,12 @@ func main() {
 	}
 
 	sigCh := make(chan os.Signal, 2)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGWINCH)
+	setupSignals(sigCh)
 	defer signal.Stop(sigCh)
 	go func() {
 		for sig := range sigCh {
-			switch sig {
-			case syscall.SIGWINCH:
+			switch {
+			case isSigwinch(sig):
 				cols, rows := currentTTYSize()
 				_, _ = client.ResizeSession(context.Background(), &bridgev1.ResizeSessionRequest{
 					SessionId: sessionID,

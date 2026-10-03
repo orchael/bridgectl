@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -696,13 +695,13 @@ func TestSupervisorLoadHistoryRecoversRunningProcess(t *testing.T) {
 	}
 
 	cmd := exec.Command("/bin/sh", "-c", "sleep 30")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setNewProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start helper process: %v", err)
 	}
 	t.Cleanup(func() {
 		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			killProcessGroup(cmd.Process.Pid)
 			_, _ = cmd.Process.Wait()
 		}
 	})
