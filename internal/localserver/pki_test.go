@@ -1272,3 +1272,47 @@ func TestBuildServerSANs(t *testing.T) {
 		})
 	}
 }
+
+// TestEffectiveAllowedPaths covers issue #238's "$HOME is always included in
+// the effective allowed-path list" requirement: $HOME must be present with
+// no configuration at all (the safe default), and must still be present
+// alongside explicit configured entries (additive, not replaced).
+func TestEffectiveAllowedPaths(t *testing.T) {
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+
+	t.Run("no configured paths still includes HOME", func(t *testing.T) {
+		got, err := EffectiveAllowedPaths(nil)
+		require.NoError(t, err)
+		assert.Equal(t, []string{home}, got)
+	})
+
+	t.Run("configured paths extend rather than replace HOME", func(t *testing.T) {
+		got, err := EffectiveAllowedPaths([]string{"/srv/repos"})
+		require.NoError(t, err)
+		assert.Equal(t, []string{home, "/srv/repos"}, got)
+	})
+}
+
+// TestEffectiveAllowedPathsFailsClosedWithoutHome covers the Copilot review
+// finding on PR #279: when $HOME cannot be resolved, EffectiveAllowedPaths
+// must error rather than silently returning an allow-list that, combined
+// with no configured paths, would make bridge.Policy.ValidateRepoPath allow
+// every path on the filesystem.
+func TestEffectiveAllowedPathsFailsClosedWithoutHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	_, err := EffectiveAllowedPaths(nil)
+	require.Error(t, err)
+}
+
+// TestKnownProviderIDs covers issue #238's provider-shortcut requirement:
+// the built-in providers are all present, and the "codex-app-server"
+// compatibility alias (which shares codex's binary) does not get its own
+// duplicate shortcut.
+func TestKnownProviderIDs(t *testing.T) {
+	ids := KnownProviderIDs()
+	for _, want := range []string{"claude", "codex", "opencode", "gemini"} {
+		assert.Contains(t, ids, want)
+	}
+	assert.NotContains(t, ids, "codex-app-server")
+}

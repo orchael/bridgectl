@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,62 +42,184 @@ func bridgeReachable(url string) bool {
 	return true
 }
 
+// doctorSection is one named group of report lines (e.g. "Bridge",
+// "Versions", "Access"). Each line keeps the existing "  <label>  <marker>
+// <message>" text format used throughout doctor's output; jsonFindings
+// parses that same text to build the --json representation instead of
+// keeping a second, separately-maintained structured model in sync.
+type doctorSection struct {
+	name  string
+	lines []string
+}
+
+// doctorFinding is one line of a doctorSection, decomposed for --json.
+type doctorFinding struct {
+	Section string `json:"section"`
+	Status  string `json:"status"` // "ok" (✓), "warn" (!), or "unknown" (-)
+	Message string `json:"message"`
+}
+
 func newDoctorCmd() *cobra.Command {
-	return &cobra.Command{Use: "doctor", Short: "Check local bridgectl health", RunE: func(cmd *cobra.Command, _ []string) error {
-		out := cmd.OutOrStdout()
-		printBridgeSection(out)
-		_, _ = fmt.Fprintln(out)
-		printVersionsSection(cmd.Context(), out)
+	var jsonOutput bool
+	cmd := &cobra.Command{Use: "doctor", Short: "Check local bridgectl health", RunE: func(cmd *cobra.Command, _ []string) error {
+		sections := []doctorSection{
+			{name: "Bridge", lines: bridgeSectionLines()},
+			{name: "Versions", lines: versionsSectionLines(cmd.Context())},
+			{name: "Access", lines: accessSectionLines()},
+		}
+		findings := doctorFindings(sections)
+
+		if jsonOutput {
+			if err := json.NewEncoder(cmd.OutOrStdout()).Encode(struct {
+				OK       bool            `json:"ok"`
+				Findings []doctorFinding `json:"findings"`
+			}{OK: !anyWarnings(findings), Findings: findings}); err != nil {
+				return err
+			}
+		} else {
+			printDoctorText(cmd.OutOrStdout(), sections)
+		}
+
+		if anyWarnings(findings) {
+			return errors.New("doctor: one or more checks reported a problem (see report above)")
+		}
 		return nil
 	}}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit the report as a single JSON object instead of human-readable text")
+	return cmd
 }
 
-// printBridgeSection prints the connectivity/enrollment report. It never
-// returns an error: an unreadable or missing enrollment file is itself a
-// finding, reported inline, not a reason to abort the rest of doctor.
-func printBridgeSection(out io.Writer) {
+func printDoctorText(out io.Writer, sections []doctorSection) {
+	for i, s := range sections {
+		if i > 0 {
+			_, _ = fmt.Fprintln(out)
+		}
+		_, _ = fmt.Fprintln(out, s.name)
+		for _, line := range s.lines {
+			_, _ = fmt.Fprintln(out, line)
+		}
+	}
+}
+
+// doctorFindings decomposes every section's lines into the --json shape.
+// Lines consistently follow "  <label (padded)><marker> <message>"; no
+// label in this file contains '✓', '!', or '-', so the first occurrence of
+// one of those runes in a line is always its status marker, never part of
+// the label.
+func doctorFindings(sections []doctorSection) []doctorFinding {
+	var findings []doctorFinding
+	for _, s := range sections {
+		for _, line := range s.lines {
+			findings = append(findings, doctorFinding{
+				Section: s.name,
+				Status:  lineStatus(line),
+				Message: strings.TrimSpace(line),
+			})
+		}
+	}
+	return findings
+}
+
+func lineStatus(line string) string {
+	for _, r := range line {
+		switch r {
+		case '✓':
+			return "ok"
+		case '!':
+			return "warn"
+		case '-':
+			return "unknown"
+		}
+	}
+	return "unknown"
+}
+
+func anyWarnings(findings []doctorFinding) bool {
+	for _, f := range findings {
+		if f.Status == "warn" {
+			return true
+		}
+	}
+	return false
+}
+
+// bridgeSectionLines reports the connectivity/enrollment status. An
+// unreadable or missing enrollment file is itself a finding, reported
+// inline, not a reason to abort the rest of doctor.
+func bridgeSectionLines() []string {
 	e, err := readEnrollmentMetadata()
-	_, _ = fmt.Fprintln(out, "Bridge")
 	if errors.Is(err, os.ErrNotExist) {
-		_, _ = fmt.Fprintln(out, "  server        - not configured")
-		_, _ = fmt.Fprintln(out, "  enrollment    - not logged in")
-		return
+		return []string{
+			"  server        - not configured",
+			"  enrollment    - not logged in",
+		}
 	}
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "  enrollment    ! unreadable (%v)\n", err)
-		return
+		return []string{fmt.Sprintf("  enrollment    ! unreadable (%v)", err)}
 	}
-	_, _ = fmt.Fprintf(out, "  server        ✓ %s\n", e.BridgeURL)
+
+	lines := []string{fmt.Sprintf("  server        ✓ %s", e.BridgeURL)}
 	if bridgeReachable(e.BridgeURL) {
-		_, _ = fmt.Fprintln(out, "  network       ✓ reachable")
+		lines = append(lines, "  network       ✓ reachable")
 	} else {
-		_, _ = fmt.Fprintln(out, "  network       ! unreachable")
+		lines = append(lines, "  network       ! unreachable")
 	}
-	_, _ = fmt.Fprintf(out, "  enrollment    ✓ logged in\n")
-	_, _ = fmt.Fprintf(out, "  organization  ✓ %s\n", display(e.OrganizationName, e.OrganizationID))
+	lines = append(lines,
+		"  enrollment    ✓ logged in",
+		fmt.Sprintf("  organization  ✓ %s", display(e.OrganizationName, e.OrganizationID)),
+	)
 	if e.OrganizationURL != "" {
-		_, _ = fmt.Fprintf(out, "  org url       ✓ %s\n", e.OrganizationURL)
+		lines = append(lines, fmt.Sprintf("  org url       ✓ %s", e.OrganizationURL))
 	}
-	_, _ = fmt.Fprintf(out, "  installation  ✓ %s\n", display(e.InstallationName, e.InstallationID))
+	lines = append(lines, fmt.Sprintf("  installation  ✓ %s", display(e.InstallationName, e.InstallationID)))
+
 	secret, secretErr := readBridgeSecret()
 	if secretErr != nil || secret == nil || secret.CollectorCredential == "" {
-		_, _ = fmt.Fprintln(out, "  telemetry     ! credential missing")
+		lines = append(lines, "  telemetry     ! credential missing")
 	} else {
-		_, _ = fmt.Fprintln(out, "  telemetry     ✓ configured")
+		lines = append(lines, "  telemetry     ✓ configured")
 	}
 	controlCredential, _ := readControlCredential() // a read error just means "not usable" here
-	_, _ = fmt.Fprintln(out, "  control       "+controlDoctorLine(e, controlCredential))
+	lines = append(lines, "  control       "+controlDoctorLine(e, controlCredential))
+	return lines
 }
 
-// printVersionsSection reports the bridgectl, Node, and running-daemon
+// versionsSectionLines reports the bridgectl, Node, and running-daemon
 // versions doctor can check offline and without any installed provider.
 // Provider CLI version drift and macOS launch-agent staleness are tracked
 // separately (see issue #265) and intentionally left out of this section.
-func printVersionsSection(ctx context.Context, out io.Writer) {
-	_, _ = fmt.Fprintln(out, "Versions")
-	_, _ = fmt.Fprintf(out, "  bridgectl     ✓ %s\n", version)
-	_, _ = fmt.Fprintln(out, nodeVersionLine(ctx, doctorProviderRoot()))
-	_, _ = fmt.Fprintln(out, serverVersionLine(ctx))
+func versionsSectionLines(ctx context.Context) []string {
+	return []string{
+		fmt.Sprintf("  bridgectl     ✓ %s", version),
+		nodeVersionLine(ctx, doctorProviderRoot()),
+		serverVersionLine(ctx),
+	}
+}
+
+// accessSectionLines reports the effective session allowed-path list,
+// including the implicit $HOME entry every session may always use (see
+// localserver.EffectiveAllowedPaths, issue #238). This is config-derived,
+// not daemon-runtime state, so it is computed directly from the same
+// config file doctor's Versions section already reads rather than adding
+// another RPC round-trip.
+func accessSectionLines() []string {
+	configPath := defaultServerConfigPath(localserver.StateDir())
+	var configured []string
+	if configPath != "" {
+		fileCfg, err := config.Load(configPath)
+		if err != nil {
+			// A discovered-but-unloadable config is a real problem: the
+			// daemon would hit the same error on startup, so doctor must
+			// not silently fall through and report success.
+			return []string{fmt.Sprintf("  allowed paths ! could not load %s: %v", configPath, err)}
+		}
+		configured = fileCfg.AllowedPaths
+	}
+	effective, err := localserver.EffectiveAllowedPaths(configured)
+	if err != nil {
+		return []string{fmt.Sprintf("  allowed paths ! %v", err)}
+	}
+	return []string{fmt.Sprintf("  allowed paths ✓ %s", strings.Join(effective, ", "))}
 }
 
 // doctorProviderRoot resolves the directory .nvmrc is read from: the

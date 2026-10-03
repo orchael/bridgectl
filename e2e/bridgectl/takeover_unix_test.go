@@ -40,7 +40,7 @@ func (s *CLISuite) TestCLITakeover() {
 	client.SetProject("test")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	sessionID := s.startEchoSession(ctx, client, s.T().TempDir())
+	sessionID := s.startEchoSession(ctx, client, s.testRepoDir())
 	oldWriter := uuid.NewString()
 	_, attached, events, stopRecv := s.attachAndCollectEvents(ctx, client, sessionID, oldWriter, bridgev1.AttachRole_ATTACH_ROLE_WRITER)
 	defer stopRecv()

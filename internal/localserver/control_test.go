@@ -155,6 +155,16 @@ func TestStart_ControlConfig_ValidCredential_ConnectsAsynchronously(t *testing.T
 // the control client sits in a permanent, fast-retrying failure loop
 // against an unreachable endpoint.
 func TestStart_ControlFailing_SessionOperationsStillWork(t *testing.T) {
+	// EffectiveAllowedPaths (issue #238) makes $HOME the default session
+	// allow-list entry, so the session's RepoPath must live under a $HOME
+	// this test controls rather than an unrelated t.TempDir().
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	repoPath := filepath.Join(fakeHome, "repo")
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
 	stateDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "bridge.yaml")
 	credPath := filepath.Join(stateDir, "bridge-credentials.json")
@@ -193,7 +203,7 @@ providers:
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	info, err := srv.supervisor.Start(ctx, bridge.SessionConfig{
-		ProjectID: "p1", SessionID: "session-ops-during-control-failure", RepoPath: t.TempDir(),
+		ProjectID: "p1", SessionID: "session-ops-during-control-failure", RepoPath: repoPath,
 		Options: map[string]string{"provider": "testprovider"},
 	})
 	if err != nil {
@@ -224,6 +234,16 @@ providers:
 // bridge.orchael.dev / control.bridge.orchael.dev (see MAR-71 final
 // report), where telemetry kept flowing throughout a control outage.
 func TestStart_ControlFailing_TelemetryStillDelivers(t *testing.T) {
+	// EffectiveAllowedPaths (issue #238) makes $HOME the default session
+	// allow-list entry, so the session's RepoPath must live under a $HOME
+	// this test controls rather than an unrelated t.TempDir().
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	repoPath := filepath.Join(fakeHome, "repo")
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
 	stateDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "bridge.yaml")
 	credPath := filepath.Join(stateDir, "bridge-credentials.json")
@@ -264,7 +284,7 @@ providers:
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if _, err := srv.supervisor.Start(ctx, bridge.SessionConfig{
-		ProjectID: "p1", SessionID: "telemetry-during-control-failure", RepoPath: t.TempDir(),
+		ProjectID: "p1", SessionID: "telemetry-during-control-failure", RepoPath: repoPath,
 		Options: map[string]string{"provider": "testprovider"},
 	}); err != nil {
 		t.Fatalf("session Start: %v", err)

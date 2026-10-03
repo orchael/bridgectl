@@ -704,11 +704,15 @@ func Start(cfg Config) (*Server, error) {
 	}
 
 	// Policy
+	effectiveAllowedPaths, allowedPathsErr := EffectiveAllowedPaths(cfg.AllowedPaths)
+	if allowedPathsErr != nil {
+		return nil, fmt.Errorf("determine session allowed paths: %w", allowedPathsErr)
+	}
 	policy := bridge.Policy{
 		MaxPerProject: 10,
 		MaxGlobal:     20,
 		MaxInputBytes: 65536,
-		AllowedPaths:  cfg.AllowedPaths,
+		AllowedPaths:  effectiveAllowedPaths,
 	}
 
 	// Supervisor options: persistence store when DBPath is set.
@@ -1179,6 +1183,34 @@ func BuildServerSANs(listenAddr string, extra []string) []string {
 		add(s)
 	}
 	return sans
+}
+
+// EffectiveAllowedPaths returns the allowed-path list the session policy
+// should enforce: the resolved $HOME directory is always included so agent
+// startup is safe-by-default even with no allowed_paths configured, and any
+// explicitly configured entries extend rather than replace it. Without this,
+// an empty configured list means bridge.Policy.ValidateRepoPath allows every
+// path on the filesystem (see its own "no patterns configured" fast path),
+// which is the opposite of what a safe default should be for a tool that
+// hands an AI agent a working directory to operate in.
+//
+// It errors rather than silently falling back to an unrestricted policy if
+// $HOME cannot be resolved: a caller that ignored the error and used only
+// `configured` would, with no configured paths either, pass an empty slice
+// to bridge.Policy and end up installing exactly the unrestricted policy
+// this function exists to prevent. Callers must fail startup on error.
+func EffectiveAllowedPaths(configured []string) ([]string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolve $HOME for the default session allow-list: %w", err)
+	}
+	if home == "" {
+		return nil, errors.New("resolve $HOME for the default session allow-list: empty result")
+	}
+	paths := make([]string, 0, len(configured)+1)
+	paths = append(paths, home)
+	paths = append(paths, configured...)
+	return paths, nil
 }
 
 func localDialAddr(addr string) string {
@@ -1659,6 +1691,28 @@ func knownProviders() []providerDef {
 			PromptPattern:  `^\s*>\s*$`,
 		},
 	}
+}
+
+// KnownProviderIDs returns the built-in provider IDs eligible for a
+// top-level CLI shortcut (`bridgectl <provider>`, issue #238) — the full
+// knownProviders() catalog, unfiltered by exec.LookPath so a shortcut is
+// available before the provider CLI is even installed, minus internal
+// compatibility aliases such as "codex-app-server" that share a real
+// provider's binary and would be a confusing duplicate shortcut.
+func KnownProviderIDs() []string {
+	seenBinary := make(map[string]bool)
+	var ids []string
+	for _, pd := range knownProviders() {
+		if strings.Contains(pd.ID, "-app-server") {
+			continue
+		}
+		if seenBinary[pd.Binary] {
+			continue
+		}
+		seenBinary[pd.Binary] = true
+		ids = append(ids, pd.ID)
+	}
+	return ids
 }
 
 func generateInstanceID() string {
