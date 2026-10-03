@@ -69,6 +69,13 @@ func fetchReportFrom(ctx context.Context, sessionID, remote, cert, key, jwtKey, 
 			}
 			return resp.GetReportJson(), nil
 		},
+		func(ctx context.Context) string {
+			resp, err := client.Health(ctx)
+			if err != nil || resp.GetServerVersion() == "" {
+				return diagnose.UnknownVersion
+			}
+			return resp.GetServerVersion()
+		},
 		func(ctx context.Context, id string) (*bridgev1.GetSessionResponse, error) {
 			if remote != "" {
 				// Building from GetSession would mix a remote session with
@@ -82,9 +89,11 @@ func fetchReportFrom(ctx context.Context, sessionID, remote, cert, key, jwtKey, 
 // fetchReport asks the daemon to build the report (DiagnoseSession). A daemon
 // that predates that RPC answers Unimplemented — common while an older server
 // is still running after an upgrade — in which case the same Report is built
-// locally from GetSession plus this machine's control files.
+// locally from GetSession plus this machine's control files, stamped with the
+// daemon's version from Health ("unknown" if unavailable).
 func fetchReport(ctx context.Context, sessionID string,
 	diagnoseRPC func(context.Context, string) ([]byte, error),
+	daemonVersion func(context.Context) string,
 	getSession func(context.Context, string) (*bridgev1.GetSessionResponse, error),
 ) (*diagnose.Report, error) {
 	raw, err := diagnoseRPC(ctx, sessionID)
@@ -102,7 +111,10 @@ func fetchReport(ctx context.Context, sessionID string,
 	if err != nil {
 		return nil, err
 	}
-	return diagnose.Build(resp, diagnose.LoadInputs(localserver.StateDir(), sessionID, version, time.Now())), nil
+	// The report describes the daemon, so name the daemon's version, not this
+	// CLI's: during an upgrade without a restart the mismatch is exactly what
+	// diagnostics should reveal.
+	return diagnose.Build(resp, diagnose.LoadInputs(localserver.StateDir(), sessionID, daemonVersion(ctx), time.Now())), nil
 }
 
 var errServerUnavailable = errors.New("local bridgectl server unavailable")

@@ -1117,7 +1117,17 @@ func (s *Supervisor) UpdateInteraction(sessionID string, next Interaction) error
 	} else {
 		next.Revision = cur.Revision
 		next.UpdatedAt = cur.UpdatedAt
+		incoming := next.Pending
 		next.Pending = cur.Pending
+		// Kind is local-only metadata that is not part of the revision (it is
+		// not on the wire), so a provider classifying an already-pending
+		// request must still become visible without bumping the revision or
+		// resending an identical payload to Bridge.
+		if cur.Pending != nil && incoming != nil && incoming.Kind != "" && cur.Pending.Kind != incoming.Kind {
+			merged := *cur.Pending
+			merged.Kind = incoming.Kind
+			next.Pending = &merged
+		}
 	}
 	ms.info.Interaction = next
 	info := ms.info

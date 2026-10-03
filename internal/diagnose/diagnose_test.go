@@ -470,6 +470,20 @@ func TestLoadInputs(t *testing.T) {
 	}
 }
 
+// An empty stateDir must not read control files relative to the working dir.
+func TestLoadInputsEmptyStateDirIgnoresWorkingDirectory(t *testing.T) {
+	wd := t.TempDir()
+	if err := bridgecontrol.WriteStatus(filepath.Join(wd, bridgecontrol.StatusFileName), bridgecontrol.Status{State: bridgecontrol.StateConnected, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, filepath.Join(wd, bridgecontrol.RevisionFileName), map[string]int64{"s": 3})
+	t.Chdir(wd)
+	in := LoadInputs("", "s", "v", now)
+	if in.Control.Configured || in.Control.Status != nil || in.LifecycleRevisionWire != nil || in.InteractionRevisionWire != nil {
+		t.Fatalf("empty stateDir read from the working directory: %+v", in)
+	}
+}
+
 func TestLoadInputsDoesNotCreateOrModifyFiles(t *testing.T) {
 	dir := t.TempDir()
 	_ = LoadInputs(dir, "11111111-1111-4111-8111-111111111111", "v", now)

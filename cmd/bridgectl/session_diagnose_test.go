@@ -31,6 +31,7 @@ func diagGetter(resp *bridgev1.GetSessionResponse, err error) reportFetcher {
 			func(context.Context, string) ([]byte, error) {
 				return nil, status.Error(codes.Unimplemented, "old daemon")
 			},
+			func(context.Context) string { return "daemon-old" },
 			func(context.Context, string) (*bridgev1.GetSessionResponse, error) { return resp, err })
 	}
 }
@@ -169,6 +170,7 @@ func TestFetchReportUsesDaemonReportWhenSupported(t *testing.T) {
 	raw, _ := want.MarshalJSON()
 	got, err := fetchReport(context.Background(), diagSessionID,
 		func(context.Context, string) ([]byte, error) { return raw, nil },
+		func(context.Context) string { return "unused" },
 		func(context.Context, string) (*bridgev1.GetSessionResponse, error) {
 			t.Fatal("GetSession fallback must not run when the daemon supports DiagnoseSession")
 			return nil, nil
@@ -179,16 +181,34 @@ func TestFetchReportUsesDaemonReportWhenSupported(t *testing.T) {
 }
 
 func TestFetchReportRejectsUnknownSchemaAndPropagatesErrors(t *testing.T) {
+	noVersion := func(context.Context) string { return "" }
 	noFallback := func(context.Context, string) (*bridgev1.GetSessionResponse, error) {
 		t.Fatal("no fallback")
 		return nil, nil
 	}
 	if _, err := fetchReport(context.Background(), diagSessionID,
-		func(context.Context, string) ([]byte, error) { return []byte(`{"schema_version":2}`), nil }, noFallback); err == nil {
+		func(context.Context, string) ([]byte, error) { return []byte(`{"schema_version":2}`), nil }, noVersion, noFallback); err == nil {
 		t.Fatal("a future schema version must be rejected, not rendered")
 	}
 	if _, err := fetchReport(context.Background(), diagSessionID,
-		func(context.Context, string) ([]byte, error) { return nil, bridgeclient.ErrSessionNotFound }, noFallback); !errors.Is(err, bridgeclient.ErrSessionNotFound) {
+		func(context.Context, string) ([]byte, error) { return nil, bridgeclient.ErrSessionNotFound }, noVersion, noFallback); !errors.Is(err, bridgeclient.ErrSessionNotFound) {
 		t.Fatalf("NotFound must propagate without fallback, got %v", err)
+	}
+}
+
+// TestFallbackReportNamesDaemonVersionNotCLI covers an upgrade without a
+// daemon restart: the report must expose the daemon's (older) version.
+func TestFallbackReportNamesDaemonVersionNotCLI(t *testing.T) {
+	t.Setenv("BRIDGECTL_STATE_DIR", t.TempDir())
+	unimpl := func(context.Context, string) ([]byte, error) { return nil, status.Error(codes.Unimplemented, "old") }
+	get := func(context.Context, string) (*bridgev1.GetSessionResponse, error) { return diagResp(), nil }
+	for want, daemon := range map[string]func(context.Context) string{
+		"v0.9.0-daemon":         func(context.Context) string { return "v0.9.0-daemon" },
+		diagnose.UnknownVersion: func(context.Context) string { return diagnose.UnknownVersion },
+	} {
+		rep, err := fetchReport(context.Background(), diagSessionID, unimpl, daemon, get)
+		if err != nil || rep.BridgectlVersion != want {
+			t.Fatalf("bridgectl_version = %v (err %v), want %q (CLI is %q)", rep, err, want, version)
+		}
 	}
 }

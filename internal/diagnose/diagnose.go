@@ -27,6 +27,10 @@ import (
 	"github.com/orchael/bridgectl/internal/bridgecontrol"
 )
 
+// UnknownVersion is the bridgectl_version reported when the daemon's version
+// cannot be determined.
+const UnknownVersion = "unknown"
+
 // SchemaVersion is the diagnostic JSON schema version. Field names, types and
 // enum values of a published version never change; incompatible changes bump
 // this number.
@@ -138,6 +142,11 @@ type Inputs struct {
 // so diagnostics work identically when Bridge is not enrolled or unavailable.
 func LoadInputs(stateDir, sessionID, version string, now time.Time) Inputs {
 	in := Inputs{Version: version, Now: now}
+	if stateDir == "" {
+		// filepath.Join("", name) is a relative path: never read control
+		// files from the process working directory.
+		return in
+	}
 
 	statusPath := filepath.Join(stateDir, bridgecontrol.StatusFileName)
 	revPath := filepath.Join(stateDir, bridgecontrol.RevisionFileName)

@@ -154,3 +154,28 @@ func TestEnrollmentReloadNoDaemonTimesOut(t *testing.T) {
 		t.Fatalf("missing daemon error: %v", err)
 	}
 }
+
+// TestReloadStatusWritePreservesLastConnectedAt covers the reload path: the
+// synchronous "connecting"/"not_provisioned" write must carry the previous
+// last-successful-connection time forward, otherwise a failed reconnect would
+// report that Bridge never connected.
+func TestReloadStatusWritePreservesLastConnectedAt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, bridgecontrol.StatusFileName)
+	last := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	if err := bridgecontrol.WriteStatus(path, bridgecontrol.Status{State: bridgecontrol.StateConnected, UpdatedAt: last, LastConnectedAt: last}); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []bridgecontrol.State{bridgecontrol.StateConnecting, bridgecontrol.StateNotProvisioned} {
+		if err := bridgecontrol.WriteStatus(path, bridgecontrol.Status{State: state, UpdatedAt: time.Now(), LastConnectedAt: previousLastConnected(dir)}); err != nil {
+			t.Fatal(err)
+		}
+		st, err := bridgecontrol.ReadStatus(path)
+		if err != nil || !st.LastConnectedAt.Equal(last) || st.State != state {
+			t.Fatalf("after %s write: %+v err %v, want last_connected_at %v", state, st, err, last)
+		}
+	}
+	if got := previousLastConnected(t.TempDir()); !got.IsZero() {
+		t.Fatalf("missing status file must yield zero time, got %v", got)
+	}
+}
