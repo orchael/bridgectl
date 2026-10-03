@@ -674,13 +674,21 @@ func TestDiscoverTargetSecureModeServerNameFromCert(t *testing.T) {
 	bundlePath := filepath.Join(certsDir, "ca-bundle.crt")
 	require.NoError(t, os.WriteFile(bundlePath, caData, 0o644))
 
-	// Mark PKI mode as auto so EnsurePKI returns early (certs already exist).
-	require.NoError(t, writePKIMode(certsDir, pkiModeAuto))
+	// Mark PKI mode as step-ca so EnsurePKI returns early (certs already
+	// exist) without comparing serverSANs against the cert's own content:
+	// that comparison is deliberately skipped for Step CA/ACME-issued certs
+	// (see pkiRequestedSANsChanged) because an external CA/provisioner can
+	// legitimately narrow the issued SAN set, which is exactly what this
+	// test simulates. Using pkiModeAuto here would instead hit the
+	// auto-gen migration fallback and incorrectly reissue the cert.
+	require.NoError(t, writePKIMode(certsDir, pkiModeStepCA))
 
-	// Start the server. The auto-PKI path should derive tlsServerName from the cert.
+	// Start the server. The Step CA path should derive tlsServerName from
+	// the cert, not compare its SANs against the freshly computed default.
 	srv, err := Start(Config{
 		StateDir:   dir,
 		ListenAddr: "127.0.0.1:0",
+		StepCAURL:  "https://ca.example.internal:443",
 	})
 	if err != nil {
 		t.Fatalf("secure mode start failed: %v", err)

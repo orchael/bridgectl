@@ -1,13 +1,16 @@
 package localserver
 
 import (
+	"crypto/x509"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,6 +25,7 @@ const (
 	pkiModeStepCA = "step-ca"
 	pkiModeTLS    = "tls"
 	pkiModeFile   = ".pki-mode"
+	pkiSANsFile   = ".pki-sans"
 )
 
 // readPKIMode returns the PKI mode recorded in certsDir/.pki-mode, or "" if absent.
@@ -36,6 +40,115 @@ func readPKIMode(certsDir string) string {
 // writePKIMode records the PKI mode in certsDir/.pki-mode.
 func writePKIMode(certsDir, mode string) error {
 	return os.WriteFile(filepath.Join(certsDir, pkiModeFile), []byte(mode), 0o644)
+}
+
+// normalizeSANs trims whitespace and drops empty entries from sans.
+func normalizeSANs(sans []string) []string {
+	out := make([]string, 0, len(sans))
+	for _, s := range sans {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// stringSetsEqual reports whether a and b contain the same elements,
+// ignoring order.
+func stringSetsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	ac := append([]string(nil), a...)
+	bc := append([]string(nil), b...)
+	sort.Strings(ac)
+	sort.Strings(bc)
+	for i := range ac {
+		if ac[i] != bc[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// readPKISANs returns the server SANs recorded in certsDir/.pki-sans by the
+// most recent successful EnsurePKI call, and whether a record exists at all.
+// ok is false when the file is absent or unreadable (e.g. PKI material from
+// a bridgectl version that predates this tracking, or material placed on
+// disk out-of-band) — callers must treat that as "unknown", not "changed".
+func readPKISANs(certsDir string) (sans []string, ok bool) {
+	data, err := os.ReadFile(filepath.Join(certsDir, pkiSANsFile))
+	if err != nil {
+		return nil, false
+	}
+	return normalizeSANs(strings.Split(string(data), "\n")), true
+}
+
+// writePKISANs records the server SANs requested for the certificate
+// currently on disk, so a later EnsurePKI call can detect an operator
+// restarting with a different --san value (issue #224).
+func writePKISANs(certsDir string, serverSANs []string) error {
+	data := strings.Join(normalizeSANs(serverSANs), "\n") + "\n"
+	return os.WriteFile(filepath.Join(certsDir, pkiSANsFile), []byte(data), 0o644)
+}
+
+// certSANsMatch reports whether cert's SANs are exactly the set described by
+// requestedSANs (order-independent, already normalized), split into DNS
+// names and IP addresses the same way pki.IssueCert does. Used only as a
+// one-time migration fallback by pkiRequestedSANsChanged for auto-generated
+// PKI that predates .pki-sans tracking — never for Step CA-issued certs,
+// whose SAN content an external provisioner can legitimately narrow.
+func certSANsMatch(cert *x509.Certificate, requestedSANs []string) bool {
+	var wantDNS, wantIPs []string
+	for _, san := range requestedSANs {
+		if ip := net.ParseIP(san); ip != nil {
+			wantIPs = append(wantIPs, ip.String())
+		} else {
+			wantDNS = append(wantDNS, san)
+		}
+	}
+	gotIPs := make([]string, 0, len(cert.IPAddresses))
+	for _, ip := range cert.IPAddresses {
+		gotIPs = append(gotIPs, ip.String())
+	}
+	return stringSetsEqual(cert.DNSNames, wantDNS) && stringSetsEqual(gotIPs, wantIPs)
+}
+
+// pkiRequestedSANsChanged reports whether serverSANs differs from the SANs
+// recorded by the prior EnsurePKI call for this certsDir.
+//
+// If a .pki-sans record exists, the comparison is against it, not against
+// mat's certificate content: an external CA or provisioner (Step CA, ACME)
+// can legitimately narrow the issued SAN set, which must not be mistaken
+// for a changed --san request. See
+// TestEnsurePKI_StepCAUnchangedSANsDoesNotForceRenewal.
+//
+// If no record exists yet (PKI material from a bridgectl version that
+// predates this tracking), the fallback depends on mode:
+//   - Auto-generated PKI (stepCA nil): bridgectl's own local CA issued
+//     exactly what was requested, so it's safe to migrate by comparing
+//     serverSANs against the existing certificate's actual content.
+//   - Step CA-issued certs: for the same external-narrowing reason above,
+//     comparing against the cert's own content would be unsafe here, so a
+//     missing record is treated as unchanged; the normal expiry-driven
+//     renewal eventually reconciles a real SAN change in this case.
+func pkiRequestedSANsChanged(mat *PKIMaterial, certsDir string, serverSANs []string, stepCA *StepCAConfig) bool {
+	requested := normalizeSANs(serverSANs)
+
+	if recorded, ok := readPKISANs(certsDir); ok {
+		return !stringSetsEqual(recorded, requested)
+	}
+
+	if stepCA != nil && stepCA.URL != "" {
+		return false
+	}
+
+	cert, err := pki.LoadCert(mat.ServerCertPath)
+	if err != nil {
+		return false
+	}
+	return !certSANsMatch(cert, requested)
 }
 
 // StepCAConfig holds optional Step CA integration settings. When URL is set,
@@ -128,15 +241,21 @@ func EnsurePKI(stateDir string, serverSANs []string, logger *slog.Logger, stepCA
 		if _, err := os.Stat(mat.ServerCertPath); err == nil {
 			if _, err := os.Stat(mat.ServerKeyPath); err == nil {
 				if readPKIMode(certsDir) == requestedMode {
-					// When Step CA is configured, check whether the existing
-					// server certificate is expired or approaching expiry.
 					// Renew synchronously before returning so the server
-					// never starts listening with a stale cert.
-					if stepCA != nil && stepCA.URL != "" {
-						if err := ensureStepCACertFresh(mat, serverSANs, logger, stepCA, certValidity); err != nil {
+					// never starts listening with a stale or mismatched
+					// cert: either the operator restarted with a different
+					// --san value (issue #224), or the existing certificate
+					// is expired or approaching expiry (issue #225).
+					if pkiRequestedSANsChanged(mat, certsDir, serverSANs, stepCA) {
+						logger.Info("requested server SANs changed since the last start, reissuing certificate before startup",
+							"cert", mat.ServerCertPath, "requested_sans", serverSANs)
+						if err := reissueServerCertMaterial(mat, serverSANs, logger, stepCA, certValidity); err != nil {
 							return nil, err
 						}
+					} else if err := ensureServerCertFresh(mat, serverSANs, logger, stepCA, certValidity); err != nil {
+						return nil, err
 					}
+					_ = writePKISANs(certsDir, serverSANs) // best-effort; worst case re-checks next start
 					logger.Info("PKI material already exists", "dir", certsDir)
 					return mat, nil
 				}
@@ -296,8 +415,10 @@ func ensurePKIAutoGen(stateDir string, serverSANs []string, logger *slog.Logger,
 	mat.JWTSigningKey = privPath
 	logger.Info("generated JWT signing keypair", "pub", pubPath)
 
-	// Record mode so EnsurePKI can detect a mode switch on the next start.
+	// Record mode and requested SANs so EnsurePKI can detect a mode switch
+	// or a changed --san value on the next start.
 	_ = writePKIMode(certsDir, pkiModeAuto)
+	_ = writePKISANs(certsDir, serverSANs)
 
 	return mat, nil
 }
@@ -382,8 +503,10 @@ func ensurePKIStepCA(stateDir string, serverSANs []string, logger *slog.Logger, 
 	mat.JWTSigningKey = privPath
 	logger.Info("generated JWT signing keypair", "pub", pubPath)
 
-	// Record mode so EnsurePKI can detect a mode switch on the next start.
+	// Record mode and requested SANs so EnsurePKI can detect a mode switch
+	// or a changed --san value on the next start.
 	_ = writePKIMode(certsDir, pkiModeStepCA)
+	_ = writePKISANs(certsDir, serverSANs)
 
 	return mat, nil
 }
@@ -449,15 +572,65 @@ func renewServerCertAutoGen(mat *PKIMaterial, serverSANs []string, logger *slog.
 	return nil
 }
 
-// ensureStepCACertFresh checks whether a Step CA-issued server certificate is
-// expired or approaching expiry (remaining < 1/3 of lifetime). When renewal is
-// needed it runs synchronously so the caller never proceeds with a stale cert.
-// If the certificate is unreadable (corrupt PEM, etc.) it is treated as expired
-// and a replacement is requested from Step CA.
-func ensureStepCACertFresh(mat *PKIMaterial, serverSANs []string, logger *slog.Logger, stepCA *StepCAConfig, certValidity time.Duration) error {
+// reissueServerCertMaterial issues a brand-new server certificate for
+// serverSANs, bypassing any identity-preserving renewal path. Used
+// specifically when serverSANs has changed (issue #224): Step CA's mTLS
+// /renew endpoint preserves the existing certificate's SANs rather than
+// accepting new ones (see stepca_native.go), so a SAN change must go
+// straight to provisioner-based issuance (JWK/ACME) instead of
+// RenewServerCertMaterial's mTLS-first path. For auto-generated PKI,
+// renewServerCertAutoGen already always re-issues with serverSANs, so it is
+// reused directly.
+func reissueServerCertMaterial(mat *PKIMaterial, serverSANs []string, logger *slog.Logger, stepCA *StepCAConfig, certValidity time.Duration) error {
+	if stepCA != nil && stepCA.URL != "" {
+		return reissueServerCertStepCA(mat, serverSANs, logger, stepCA)
+	}
+	return renewServerCertAutoGen(mat, serverSANs, logger, certValidity)
+}
+
+// reissueServerCertStepCA requests a fresh certificate directly from the
+// configured provisioner, skipping mTLS-based renewal, so the issued
+// certificate reflects serverSANs rather than whatever SANs the previous
+// certificate carried.
+func reissueServerCertStepCA(mat *PKIMaterial, serverSANs []string, logger *slog.Logger, stepCA *StepCAConfig) error {
+	switch strings.ToLower(stepCA.Provisioner) {
+	case "acme":
+		if err := requestCertACMEFn(stepCA, acmeSANs(serverSANs), mat.ServerCertPath, mat.ServerKeyPath, logger); err != nil {
+			return fmt.Errorf("reissue server cert for changed SANs (ACME): %w", err)
+		}
+	default:
+		if stepCA.ProvisionerPasswordFile == "" {
+			return fmt.Errorf("reissue server cert for changed SANs (JWK): step_ca.provisioner_password_file is required for non-interactive issuance")
+		}
+		if err := requestCertJWKFn(stepCA, serverSANs, mat.ServerCertPath, mat.ServerKeyPath, logger); err != nil {
+			return fmt.Errorf("reissue server cert for changed SANs (JWK): %w", err)
+		}
+	}
+
+	logger.Info("reissued server certificate with new SANs (Step CA)", "cert", mat.ServerCertPath, "sans", serverSANs)
+	return nil
+}
+
+// ensureServerCertFresh checks whether the server certificate at
+// mat.ServerCertPath is expired or approaching expiry (remaining < 1/3 of
+// lifetime), and renews it synchronously when so — the caller never proceeds
+// with a stale cert (issue #225). stepCA is nil for auto-generated PKI and
+// non-nil for Step CA-issued certs; RenewServerCertMaterial dispatches to the
+// matching renewal path. If the certificate is unreadable (corrupt PEM,
+// etc.) it is treated as expired and replaced.
+//
+// This intentionally only looks at expiry, never at the certificate's own
+// SAN content — see pkiRequestedSANsChanged for why SAN-change detection is
+// based on bridgectl's own recorded request instead of the issued cert.
+func ensureServerCertFresh(mat *PKIMaterial, serverSANs []string, logger *slog.Logger, stepCA *StepCAConfig, certValidity time.Duration) error {
+	source := "server"
+	if stepCA != nil && stepCA.URL != "" {
+		source = "Step CA server"
+	}
+
 	notBefore, notAfter, err := ServerCertExpiry(mat.ServerCertPath)
 	if err != nil {
-		logger.Warn("Step CA server certificate unreadable, requesting replacement",
+		logger.Warn(source+" certificate unreadable, renewing before startup",
 			"cert", mat.ServerCertPath, "error", err)
 		return RenewServerCertMaterial(mat, serverSANs, logger, stepCA, certValidity)
 	}
@@ -468,7 +641,7 @@ func ensureStepCACertFresh(mat *PKIMaterial, serverSANs []string, logger *slog.L
 	// Guard against certs with zero or inverted validity windows —
 	// treat them as expired so they are always renewed.
 	if lifetime <= 0 {
-		logger.Warn("Step CA server certificate has non-positive validity, renewing before startup",
+		logger.Warn(source+" certificate has non-positive validity, renewing before startup",
 			"cert", mat.ServerCertPath, "notBefore", notBefore.Format(time.RFC3339),
 			"notAfter", notAfter.Format(time.RFC3339))
 		return RenewServerCertMaterial(mat, serverSANs, logger, stepCA, certValidity)
@@ -480,10 +653,10 @@ func ensureStepCACertFresh(mat *PKIMaterial, serverSANs []string, logger *slog.L
 	}
 
 	if remaining <= 0 {
-		logger.Warn("Step CA server certificate has expired, renewing before startup",
+		logger.Warn(source+" certificate has expired, renewing before startup",
 			"cert", mat.ServerCertPath, "expired", notAfter.Format(time.RFC3339))
 	} else {
-		logger.Info("Step CA server certificate approaching expiry, renewing before startup",
+		logger.Info(source+" certificate approaching expiry, renewing before startup",
 			"cert", mat.ServerCertPath, "expires", notAfter.Format(time.RFC3339),
 			"remaining", remaining.Round(time.Second))
 	}
