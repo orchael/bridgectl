@@ -15,6 +15,8 @@
 package diagnose
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -89,6 +91,11 @@ type Capability struct {
 type Pending struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
+	// IDSHA256 is "sha256:" plus the hex SHA-256 of the provider's original,
+	// untruncated request ID. Consumers that hold the same ID (Bridge's
+	// registry) compare fingerprints instead of the bounded, sanitized ID, so
+	// a long or odd ID can never produce a false mismatch.
+	IDSHA256 string `json:"id_sha256"`
 	// Kind is the provider-assigned category: command, file_change, tool,
 	// question, other, or unknown when the provider did not classify it. Any
 	// other value from a provider is reported as other, so this can never
@@ -231,11 +238,16 @@ func Build(resp *bridgev1.GetSessionResponse, in Inputs) *Report {
 	}
 
 	if p := ia.GetPendingRequest(); p != nil {
-		pending := &Pending{ID: truncate(sanitize(p.GetId()), MaxIDRunes), Type: p.GetType(), Kind: normalizeKind(p.GetKind())}
+		pending := &Pending{ID: truncate(sanitize(p.GetId()), MaxIDRunes), Type: p.GetType(), IDSHA256: fingerprint(p.GetId()), Kind: normalizeKind(p.GetKind())}
 		pending.SummaryAvailable = caps.PendingSummarySupported && strings.TrimSpace(p.GetSummary()) != ""
 		r.PendingRequest = pending
 	}
 	return r
+}
+
+func fingerprint(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func normalizeKind(k string) string {

@@ -2,6 +2,8 @@ package diagnose
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"os"
@@ -289,6 +291,17 @@ func TestSummaryAvailableFlag(t *testing.T) {
 	}
 }
 
+func TestPendingIDFingerprintCoversOriginalID(t *testing.T) {
+	r := fullResp()
+	long := strings.Repeat("x", 5000) + "\n"
+	r.Interaction.PendingRequest.Id = long
+	p := Build(r, Inputs{Now: now}).PendingRequest
+	sum := sha256.Sum256([]byte(long))
+	if want := "sha256:" + hex.EncodeToString(sum[:]); p.IDSHA256 != want {
+		t.Fatalf("id_sha256 = %s, want digest of the untruncated original ID", p.IDSHA256)
+	}
+}
+
 func TestPendingIDIsBounded(t *testing.T) {
 	r := fullResp()
 	r.Interaction.PendingRequest.Id = strings.Repeat("x", 5000)
@@ -541,6 +554,7 @@ var allowedStringFields = map[string]bool{
 	"interaction_last_report_at": true, // timestamp
 	"pending_request.id":         true, // provider request identity, bounded
 	"pending_request.type":       true, // enum
+	"pending_request.id_sha256":  true, // digest of the original id
 	"pending_request.kind":       true, // normalized fixed vocabulary
 	"control.state":              true, // enum
 	"control.updated_at":         true, // timestamp

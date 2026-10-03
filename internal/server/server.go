@@ -12,7 +12,6 @@ import (
 	bridgev1 "github.com/orchael/bridgectl/gen/bridge/v1"
 	"github.com/orchael/bridgectl/internal/auth"
 	"github.com/orchael/bridgectl/internal/bridge"
-	"github.com/orchael/bridgectl/internal/diagnose"
 	"github.com/orchael/bridgectl/internal/enrollment"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -222,12 +221,7 @@ func (s *BridgeServer) DiagnoseSession(ctx context.Context, req *bridgev1.Diagno
 	if err != nil {
 		return nil, mapBridgeError(err, "diagnose session")
 	}
-	version := s.version
-	if version == "" {
-		version = "dev"
-	}
-	in := diagnose.LoadInputs(s.diagnoseStateDir, req.SessionId, version, time.Now())
-	b, err := diagnose.Build(sessionInfoToProto(info), in).MarshalJSON()
+	b, err := DiagnosticReportJSON(info, s.diagnoseStateDir, s.version)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "diagnose session: serialize report")
 	}

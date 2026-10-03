@@ -16,6 +16,7 @@ import (
 	"github.com/orchael/bridgectl/internal/bridge"
 	"github.com/orchael/bridgectl/internal/bridgecontrol"
 	"github.com/orchael/bridgectl/internal/config"
+	"github.com/orchael/bridgectl/internal/server"
 	"github.com/orchael/bridgectl/internal/telemetry"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -155,6 +156,16 @@ func newControlClient(controlCfg config.ControlConfig, stateDir, version string,
 				return bridge.ActivityWindow{}, bridge.ErrSessionNotFound
 			}
 			return sup.ObserveActivity(id, after, events, bytes)
+		},
+		DiagnoseFunc: func(id string) ([]byte, error) {
+			if sup == nil {
+				return nil, bridge.ErrSessionNotFound
+			}
+			info, err := sup.Get(id)
+			if err != nil {
+				return nil, err
+			}
+			return server.DiagnosticReportJSON(info, stateDir, version)
 		},
 		InstructionFunc: func(ctx context.Context, id, _ string, text string) error {
 			if sup == nil {

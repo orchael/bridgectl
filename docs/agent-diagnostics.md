@@ -52,9 +52,11 @@ Security tests must prove forbidden raw fields cannot enter serialized diagnosti
 ## Bridge integration notes
 
 - The daemon builds the report (`DiagnoseSession` RPC → `diagnose.Build` over `GetSession`-equivalent state plus `diagnose.LoadInputs`), so local and `--remote` callers get one implementation. `Build` is a pure function over plain data, so the control client can serve the same `Report` over its existing outbound connection (the remaining gating item for Bridge); the report JSON is already a single transport-independent document. This change adds no inbound port, no Bridge dependency, and no automatic upload.
+- **Control channel.** Bridge can request this report over its existing outbound connection: it sends `diagnose_session` (`request_id`, `organization_id`, `installation_id`, `session_id`) and bridgectl replies `session_diagnostic` (`request_id` plus `report`, or a fixed `code`: `invalid_request|unsupported|not_found|unavailable`). The capability is advertised as `diagnose_session` in `hello`; requests for another organization/installation are rejected before anything is read; the report is the daemon's `server.DiagnosticReportJSON`, the same builder as the `DiagnoseSession` RPC; it is capped at 16 KiB and error text never crosses the channel. No new inbound port is opened and nothing is sent unless Bridge asks.
 - Bridge should compare `interaction_revision_wire` / `lifecycle_revision_wire` with its replica; `interaction_revision_local` is for local debugging only.
 - `control` reads a persisted file, so it can lag reality by up to the heartbeat interval; it is not a live reachability probe.
 - `pending_request.kind` (`command|file_change|tool|question|other|unknown`) is provider-assigned from structured data (Codex request shape, Claude hook tool name) and is the safe replacement for summary text. It is local-only: it is not on the Bridge control wire.
+- `pending_request.id_sha256` is the digest of the original, untruncated request id, so consumers that hold the same id (Bridge) compare fingerprints rather than the bounded `id`.
 - Deferred: a fixed-vocabulary code for `SessionInfo.Error` / control `last_error`.
 - There is deliberately no session-wide "last activity" time: the only authoritative timestamps are the interaction ones, and a provider activity buffer is bounded (15 minutes) and not part of `SessionInfo`.
 

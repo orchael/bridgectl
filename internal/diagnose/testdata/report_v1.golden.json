@@ -21,6 +21,7 @@
   "pending_request": {
     "id": "req-1",
     "type": "approval",
+    "id_sha256": "sha256:9456bdfa12ea76959c94a3572f5d91c73d838622df0a8d9b4e815c276c6b7880",
     "kind": "command",
     "summary_available": true
   },

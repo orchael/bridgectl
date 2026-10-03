@@ -45,8 +45,12 @@ type Config struct {
 	CommandPath        string
 	ObserveFunc        func(string, uint64, int, int) (bridge.ActivityWindow, error)
 	InstructionFunc    func(context.Context, string, string, string) error
-	RespondFunc        func(context.Context, string, string, string) error
-	ApprovalFunc       func(context.Context, string, string, string) error
+	// DiagnoseFunc returns the canonical schema-versioned diagnostic report
+	// for a session as JSON (see DiagnosticRequest). nil disables the
+	// diagnose_session capability.
+	DiagnoseFunc func(sessionID string) ([]byte, error)
+	RespondFunc  func(context.Context, string, string, string) error
+	ApprovalFunc func(context.Context, string, string, string) error
 	// Endpoint is the control-plane WebSocket URL, e.g.
 	// "wss://control.bridge.orchael.dev/v1/control". Taken verbatim from
 	// Bridge's enrollment response; never hard-coded here.
@@ -513,6 +517,14 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idleTimeout
 			if err := c.writeEnvelope(ctx, conn, "session_activity", result); err != nil {
 				return
 			}
+		case "diagnose_session":
+			var request DiagnosticRequest
+			if json.Unmarshal(env.Payload, &request) != nil {
+				continue
+			}
+			if err := c.writeEnvelope(ctx, conn, "session_diagnostic", c.diagnose(request)); err != nil {
+				return
+			}
 		case "command":
 			var command Command
 			if json.Unmarshal(env.Payload, &command) != nil {
@@ -661,7 +673,7 @@ func (c *Client) sendHello(ctx context.Context, conn *websocket.Conn) error {
 	if len(version) > maxBridgectlVersion {
 		version = version[:maxBridgectlVersion]
 	}
-	caps, _ := json.Marshal(map[string]bool{"terminal_session": c.cfg.TerminalSupervisor != nil, "observe_session": c.cfg.ObserveFunc != nil, "send_instruction": c.cfg.InstructionFunc != nil})
+	caps, _ := json.Marshal(map[string]bool{"terminal_session": c.cfg.TerminalSupervisor != nil, "observe_session": c.cfg.ObserveFunc != nil, "send_instruction": c.cfg.InstructionFunc != nil, "diagnose_session": c.cfg.DiagnoseFunc != nil})
 	return c.writeEnvelope(ctx, conn, msgHello, helloPayload{BridgectlVersion: version, Capabilities: caps})
 }
 

@@ -149,7 +149,7 @@ Example `--json` output (pretty-printed here; the real output is one line):
   },
   "interaction_updated_at": "2026-03-01T10:01:00Z",
   "interaction_last_report_at": "2026-03-01T10:02:00Z",
-  "pending_request": {"id": "req-1", "type": "approval", "kind": "command", "summary_available": true},
+  "pending_request": {"id": "req-1", "id_sha256": "sha256:3f2a…", "type": "approval", "kind": "command", "summary_available": true},
   "lifecycle_revision_wire": 4,
   "interaction_revision_wire": 3,
   "interaction_revision_local": 7,
@@ -171,7 +171,7 @@ Example `--json` output (pretty-printed here; the real output is one line):
 | `interaction_capability` | The five provider capability flags. `null` = capability unknown (server reported none); all `false` = explicitly unsupported, so `interaction_state` can only be `unknown`. |
 | `interaction_updated_at` | Last change of interaction state or pending-request identity. Not a session-wide "last activity" time. |
 | `interaction_last_report_at` | Last authoritative provider report, including repeats. |
-| `pending_request` | `null`, or `{id, type (input\|approval), kind, summary_available}`. `kind` is a provider-assigned category from a fixed vocabulary: `command`, `file_change`, `tool`, `question`, `other`, or `unknown` (provider did not classify it; any other provider value is reported as `other`). `summary_available` is true when the provider supplied a summary; its text is never included. |
+| `pending_request` | `null`, or `{id, id_sha256, type (input\|approval), kind, summary_available}`. `id_sha256` is `sha256:` plus the digest of the original, untruncated request ID (`id` itself is bounded and sanitized). `kind` is a provider-assigned category from a fixed vocabulary: `command`, `file_change`, `tool`, `question`, `other`, or `unknown` (provider did not classify it; any other provider value is reported as `other`). `summary_available` is true when the provider supplied a summary; its text is never included. |
 | `lifecycle_revision_wire` | Lifecycle revision last allocated by the Bridge control client for this session; `null` if it has none (not enrolled, or forgotten after a terminal state). |
 | `interaction_revision_wire` | The interaction revision Bridge compares; `null` likewise. |
 | `interaction_revision_local` | The Supervisor's own interaction revision. Not restart-durable and a different sequence from the wire revisions; never compare them to each other. |
