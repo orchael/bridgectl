@@ -20,7 +20,7 @@ The JSON form is the stable integration surface. Start with `schema_version: 1` 
 - interaction state (`working`, `waiting_for_input`, `waiting_for_approval`, `idle`, `unknown`) and the five interaction capability flags
 - lifecycle and interaction revisions, each labelled with its source (see Revisions below)
 - `created_at`; `interaction_updated_at` (`Interaction.UpdatedAt`, last change of state or pending identity) and `interaction_last_report_at` (`Interaction.LastActivityAt`, last authoritative report, even a repeat). Neither is a session-wide "last activity" time, and the names must not imply one
-- pending request identity/type and provider-supplied safe summary when available
+- pending request identity/type, and `summary_available` (a boolean). Provider summary text is never emitted: Codex approval summaries embed the working directory and full command
 - active-writer presence, without client secrets
 - local control connection status when available: the persisted `bridge-control-status.json` state and its `updated_at`, which is the time of the last state change rather than the last successful connection, plus whether that file is older than `bridgecontrol.StatusStaleAfter`. Report `unknown` when the status path is not configured. A "last successful connection" time is only included if the control client starts recording one
 - the bridgectl version and diagnostic schema version

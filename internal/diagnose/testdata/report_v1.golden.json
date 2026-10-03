@@ -21,7 +21,7 @@
   "pending_request": {
     "id": "req-1",
     "type": "approval",
-    "summary": "Run command: go test"
+    "summary_available": true
   },
   "lifecycle_revision_wire": 4,
   "interaction_revision_wire": 3,

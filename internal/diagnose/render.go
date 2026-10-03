@@ -39,9 +39,7 @@ func Render(w io.Writer, r *Report) {
 		p("pending request", "none")
 	} else {
 		p("pending request", fmt.Sprintf("%s (%s)", pr.ID, pr.Type))
-		if pr.Summary != nil {
-			p("pending summary", *pr.Summary)
-		}
+		p("pending summary", yesNo(pr.SummaryAvailable)+" (text never included)")
 	}
 	p("updated", timeOr(r.InteractionUpdatedAt, "not reported"))
 	p("last report", timeOr(r.InteractionLastReportAt, "not reported"))

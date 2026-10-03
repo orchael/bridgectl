@@ -109,9 +109,11 @@ output or logs, and it never infers interaction state.
   responses, chain-of-thought, environment variables, credentials, OAuth
   material, filesystem contents or paths, session `error` text, control
   `last_error`, or client IDs (writer presence is a boolean). The only
-  provider-supplied free text is the pending-request `id` and `summary`
-  (summary only if the provider declares pending-summary support); both are
-  length-bounded with control characters removed.
+  provider-supplied free text is the pending-request `id` (an opaque
+  identifier, length-bounded, control characters removed). Provider pending
+  *summaries* are deliberately **not** included, because they can contain
+  working directories, full commands and credentials; only a boolean
+  `summary_available` is reported.
 - Unknown stays unknown: a value bridgectl cannot report is `null` (or
   `"unknown"` for enums), never a guess.
 - Failure (malformed or unknown session ID, server not running) exits non-zero.
@@ -142,7 +144,7 @@ Example `--json` output (pretty-printed here; the real output is one line):
   },
   "interaction_updated_at": "2026-03-01T10:01:00Z",
   "interaction_last_report_at": "2026-03-01T10:02:00Z",
-  "pending_request": {"id": "req-1", "type": "approval", "summary": "Run command: go test"},
+  "pending_request": {"id": "req-1", "type": "approval", "summary_available": true},
   "lifecycle_revision_wire": 4,
   "interaction_revision_wire": 3,
   "interaction_revision_local": 7,
@@ -164,7 +166,7 @@ Example `--json` output (pretty-printed here; the real output is one line):
 | `interaction_capability` | The five provider capability flags. `null` = capability unknown (server reported none); all `false` = explicitly unsupported, so `interaction_state` can only be `unknown`. |
 | `interaction_updated_at` | Last change of interaction state or pending-request identity. Not a session-wide "last activity" time. |
 | `interaction_last_report_at` | Last authoritative provider report, including repeats. |
-| `pending_request` | `null`, or `{id, type (input\|approval), summary}`; `summary` is `null` unless the provider supplies a safe one. |
+| `pending_request` | `null`, or `{id, type (input\|approval), summary_available}`. `summary_available` is true when the provider supplied a summary; its text is never included. |
 | `lifecycle_revision_wire` | Lifecycle revision last allocated by the Bridge control client for this session; `null` if it has none (not enrolled, or forgotten after a terminal state). |
 | `interaction_revision_wire` | The interaction revision Bridge compares; `null` likewise. |
 | `interaction_revision_local` | The Supervisor's own interaction revision. Not restart-durable and a different sequence from the wire revisions; never compare them to each other. |

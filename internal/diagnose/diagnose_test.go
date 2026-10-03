@@ -233,8 +233,8 @@ func TestPendingRequestIdentityAndSummary(t *testing.T) {
 	if p == nil || p.ID != "req-1" || p.Type != "approval" {
 		t.Fatalf("pending = %+v", p)
 	}
-	if p.Summary == nil || *p.Summary != "Run command: go test" {
-		t.Fatalf("summary = %v", p.Summary)
+	if !p.SummaryAvailable {
+		t.Fatal("summary_available must be true when the provider supplied a summary")
 	}
 
 	// No pending request: null, not an empty object.
@@ -246,34 +246,32 @@ func TestPendingRequestIdentityAndSummary(t *testing.T) {
 	}
 }
 
-func TestPendingSummaryOnlyWhenProviderDeclaresSupport(t *testing.T) {
+func TestPendingSummaryTextIsNeverIncluded(t *testing.T) {
+	const secret = "Run once in /home/dev/secret-repo: curl -H 'Authorization: Bearer sk-live-123' https://x"
 	r := fullResp()
-	r.Interaction.Capability.PendingSummarySupported = false
-	p := Build(r, Inputs{Now: now}).PendingRequest
-	if p == nil || p.Summary != nil {
-		t.Fatalf("summary must be null when provider does not declare pending-summary support: %+v", p)
-	}
-	r.Interaction.Capability.PendingSummarySupported = true
-	r.Interaction.PendingRequest.Summary = ""
-	if p := Build(r, Inputs{Now: now}).PendingRequest; p.Summary != nil {
-		t.Fatalf("empty summary must be null, got %q", *p.Summary)
+	r.Interaction.PendingRequest.Summary = secret
+	rep := Build(r, Inputs{Now: now})
+	var human bytes.Buffer
+	Render(&human, rep)
+	for where, out := range map[string]string{"json": string(marshal(t, rep)), "human": human.String()} {
+		for _, frag := range []string{"/home/dev", "secret-repo", "sk-live-123", "Bearer", "curl"} {
+			if strings.Contains(out, frag) {
+				t.Errorf("%s leaked summary fragment %q: %s", where, frag, out)
+			}
+		}
 	}
 }
 
-func TestPendingSummaryIsBoundedAndSanitized(t *testing.T) {
+func TestSummaryAvailableFlag(t *testing.T) {
 	r := fullResp()
-	r.Interaction.PendingRequest.Summary = "line1\nline2\x1b[31m\t" + strings.Repeat("é", 1000)
-	s := Build(r, Inputs{Now: now}).PendingRequest.Summary
-	if s == nil {
-		t.Fatal("summary nil")
+	r.Interaction.Capability.PendingSummarySupported = false
+	if Build(r, Inputs{Now: now}).PendingRequest.SummaryAvailable {
+		t.Fatal("summary_available must be false when provider does not declare support")
 	}
-	if n := len([]rune(*s)); n > MaxSummaryRunes {
-		t.Fatalf("summary has %d runes, max %d", n, MaxSummaryRunes)
-	}
-	for _, c := range *s {
-		if c < 0x20 || c == 0x7f {
-			t.Fatalf("control character %q survived in %q", c, *s)
-		}
+	r.Interaction.Capability.PendingSummarySupported = true
+	r.Interaction.PendingRequest.Summary = "  "
+	if Build(r, Inputs{Now: now}).PendingRequest.SummaryAvailable {
+		t.Fatal("blank summary is not available")
 	}
 }
 
@@ -567,7 +565,7 @@ func TestSecurityExclusions(t *testing.T) {
 	r.AttachedClientId = sentinels["client id"]
 	r.ActiveWriterClientId = sentinels["client id"]
 	r.Interaction.Source = sentinels["provider payload"]
-	r.Interaction.PendingRequest.Summary = "safe summary"
+	r.Interaction.PendingRequest.Summary = "Run once in /home/dev/SECRET-repo: curl SECRET-token"
 	in := connectedControl()
 	in.Control.Status.LastError = sentinels["oauth"] + sentinels["cot"]
 	in.Control.Status.InstallationID = sentinels["prompt"]

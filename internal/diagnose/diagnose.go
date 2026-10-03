@@ -33,8 +33,6 @@ import (
 const SchemaVersion = 1
 
 const (
-	// MaxSummaryRunes bounds the provider-supplied pending summary.
-	MaxSummaryRunes = 200
 	// MaxIDRunes bounds the provider-supplied pending request ID.
 	MaxIDRunes = 128
 )
@@ -87,9 +85,11 @@ type Capability struct {
 type Pending struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
-	// Summary is non-null only when the provider declares pending-summary
-	// support; it is length-bounded and stripped of control characters.
-	Summary *string `json:"summary"`
+	// SummaryAvailable reports that the provider supplied a pending summary.
+	// The text itself is never included: provider summaries (e.g. Codex
+	// approvals) can embed working directories, full commands and anything
+	// typed into them, which no sanitizer can make safe.
+	SummaryAvailable bool `json:"summary_available"`
 }
 
 // Control is the local Bridge control connection status, read from the file
@@ -215,11 +215,7 @@ func Build(resp *bridgev1.GetSessionResponse, in Inputs) *Report {
 
 	if p := ia.GetPendingRequest(); p != nil {
 		pending := &Pending{ID: truncate(sanitize(p.GetId()), MaxIDRunes), Type: p.GetType()}
-		if caps.PendingSummarySupported {
-			if s := truncate(sanitize(p.GetSummary()), MaxSummaryRunes); s != "" {
-				pending.Summary = &s
-			}
-		}
+		pending.SummaryAvailable = caps.PendingSummarySupported && strings.TrimSpace(p.GetSummary()) != ""
 		r.PendingRequest = pending
 	}
 	return r

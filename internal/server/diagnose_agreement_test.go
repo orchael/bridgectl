@@ -189,8 +189,11 @@ func TestDiagnoseAgreesWithSupervisor_InteractionTransitions(t *testing.T) {
 		}
 		lastRev = *rep.InteractionRevisionLocal
 		if st.in.Pending != nil {
-			if rep.PendingRequest.Summary == nil || *rep.PendingRequest.Summary != st.in.Pending.Summary {
-				t.Errorf("%s: summary = %v", st.name, rep.PendingRequest.Summary)
+			if !rep.PendingRequest.SummaryAvailable {
+				t.Errorf("%s: summary_available = false", st.name)
+			}
+			if b, _ := rep.MarshalJSON(); strings.Contains(string(b), st.in.Pending.Summary) {
+				t.Errorf("%s: summary text leaked: %s", st.name, b)
 			}
 		}
 	}

@@ -10,7 +10,7 @@ Interaction
   state                      waiting_for_approval
   capability                 state=yes approval=yes summary=yes remote_response=yes structured_approval=yes
   pending request            req-1 (approval)
-  pending summary            Run command: go test
+  pending summary            yes (text never included)
   updated                    2026-03-01T10:01:00Z
   last report                2026-03-01T10:02:00Z
 Revisions
