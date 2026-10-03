@@ -60,6 +60,21 @@ jobs:
           flags: go
           name: go-coverage
 
+  go-build-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Cross-compile for windows/amd64
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: go build ./...
+
   typescript-lint:
     runs-on: ubuntu-latest
     steps:

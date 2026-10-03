@@ -15,8 +15,8 @@ builds:
   # and pushed by the publish_container job in publish.yml. This config owns the
   # bridgectl CLI release artifacts only.
   #
-  # windows is intentionally absent: cmd/bridgectl does not cross-compile for
-  # Windows yet (see issue #259), and an unbuildable target fails the whole run.
+  # windows/arm64 is ignored to match the ballast release shape (CGO_ENABLED=0
+  # keeps the build portable, but there's no arm64 Windows target to support).
   - id: bridgectl
     binary: bridgectl
     main: ./cmd/bridgectl
@@ -25,9 +25,13 @@ builds:
     goos:
       - linux
       - darwin
+      - windows
     goarch:
       - amd64
       - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
     ldflags:
       - -s -w -X main.version={{ .Version }}
     hooks:
