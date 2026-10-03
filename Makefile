@@ -302,11 +302,19 @@ test-remote-mtls-published:
 	fi; \
 	set +e; \
 	CF=e2e/remote-mtls/docker-compose.yml; \
+	OUT_DIR="$${RESULTS_OUT_DIR:-dist/e2e-results/remote-mtls}"; \
+	mkdir -p "$$OUT_DIR"; \
 	docker pull "$$BRIDGECTL_SERVER_IMAGE" || exit 1; \
 	docker compose -f $$CF up --abort-on-container-exit --exit-code-from remote-client; \
 	rc=$$?; \
-	mkdir -p "$${RESULTS_OUT_DIR:-dist/e2e-results/remote-mtls}"; \
-	docker compose -f $$CF cp remote-client:/results "$${RESULTS_OUT_DIR:-dist/e2e-results/remote-mtls}" 2>/dev/null || true; \
+	echo "digest=$$BRIDGECTL_SERVER_IMAGE" > "$$OUT_DIR/image.txt"; \
+	docker compose -f $$CF logs --no-color > "$$OUT_DIR/compose.log" 2>&1; \
+	docker compose -f $$CF cp remote-client:/results/. "$$OUT_DIR" 2>/dev/null; \
+	cp_rc=$$?; \
+	if [ $$rc -eq 0 ] && { [ $$cp_rc -ne 0 ] || [ ! -f "$$OUT_DIR/remote-mtls-e2e.xml" ]; }; then \
+		echo "ERROR: tests reported success but JUnit results were not extracted to $$OUT_DIR" >&2; \
+		rc=1; \
+	fi; \
 	echo ""; \
 	echo "========================================"; \
 	if [ $$rc -eq 0 ]; then \
@@ -355,6 +363,8 @@ test-remote-stepca-published:
 	fi; \
 	set +e; \
 	CF=e2e/remote-stepca/docker-compose.yml; \
+	OUT_DIR="$${RESULTS_OUT_DIR:-dist/e2e-results/remote-stepca}"; \
+	mkdir -p "$$OUT_DIR"; \
 	rc=0; \
 	docker pull "$$BRIDGECTL_SERVER_IMAGE" || exit 1; \
 	docker compose -f $$CF up -d || rc=$$?; \
@@ -370,8 +380,14 @@ test-remote-stepca-published:
 		fi; \
 		kill $$LOG_PID 2>/dev/null; wait $$LOG_PID 2>/dev/null; \
 	fi; \
-	mkdir -p "$${RESULTS_OUT_DIR:-dist/e2e-results/remote-stepca}"; \
-	docker compose -f $$CF cp remote-client:/results "$${RESULTS_OUT_DIR:-dist/e2e-results/remote-stepca}" 2>/dev/null || true; \
+	echo "digest=$$BRIDGECTL_SERVER_IMAGE" > "$$OUT_DIR/image.txt"; \
+	docker compose -f $$CF logs --no-color > "$$OUT_DIR/compose.log" 2>&1; \
+	docker compose -f $$CF cp remote-client:/results/. "$$OUT_DIR" 2>/dev/null; \
+	cp_rc=$$?; \
+	if [ $$rc -eq 0 ] && { [ $$cp_rc -ne 0 ] || [ ! -f "$$OUT_DIR/remote-stepca-e2e.xml" ]; }; then \
+		echo "ERROR: tests reported success but JUnit results were not extracted to $$OUT_DIR" >&2; \
+		rc=1; \
+	fi; \
 	echo ""; \
 	echo "========================================"; \
 	if [ $$rc -eq 0 ]; then \
