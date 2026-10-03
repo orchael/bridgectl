@@ -89,6 +89,12 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # doctor checks the Node on PATH against .nvmrc; the runner's preinstalled
+      # Node can lag it.
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+
       - name: Build bridgectl.exe
         run: go build -o bridgectl.exe ./cmd/bridgectl
 
