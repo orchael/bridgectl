@@ -91,6 +91,20 @@ func (s *CLISuite) testStateDir() string {
 	return dir
 }
 
+// testRepoDir returns a fresh, isolated repo directory for a session's
+// RepoPath. It must be called after testStateDir (which isolates $HOME):
+// EffectiveAllowedPaths (issue #238) makes $HOME the default session
+// allow-list entry, so a repo dir outside it (such as a plain
+// s.T().TempDir(), rooted under the OS temp dir rather than $HOME) is
+// rejected by StartSession's repo_path allow-list check.
+func (s *CLISuite) testRepoDir() string {
+	s.T().Helper()
+	dir, err := os.MkdirTemp(os.Getenv("HOME"), "repo-*")
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 // TestServerStartStop verifies that the server starts and stops cleanly.
 func (s *CLISuite) TestServerStartStop() {
 	if testing.Short() {
@@ -136,7 +150,7 @@ func (s *CLISuite) TestEchoSessionLifecycle() {
 	}
 
 	stateDir := s.testStateDir()
-	repoDir := s.T().TempDir()
+	repoDir := s.testRepoDir()
 
 	srv, err := localserver.Start(localserver.Config{
 		StateDir: stateDir,
@@ -227,7 +241,7 @@ func (s *CLISuite) TestRepoSetupConfigEnvironmentPropagation() {
 	}
 
 	stateDir := s.testStateDir()
-	repoDir := s.T().TempDir()
+	repoDir := s.testRepoDir()
 	binDir := s.T().TempDir()
 	providerScript := filepath.Join(binDir, "print-setup-env.sh")
 	s.Require().NoError(os.WriteFile(providerScript, []byte(`#!/bin/sh
@@ -336,7 +350,7 @@ func (s *CLISuite) TestMultipleSessionsSameServer() {
 	}
 
 	stateDir := s.testStateDir()
-	repoDir := s.T().TempDir()
+	repoDir := s.testRepoDir()
 
 	srv, err := localserver.Start(localserver.Config{
 		StateDir: stateDir,
@@ -593,7 +607,7 @@ func (s *CLISuite) TestSessionAttachAndInput() {
 	}
 
 	stateDir := s.testStateDir()
-	repoDir := s.T().TempDir()
+	repoDir := s.testRepoDir()
 
 	srv, err := localserver.Start(localserver.Config{
 		StateDir: stateDir,
@@ -1220,7 +1234,7 @@ func (s *CLISuite) TestWriterReleasedOnDisconnect() {
 	}
 
 	stateDir := s.testStateDir()
-	repoDir := s.T().TempDir()
+	repoDir := s.testRepoDir()
 
 	srv, err := localserver.Start(localserver.Config{StateDir: stateDir})
 	s.Require().NoError(err)
@@ -1288,7 +1302,7 @@ func (s *CLISuite) TestWriterEvictionBroadcastsEvents() {
 	}
 
 	stateDir := s.testStateDir()
-	repoDir := s.T().TempDir()
+	repoDir := s.testRepoDir()
 
 	srv, err := localserver.Start(localserver.Config{StateDir: stateDir})
 	s.Require().NoError(err)
@@ -1386,7 +1400,7 @@ func (s *CLISuite) TestObserverClaimsWriterAfterRelease() {
 	}
 
 	stateDir := s.testStateDir()
-	repoDir := s.T().TempDir()
+	repoDir := s.testRepoDir()
 
 	srv, err := localserver.Start(localserver.Config{StateDir: stateDir})
 	s.Require().NoError(err)
@@ -1485,7 +1499,7 @@ func (s *CLISuite) TestSameClientIDReattachment() {
 	}
 
 	stateDir := s.testStateDir()
-	repoDir := s.T().TempDir()
+	repoDir := s.testRepoDir()
 
 	srv, err := localserver.Start(localserver.Config{StateDir: stateDir})
 	s.Require().NoError(err)
@@ -1544,7 +1558,7 @@ func (s *CLISuite) TestReattachmentAsObserverThenClaimWriter() {
 	}
 
 	stateDir := s.testStateDir()
-	repoDir := s.T().TempDir()
+	repoDir := s.testRepoDir()
 
 	srv, err := localserver.Start(localserver.Config{StateDir: stateDir})
 	s.Require().NoError(err)
@@ -2000,7 +2014,7 @@ func (s *CLISuite) TestSecureModeSessionLifecycle() {
 	}
 
 	stateDir := s.testStateDir()
-	repoDir := s.T().TempDir()
+	repoDir := s.testRepoDir()
 
 	srv, err := localserver.Start(localserver.Config{
 		StateDir:   stateDir,

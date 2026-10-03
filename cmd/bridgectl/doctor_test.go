@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -44,9 +45,10 @@ func TestDoctorReportsNetworkStatus(t *testing.T) {
 	cmd := newDoctorCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	if err := cmd.RunE(cmd, nil); err != nil {
-		t.Fatal(err)
-	}
+	// No telemetry credential file is written in this fixture, so doctor's
+	// "!" exit (issue #238) is expected; this test is about the network
+	// line specifically, not overall doctor health.
+	_ = cmd.RunE(cmd, nil)
 	if !strings.Contains(out.String(), "network       ✓ reachable") {
 		t.Fatalf("expected reachable network status: %s", out.String())
 	}
@@ -185,5 +187,130 @@ func TestServerVersionLineMismatch(t *testing.T) {
 	want := "  server        ! 1.2.3 (differs from bridgectl 1.4.0"
 	if !strings.HasPrefix(got, want) {
 		t.Fatalf("got %q want prefix %q", got, want)
+	}
+}
+
+// TestDoctorExitsZeroWhenHealthy covers issue #238's "doctor exits 0 on
+// success, 1 on any failure" acceptance criterion: a bare environment with
+// no enrollment and no running daemon has only "✓"/"-" markers (never "!"),
+// so doctor must report success.
+func TestDoctorExitsZeroWhenHealthy(t *testing.T) {
+	t.Setenv("BRIDGECTL_STATE_DIR", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	cmd := newDoctorCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("expected a healthy report to exit cleanly, got %v: %s", err, out.String())
+	}
+}
+
+// TestDoctorExitsNonZeroOnFailure is the failure-path complement: a
+// malformed telemetry credential produces a "!" finding, so doctor must
+// report failure.
+func TestDoctorExitsNonZeroOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BRIDGECTL_STATE_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	mp, _ := bridgeStatePaths()
+	if err := atomicJSON(mp, bridgeEnrollment{BridgeURL: "https://bridge.example", OrganizationID: "org", InstallationID: "install", TelemetryEndpoint: "https://bridge.example/v1/telemetry/segments"}); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newDoctorCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := cmd.RunE(cmd, nil); err == nil {
+		t.Fatalf("expected a report with a \"!\" finding to fail, got nil: %s", out.String())
+	}
+}
+
+// TestDoctorJSONOutput covers the --json acceptance criterion: the flag
+// must emit a single parseable JSON object whose findings decompose the
+// same report sections the text mode prints.
+func TestDoctorJSONOutput(t *testing.T) {
+	t.Setenv("BRIDGECTL_STATE_DIR", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	cmd := newDoctorCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := cmd.Flags().Set("json", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("expected a healthy report to exit cleanly, got %v: %s", err, out.String())
+	}
+
+	var report struct {
+		OK       bool `json:"ok"`
+		Findings []struct {
+			Section string `json:"section"`
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"findings"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("doctor --json did not emit parseable JSON: %v\n%s", err, out.String())
+	}
+	if !report.OK {
+		t.Fatalf("expected ok=true for a healthy report: %+v", report)
+	}
+	if len(report.Findings) == 0 {
+		t.Fatal("expected at least one finding")
+	}
+	var sawVersions, sawAccess bool
+	for _, f := range report.Findings {
+		if f.Status == "" || f.Message == "" {
+			t.Fatalf("finding missing status or message: %+v", f)
+		}
+		switch f.Section {
+		case "Versions":
+			sawVersions = true
+		case "Access":
+			sawAccess = true
+		}
+	}
+	if !sawVersions || !sawAccess {
+		t.Fatalf("expected Versions and Access sections in findings: %+v", report.Findings)
+	}
+}
+
+// TestAccessSectionLinesIncludesHome covers issue #238's "doctor shows the
+// effective allowed-path list, including the implicit $HOME entry".
+func TestAccessSectionLinesIncludesHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("BRIDGECTL_STATE_DIR", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	lines := accessSectionLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], home) {
+		t.Fatalf("expected the allowed-paths line to include $HOME %q, got %v", home, lines)
+	}
+}
+
+// TestAccessSectionLinesIsAdditiveWithConfig covers the "explicit
+// allowed_paths entries remain additive" acceptance criterion: a
+// configured allowed_paths entry must appear alongside $HOME, not instead
+// of it.
+func TestAccessSectionLinesIsAdditiveWithConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	stateDir := t.TempDir()
+	t.Setenv("BRIDGECTL_STATE_DIR", stateDir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	configPath := filepath.Join(stateDir, "bridge.yaml")
+	if err := os.WriteFile(configPath, []byte("allowed_paths:\n  - /srv/repos\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	lines := accessSectionLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], home) || !strings.Contains(lines[0], "/srv/repos") {
+		t.Fatalf("expected both $HOME %q and /srv/repos in the allowed-paths line, got %v", home, lines)
 	}
 }

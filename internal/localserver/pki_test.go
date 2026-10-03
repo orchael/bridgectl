@@ -968,3 +968,34 @@ func TestBuildServerSANs(t *testing.T) {
 		})
 	}
 }
+
+// TestEffectiveAllowedPaths covers issue #238's "$HOME is always included in
+// the effective allowed-path list" requirement: $HOME must be present with
+// no configuration at all (the safe default), and must still be present
+// alongside explicit configured entries (additive, not replaced).
+func TestEffectiveAllowedPaths(t *testing.T) {
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+
+	t.Run("no configured paths still includes HOME", func(t *testing.T) {
+		got := EffectiveAllowedPaths(nil)
+		assert.Equal(t, []string{home}, got)
+	})
+
+	t.Run("configured paths extend rather than replace HOME", func(t *testing.T) {
+		got := EffectiveAllowedPaths([]string{"/srv/repos"})
+		assert.Equal(t, []string{home, "/srv/repos"}, got)
+	})
+}
+
+// TestKnownProviderIDs covers issue #238's provider-shortcut requirement:
+// the built-in providers are all present, and the "codex-app-server"
+// compatibility alias (which shares codex's binary) does not get its own
+// duplicate shortcut.
+func TestKnownProviderIDs(t *testing.T) {
+	ids := KnownProviderIDs()
+	for _, want := range []string{"claude", "codex", "opencode", "gemini"} {
+		assert.Contains(t, ids, want)
+	}
+	assert.NotContains(t, ids, "codex-app-server")
+}

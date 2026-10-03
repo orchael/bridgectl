@@ -14,6 +14,16 @@ import (
 
 // Login after daemon startup must activate reporting without stopping sessions.
 func TestEnrollmentReloadPreservesLiveSession(t *testing.T) {
+	// EffectiveAllowedPaths (issue #238) makes $HOME the default session
+	// allow-list entry, so the session's RepoPath must live under a $HOME
+	// this test controls rather than an unrelated t.TempDir().
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	repoPath := filepath.Join(fakeHome, "repo")
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
 	stateDir := t.TempDir()
 	configPath := filepath.Join(stateDir, "bridge.yaml")
 	if err := os.WriteFile(configPath, []byte("providers:\n  testprovider:\n    binary: cat\n    startup_probe: none\n"), 0600); err != nil {
@@ -26,7 +36,7 @@ func TestEnrollmentReloadPreservesLiveSession(t *testing.T) {
 	defer srv.Stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := srv.supervisor.Start(ctx, bridge.SessionConfig{SessionID: "live", ProjectID: "test", RepoPath: t.TempDir(), Options: map[string]string{"provider": "testprovider"}}); err != nil {
+	if _, err := srv.supervisor.Start(ctx, bridge.SessionConfig{SessionID: "live", ProjectID: "test", RepoPath: repoPath, Options: map[string]string{"provider": "testprovider"}}); err != nil {
 		t.Fatal(err)
 	}
 	credPath := filepath.Join(stateDir, "bridge-credentials.json")
