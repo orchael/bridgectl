@@ -485,7 +485,7 @@ The packaged service installs a minimal config at `/etc/bridgectl/bridge.yaml` a
    bridgectl.exe --version
    ```
 
-**What works today:** the Windows build cross-compiles and ships a release artifact, so client-only and diagnostic commands (`bridgectl.exe --version`, `bridgectl.exe doctor`) run natively.
+**What works today:** the Windows build cross-compiles and ships a release artifact. CI runs `bridgectl.exe --version` and `bridgectl.exe doctor` natively on a Windows runner on every change, so the client-only and diagnostic commands are verified to actually run, not just compile.
 
 **What does not work yet:** the interactive session path (`bridgectl.exe session start`, `bridgectl.exe run`) depends on a pseudo-terminal, and this build has no real PTY support on Windows (the underlying `creack/pty` dependency compiles but returns an "unsupported" error for every call on this platform) — it fails with a clear error rather than hanging or behaving unpredictably. Real interactive support needs ConPTY integration, tracked in [#259](https://github.com/orchael/bridgectl/issues/259).
 
