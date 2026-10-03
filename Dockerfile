@@ -62,7 +62,7 @@ RUN useradd -m -s /bin/bash bridge && \
 
 # Install Antigravity CLI (agy) — replaces the retired @google/gemini-cli npm package.
 # Auth uses OAuth2 credentials mounted at ~/.gemini/oauth_creds.json.
-RUN curl -fsSL https://antigravity.google/cli/install.sh | HOME=/home/bridge bash && \
+RUN curl -fsSL --compressed https://antigravity.google/cli/install.sh | HOME=/home/bridge bash && \
     chown bridge:bridge /home/bridge/.local/bin/agy
 
 COPY --from=build /out/bridgectl /usr/local/bin/bridgectl
