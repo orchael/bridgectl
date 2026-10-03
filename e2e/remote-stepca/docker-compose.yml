@@ -35,6 +35,12 @@ services:
           - step-ca.local
 
   server:
+    # image is set explicitly (in addition to build) so a caller can pin the
+    # server to an already-pulled, immutable artifact (e.g. a published
+    # release digest) via BRIDGECTL_SERVER_IMAGE and skip the build step —
+    # see `make test-remote-stepca-published`. Local `make test-remote-stepca`
+    # always runs `build` first, so this tag is just a stable local name there.
+    image: ${BRIDGECTL_SERVER_IMAGE:-bridgectl-e2e-remote-stepca-server:dev}
     build:
       context: ../..
       dockerfile: Dockerfile
