@@ -499,3 +499,39 @@ func TestInteractionWatcher_ChannelClosedOnSessionStop(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 }
+
+// TestUpdateInteraction_KindOnlyUpdateIsVisibleWithoutRevisionBump covers a
+// provider classifying an already-pending request: Kind is local-only, so it
+// must reach GetSession/diagnostics but must not bump the revision (which
+// would resend an identical payload to Bridge).
+func TestUpdateInteraction_KindOnlyUpdateIsVisibleWithoutRevisionBump(t *testing.T) {
+	caps := InteractionCapabilities{InteractionStateSupported: true, ApprovalStateSupported: true}
+	sup, _ := newInteractionSupervisor(t, &caps)
+	startTestSession(t, sup, "s1")
+	ev := InteractionEvidence{Source: "test", Capability: caps}
+	pend := func(kind PendingRequestKind) Interaction {
+		return Interaction{State: InteractionWaitingForApproval, Evidence: ev,
+			Pending: &PendingRequest{ID: "r1", Type: PendingRequestApproval, Summary: "x", Kind: kind}}
+	}
+	if err := sup.UpdateInteraction("s1", pend("")); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := sup.Get("s1")
+	if err := sup.UpdateInteraction("s1", pend(PendingKindCommand)); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := sup.Get("s1")
+	if after.Interaction.Pending == nil || after.Interaction.Pending.Kind != PendingKindCommand {
+		t.Fatalf("kind-only update was discarded: %+v", after.Interaction.Pending)
+	}
+	if after.Interaction.Revision != before.Interaction.Revision {
+		t.Fatalf("kind-only update bumped the revision %d -> %d", before.Interaction.Revision, after.Interaction.Revision)
+	}
+	// A repeat report with no kind must not erase the classification.
+	if err := sup.UpdateInteraction("s1", pend("")); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := sup.Get("s1"); again.Interaction.Pending.Kind != PendingKindCommand {
+		t.Fatal("an unclassified repeat erased the kind")
+	}
+}

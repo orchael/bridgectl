@@ -48,6 +48,21 @@ const (
 	PendingRequestApproval PendingRequestType = "approval"
 )
 
+// PendingRequestKind is a provider-assigned, fixed-vocabulary category of a
+// pending request. It exists so diagnostics and UIs can say *what sort of
+// thing* the agent is blocked on without any free text (a Summary can embed
+// working directories, full commands and credentials). The zero value means
+// the provider did not classify the request.
+type PendingRequestKind string
+
+const (
+	PendingKindCommand    PendingRequestKind = "command"
+	PendingKindFileChange PendingRequestKind = "file_change"
+	PendingKindTool       PendingRequestKind = "tool"
+	PendingKindQuestion   PendingRequestKind = "question"
+	PendingKindOther      PendingRequestKind = "other"
+)
+
 // PendingRequest is a stable-identity request for user attention.
 //
 // ID must be stable for the lifetime of the request: the same logical
@@ -69,6 +84,9 @@ type PendingRequest struct {
 	// and consumers fall back to a generic label such as "Waiting for your
 	// answer".
 	Summary string
+	// Kind classifies the request from structured provider data (never from
+	// terminal text). Empty means unclassified.
+	Kind PendingRequestKind
 }
 
 // InteractionCapabilities declares what a provider can authoritatively

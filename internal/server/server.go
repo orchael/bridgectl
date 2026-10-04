@@ -41,6 +41,8 @@ type BridgeServer struct {
 	jwtVerifier *auth.JWTVerifier
 	// certsDir is the certs directory for persisting enrolled JWT public keys.
 	certsDir string
+	// diagnoseStateDir locates the control client files read by DiagnoseSession.
+	diagnoseStateDir string
 	// enrollStore is the enrollment token store. Nil when enrollment is
 	// not configured.
 	enrollStore *enrollment.Store
@@ -76,6 +78,13 @@ func New(supervisor *bridge.Supervisor, registry *bridge.Registry, logger *slog.
 		certsDir:          certsDir,
 		version:           version,
 	}
+}
+
+// SetDiagnoseStateDir sets the state directory DiagnoseSession reads the
+// control client's status and revision files from. When unset, diagnostics
+// report control status as unknown and wire revisions as null.
+func (s *BridgeServer) SetDiagnoseStateDir(dir string) {
+	s.diagnoseStateDir = dir
 }
 
 // SetEnrollmentStore configures the enrollment token store for the
@@ -188,6 +197,35 @@ func (s *BridgeServer) GetSession(ctx context.Context, req *bridgev1.GetSessionR
 		return nil, mapBridgeError(err, "get session")
 	}
 	return sessionInfoToProto(info), nil
+}
+
+// DiagnoseSession returns the schema-versioned diagnostic snapshot of one
+// session. It is authorized and rate limited exactly like GetSession, reads
+// only Supervisor state plus the control client's local files, and never
+// consults Bridge, telemetry or terminal output.
+func (s *BridgeServer) DiagnoseSession(ctx context.Context, req *bridgev1.DiagnoseSessionRequest) (*bridgev1.DiagnoseSessionResponse, error) {
+	if !s.globalRL.allow("global") {
+		return nil, status.Error(codes.ResourceExhausted, "global RPC rate limit exceeded")
+	}
+	claims, err := mustClaims(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateUUIDField("session_id", req.SessionId); err != nil {
+		return nil, err
+	}
+	if err := s.authorizeSession(claims, req.SessionId); err != nil {
+		return nil, err
+	}
+	info, err := s.supervisor.Get(req.SessionId)
+	if err != nil {
+		return nil, mapBridgeError(err, "diagnose session")
+	}
+	b, err := DiagnosticReportJSON(info, s.diagnoseStateDir, s.version)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "diagnose session: serialize report")
+	}
+	return &bridgev1.DiagnoseSessionResponse{ReportJson: b}, nil
 }
 
 func (s *BridgeServer) ListSessions(ctx context.Context, req *bridgev1.ListSessionsRequest) (*bridgev1.ListSessionsResponse, error) {

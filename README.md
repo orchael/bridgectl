@@ -135,10 +135,73 @@ make dev-login
 make dev-session-codex DEV_REPO=/workspace/my-repo
 make dev-session-claude DEV_REPO=/workspace/my-repo
 
-# Bypass bridgectl completely when you need an unaffected coding session.
+# Run the provider CLI with the local Bridge diagnostic MCP server.
 make dev-codex DEV_REPO=/workspace/my-repo
 make dev-claude DEV_REPO=/workspace/my-repo
+
+# Standalone escape hatch when Bridge/Docker is unavailable.
+make dev-codex DEV_MCP=0
+make dev-claude DEV_MCP=0
 ```
+
+#### Bridge diagnostics in dev agents
+
+`dev-codex` and `dev-claude` attach a `bridge_dev` MCP server for that launch.
+It exposes `list_sessions`, `list_attention`, `inspect_session`, and `diagnose_session` through
+the local Bridge API, including authoritative diagnostics requested over the
+bridgectl control connection. The adapter uses stdio, starts and stops with the
+agent, and opens no listening port. It does not change global Codex or Claude
+configuration, auto-approve tools, or expose response/approval tools.
+
+Call `list_sessions` with `{}` to discover all registry sessions, or with
+`{"status":"running"}` to filter by lifecycle status: `starting`, `running`,
+`attached`, `stopping`, `stopped`, `failed`, or `unknown`. Results are grouped by installation
+and include offline/stale last-known sessions; installations with no matching
+sessions are omitted. `list_attention` retains its live attention-only behavior.
+The local Bridge API must include the `list_sessions` tool; rebuild that API
+and restart the dev agent after updating both repositories.
+
+Prerequisites are Node.js (the repository specifies Node 24+), Docker access,
+the running local Bridge dev stack (`bridge-web-1`, `bridge-api-1`,
+`bridge-control-1`, `bridge-db-1`), and a dev enrollment:
+
+```bash
+make dev-login LOGIN_ARGS="--bridge https://bridge.orchael.dev --no-browser"
+make dev-server-restart DEV_CONFIG="$PWD/.dev/bridgectl/bridge.yaml"
+make dev-mcp-check
+make dev-codex                 # or make dev-claude
+```
+
+The adapter reads `DEV_STATE_DIR/bridge-enrollment.json`, looks up that
+installation's enrollment approver in the local database, and sends requests as
+that user and organization. Bridge still checks current membership. Signing uses
+the web container's service secret; no secret is copied into agent configuration.
+This adapter is for the local `bridge.orchael.dev` Docker stack, not production
+or remote MCP onboarding. The web container must have `BRIDGE_PUBLIC_URL` set to
+`https://bridge.orchael.dev` and `BRIDGE_API_URL` pointing to the local API service.
+
+To check a particular session through MCP:
+
+```bash
+make dev-mcp-check DEV_MCP_SESSION=<session-id>
+make test-dev-mcp
+```
+
+The check verifies MCP initialization and tool discovery; with a session ID it
+also prints the diagnostic tool result. An unavailable authoritative source is
+reported in the diagnostic itself, so inspect `sources.bridgectl_authoritative`.
+If containers have different names, set `DEV_MCP_WEB_CONTAINER`,
+`DEV_MCP_DB_CONTAINER`, and, if needed, `DEV_MCP_DATABASE` on the make command.
+`DEV_STATE_DIR` selects a different isolated enrollment. These settings also
+apply when `DEV_REPO` points to another working directory. Missing enrollment,
+membership, or Docker access fails the MCP preflight before starting the agent;
+use `DEV_MCP=0` to run without it. `dev-session-codex` and `dev-session-claude`
+continue to use the daemon's provider configuration and are unaffected.
+
+For another stdio client, `make --no-print-directory dev-mcp` runs the adapter
+directly. Its stdout is reserved for MCP JSON-RPC messages; status and errors go
+to stderr. Codex's per-launch settings use the documented
+[MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
 
 #### Debugging high CPU usage
 

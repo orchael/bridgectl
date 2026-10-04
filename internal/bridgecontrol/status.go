@@ -42,12 +42,28 @@ const (
 // tolerate normal scheduling jitter.
 const StatusStaleAfter = 2 * time.Minute
 
+// StatusFileName and RevisionFileName are the state-dir-relative names under
+// which the daemon persists the control client's status and lifecycle
+// revision counters (the interaction counters live at
+// InteractionRevisionPath(<RevisionFileName path>)). Read-only consumers such
+// as `bridgectl session diagnose` use them to locate the same files.
+const (
+	StatusFileName   = "bridge-control-status.json"
+	RevisionFileName = "bridge-control-revisions.json"
+)
+
 // Status is the JSON shape persisted to disk and read back by `doctor`.
 type Status struct {
 	State          State     `json:"state"`
 	InstallationID string    `json:"installation_id,omitempty"`
 	LastError      string    `json:"last_error,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
+	// LastConnectedAt is the last time the client was observed connected
+	// (connect or heartbeat). It survives later non-connected states and
+	// daemon restarts, so it answers "when did this last work" while
+	// UpdatedAt only answers "when did the state last change". Absent in
+	// status files written by older versions.
+	LastConnectedAt time.Time `json:"last_connected_at,omitempty"`
 }
 
 // WriteStatus atomically persists st to path. Errors are the caller's to
