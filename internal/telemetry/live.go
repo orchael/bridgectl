@@ -40,6 +40,9 @@ type interactionBuffer struct {
 	// the entire buffered-so-far data from byte 0 — O(n^2) in the total
 	// bytes buffered before a boundary appears.
 	scanned int
+	// After an unsafe frame, retry only after the buffer doubles. This bounds
+	// total redaction scanning for short redraws or incomplete credentials.
+	frameRetryAt int
 	// escStart is the start index (within data) of a currently-open,
 	// not-yet-complete ANSI escape sequence, or -1 when none is open.
 	// escScanned is how far the terminator search within that sequence has
@@ -226,6 +229,7 @@ func (c *LiveCollector) observeInteraction(session Session, direction Direction,
 		c.flushInteraction(session, pending)
 		pending.data = nil
 		pending.scanned = 0
+		pending.frameRetryAt = 0
 		pending.escStart = -1
 		pending.utf8 = utf8State{}
 	}
@@ -244,6 +248,7 @@ func (c *LiveCollector) observeInteraction(session Session, direction Direction,
 		remainder := pending.data[boundary:]
 		pending.data = append([]byte(nil), remainder...)
 		pending.scanned = 0
+		pending.frameRetryAt = 0
 		pending.escStart = -1
 		// The remainder was never checked for UTF-8 completeness on its
 		// own (only as a suffix of the now-discarded, boundary-terminated
@@ -257,6 +262,7 @@ func (c *LiveCollector) observeInteraction(session Session, direction Direction,
 		c.analyzer.ObserveOmittedInteraction(session, direction, interactionKind(direction), stream, pending.data, OmittedBufferLimit)
 		pending.data = nil
 		pending.scanned = 0
+		pending.frameRetryAt = 0
 		pending.escStart = -1
 		pending.utf8 = utf8State{}
 		delete(c.pending, key)
@@ -288,6 +294,7 @@ func nextInteractionBoundary(pending *interactionBuffer) int {
 	data := pending.data
 	if pending.scanned < 0 || pending.scanned > len(data) {
 		pending.scanned = 0
+		pending.frameRetryAt = 0
 	}
 	i := pending.scanned
 	if pending.escStart >= 0 {
@@ -300,7 +307,7 @@ func nextInteractionBoundary(pending *interactionBuffer) int {
 		i = end
 		pending.escStart = -1
 		if frameComplete {
-			if boundary := safeFrameBoundary(data[:end]); boundary > 0 {
+			if boundary := pending.frameBoundary(end); boundary > 0 {
 				return boundary
 			}
 		}
@@ -318,7 +325,7 @@ func nextInteractionBoundary(pending *interactionBuffer) int {
 			// synchronized update is a record boundary, including when split
 			// across PTY reads, so frames are archived while the session runs.
 			if pending.direction == DirectionAgent && pending.stream == StreamOutput && bytes.Equal(data[i:end], []byte("\x1b[?2026l")) {
-				if boundary := safeFrameBoundary(data[:end]); boundary > 0 {
+				if boundary := pending.frameBoundary(end); boundary > 0 {
 					return boundary
 				}
 			}
@@ -332,6 +339,20 @@ func nextInteractionBoundary(pending *interactionBuffer) int {
 	}
 	pending.scanned = i
 	return 0
+}
+
+// Geometric retry spacing makes unsuccessful safety checks linear in total
+// buffered bytes. Ordinary record boundaries still flush immediately; a safe
+// frame resets this state when its emitted prefix is removed.
+func (pending *interactionBuffer) frameBoundary(end int) int {
+	if end < pending.frameRetryAt {
+		return 0
+	}
+	boundary := safeFrameBoundary(pending.data[:end])
+	if boundary == 0 {
+		pending.frameRetryAt = end * 2
+	}
+	return boundary
 }
 
 // Frame markers are zero-width controls, not redaction boundaries. Retain

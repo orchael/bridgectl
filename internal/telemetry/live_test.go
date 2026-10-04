@@ -596,3 +596,27 @@ func TestRedrawBoundariesPreserveSecretRedaction(t *testing.T) {
 		}
 	}
 }
+
+func TestShortRedrawSafetyChecksStayLinear(t *testing.T) {
+	for _, count := range []int{5000, 20000, 80000} {
+		pending := &interactionBuffer{direction: DirectionAgent, stream: StreamOutput, escStart: -1}
+		checked := 0
+		for i := 0; i < count; i++ {
+			before := pending.frameRetryAt
+			pending.data = append(pending.data, []byte(".\x1b[?2026l")...)
+			if got := nextInteractionBoundary(pending); got != 0 {
+				t.Fatalf("unsafe short redraw produced boundary %d", got)
+			}
+			if pending.frameRetryAt != before {
+				checked += len(pending.data)
+			}
+		}
+		if checked > 2*len(pending.data) {
+			t.Fatalf("%d frames: checked %d bytes for %d input bytes", count, checked, len(pending.data))
+		}
+		pending.data = append(pending.data, '\n')
+		if got := nextInteractionBoundary(pending); got != len(pending.data) {
+			t.Fatalf("record boundary delayed by retry state: %d", got)
+		}
+	}
+}
