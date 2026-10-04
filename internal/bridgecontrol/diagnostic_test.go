@@ -159,3 +159,28 @@ func TestDiagnoseOverWebSocket(t *testing.T) {
 		t.Fatal("no session_diagnostic reply")
 	}
 }
+
+// Handshakes may publish a new identity while a previous reader is diagnosing.
+func TestDiagnoseConcurrentIdentityUpdates(t *testing.T) {
+	c := diagClient(nil)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 10000; i++ {
+			c.identityMu.Lock()
+			c.organizationID, c.installationID = "other", "other"
+			c.identityMu.Unlock()
+			c.identityMu.Lock()
+			c.organizationID, c.installationID = "o", "i"
+			c.identityMu.Unlock()
+		}
+	}()
+	defer func() { <-done }()
+	for i := 0; i < 10000; i++ {
+		// This mixed pair must never match either coherent handshake identity.
+		result := c.diagnose(DiagnosticRequest{ID: "r", OrganizationID: "o", InstallationID: "other", SessionID: "s"})
+		if result.Code != "invalid_request" {
+			t.Fatalf("accepted mixed identity: %+v", result)
+		}
+	}
+}

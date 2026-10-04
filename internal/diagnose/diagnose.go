@@ -345,9 +345,9 @@ const (
 
 var errorMessages = map[ErrorCode]string{
 	CodeInvalidSessionID:  "session ID is not a valid UUID",
-	CodeSessionNotFound:   "no session with that ID is known to the local bridgectl server",
-	CodeServerUnavailable: "the local bridgectl server is not running or not reachable",
-	CodeInternal:          "the local bridgectl server could not report this session",
+	CodeSessionNotFound:   "no session with that ID is known to the bridgectl server",
+	CodeServerUnavailable: "the bridgectl server is not running or not reachable",
+	CodeInternal:          "the bridgectl server could not report this session",
 }
 
 // ErrorReport is what `--json` prints on failure, in place of a Report. It

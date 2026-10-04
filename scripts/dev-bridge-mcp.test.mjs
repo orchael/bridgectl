@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { agentArgs, connect, dispatch, options } from './dev-bridge-mcp.mjs';
@@ -99,5 +100,14 @@ test('session listing forwards optional status unchanged', () => {
       return { jsonrpc: '2.0', id: message.id, result: { content: [] } };
     });
     assert.equal(response.error, undefined);
+  }
+});
+
+test('Make preserves state paths containing spaces before changing directories', () => {
+  for (const stateDir of ['/tmp/repo with spaces/state', 'repo with spaces/state']) {
+    const output = execFileSync('make', ['--no-print-directory', '-s', '-f', 'Makefile', '-f', '-', 'print-mcp-path', `DEV_STATE_DIR=${stateDir}`], {
+      input: 'print-mcp-path:\n\t@$(DEV_MCP_ENV) printenv DEV_STATE_DIR\n', encoding: 'utf8',
+    }).trim();
+    assert.equal(output, stateDir.startsWith('/') ? stateDir : `${process.cwd()}/${stateDir}`);
   }
 });

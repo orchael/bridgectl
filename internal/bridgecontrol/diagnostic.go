@@ -40,7 +40,10 @@ type DiagnosticResult struct {
 // error text, which could carry provider output.
 func (c *Client) diagnose(r DiagnosticRequest) DiagnosticResult {
 	result := DiagnosticResult{ID: r.ID, Code: "unsupported"}
-	if r.ID == "" || len(r.ID) > 128 || r.SessionID == "" || len(r.SessionID) > 256 || r.OrganizationID != c.organizationID || r.InstallationID != c.installationID {
+	c.identityMu.Lock()
+	organizationID, installationID := c.organizationID, c.installationID
+	c.identityMu.Unlock()
+	if r.ID == "" || len(r.ID) > 128 || r.SessionID == "" || len(r.SessionID) > 256 || r.OrganizationID != organizationID || r.InstallationID != installationID {
 		result.Code = "invalid_request"
 		return result
 	}

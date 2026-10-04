@@ -209,7 +209,7 @@ load_nvm() {
   [ -s "$nvm_sh" ] || return 1
   set +eu
   # shellcheck disable=SC1090
-  . "$nvm_sh" >/dev/null 2>&1
+  . "$nvm_sh" --no-use >/dev/null 2>&1
   local rc=$?
   set -eu
   [ "$rc" -eq 0 ] && type nvm >/dev/null 2>&1
