@@ -117,7 +117,26 @@ dev-login: build
 	fi
 	$(DEV_BRIDGECTL) login $(LOGIN_ARGS)
 
-# Escape hatches: use the provider CLIs directly, with no bridgectl process.
+# Run provider CLIs directly, with a per-launch local Bridge MCP adapter.
+# DEV_MCP=0 preserves the standalone escape hatch without Docker/enrollment.
+DEV_MCP ?= 1
+DEV_MCP_WEB_CONTAINER ?= bridge-web-1
+DEV_MCP_DB_CONTAINER ?= bridge-db-1
+DEV_MCP_DATABASE ?= bridge
+DEV_MCP_ENV = DEV_MCP="$(DEV_MCP)" DEV_STATE_DIR="$(abspath $(DEV_STATE_DIR))" DEV_MCP_WEB_CONTAINER="$(DEV_MCP_WEB_CONTAINER)" DEV_MCP_DB_CONTAINER="$(DEV_MCP_DB_CONTAINER)" DEV_MCP_DATABASE="$(DEV_MCP_DATABASE)"
+DEV_MCP_SCRIPT := $(CURDIR)/scripts/dev-bridge-mcp.mjs
+
+.PHONY: dev-mcp dev-mcp-check test-dev-mcp
+# stdout must contain only MCP messages when this target is a stdio server.
+dev-mcp:
+	@$(DEV_MCP_ENV) node "$(DEV_MCP_SCRIPT)" serve
+
+dev-mcp-check:
+	@$(DEV_MCP_ENV) DEV_MCP_SESSION="$(DEV_MCP_SESSION)" node "$(DEV_MCP_SCRIPT)" check
+
+test-dev-mcp:
+	pnpm exec node --test scripts/dev-bridge-mcp.test.mjs
+
 # agents.env holds desktop agent credentials (CODEX_AUTH, CLAUDE_CODE_OAUTH_TOKEN, ...)
 # in the same KEY='value' shell-sourceable format the packaged service reads.
 AGENTS_ENV_FILE ?= $(HOME)/.config/bridgectl/agents.env
@@ -143,7 +162,7 @@ dev-claude:
 		echo "CLAUDE_CODE_OAUTH_TOKEN must be set (export it, or add it to $(AGENTS_ENV_FILE))" >&2; \
 		exit 1; \
 	fi; \
-	cd "$(DEV_REPO)" && claude
+	cd "$(DEV_REPO)" && $(DEV_MCP_ENV) node "$(DEV_MCP_SCRIPT)" claude
 
 dev-codex:
 	@command -v codex >/dev/null 2>&1 || { echo "codex is not on PATH" >&2; exit 1; }
@@ -152,7 +171,7 @@ dev-codex:
 		echo "CODEX_AUTH must be set (export it, or add it to $(AGENTS_ENV_FILE)), unless $${CODEX_HOME:-$(CODEX_HOME_DEFAULT)}/auth.json already exists" >&2; \
 		exit 1; \
 	fi; \
-	$(SETUP_CODEX_HOME); cd "$(DEV_REPO)" && codex
+	$(SETUP_CODEX_HOME); cd "$(DEV_REPO)" && $(DEV_MCP_ENV) node "$(DEV_MCP_SCRIPT)" codex
 
 # dev-session-claude/dev-session-codex only need the pinned CLIs that the
 # codex/claude provider configs in config/bridge-repo-dev.yaml point at
