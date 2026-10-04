@@ -514,3 +514,28 @@ func capturedEvents(events []Event) []Event {
 	}
 	return captured
 }
+
+func TestFullScreenFramesAreCapturedBeforeSessionEnd(t *testing.T) {
+	for _, split := range []bool{false, true} {
+		t.Run(map[bool]string{false: "one chunk", true: "split terminator"}[split], func(t *testing.T) {
+			sink := &memorySink{}
+			c := NewLiveCollector(sink, 64, true, nil, EventProviderOutput)
+			session := Session{SessionID: "full-screen", Provider: "codex"}
+			frame := "\x1b[?2026h\x1b[HPreviously visible token=top-secret\x1b[?2026l"
+			if split {
+				c.ObserveOutputChunk(session, []byte(frame[:len(frame)-2]))
+				c.ObserveOutputChunk(session, []byte(frame[len(frame)-2:]))
+			} else {
+				c.ObserveOutputChunk(session, []byte(frame))
+			}
+			// Draining the sink without ending the session must retain the completed frame.
+			if err := c.Close(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			events := capturedEvents(sink.snapshot())
+			if len(events) != 1 || events[0].Kind != EventProviderOutput || !strings.Contains(events[0].Text, "Previously visible") || strings.Contains(events[0].Text, "top-secret") {
+				t.Fatalf("missing/unredacted frame: %+v", events)
+			}
+		})
+	}
+}

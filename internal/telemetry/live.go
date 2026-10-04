@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sync"
@@ -294,8 +295,12 @@ func nextInteractionBoundary(pending *interactionBuffer) int {
 			pending.escScanned = end
 			return 0
 		}
+		frameComplete := bytes.Equal(data[pending.escStart:end], []byte("\x1b[?2026l"))
 		i = end
 		pending.escStart = -1
+		if frameComplete {
+			return end
+		}
 	}
 	for i < len(data) {
 		if data[i] == '\x1b' {
@@ -305,6 +310,12 @@ func nextInteractionBoundary(pending *interactionBuffer) int {
 				pending.escScanned = end
 				pending.scanned = i
 				return 0
+			}
+			// Full-screen providers redraw without line endings. A completed
+			// synchronized update is a record boundary, including when split
+			// across PTY reads, so frames are archived while the session runs.
+			if bytes.Equal(data[i:end], []byte("\x1b[?2026l")) {
+				return end
 			}
 			i = end
 			continue

@@ -332,6 +332,24 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
+	// Bridge-managed sessions need the redacted output stream for terminal
+	// history. Preserve explicit capture restrictions and standalone defaults.
+	if cfg.Telemetry.CollectorManaged {
+		var explicit struct {
+			Telemetry struct {
+				IncludeText *bool `yaml:"include_redacted_text"`
+			} `yaml:"telemetry"`
+		}
+		if err := yaml.Unmarshal(data, &explicit); err != nil {
+			return nil, fmt.Errorf("parse capture policy: %w", err)
+		}
+		if explicit.Telemetry.IncludeText == nil {
+			cfg.Telemetry.IncludeRedactedText = true
+		}
+		if len(cfg.Telemetry.Kinds) == 0 {
+			cfg.Telemetry.Kinds = []string{"all"}
+		}
+	}
 	applyDefaults(cfg)
 	synthesizeSecurity(cfg)
 	if err := expandRuntimeConfig(cfg); err != nil {
