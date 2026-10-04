@@ -85,7 +85,10 @@ Bridge-managed collectors default to all event kinds and redacted text capture
 when those settings are absent. Explicit `kinds` and `include_redacted_text`
 settings remain authoritative; standalone collector defaults are unchanged.
 Full-screen applications can complete a redraw without a newline. A synchronized
-output end marker now flushes that frame into telemetry while the session runs.
+output end marker now flushes the safe prefix into telemetry while the session runs.
+Trailing words and incomplete credential expressions remain buffered across redraws
+so secrets split by zero-width frame controls are redacted together. Carryover uses
+the existing buffer bound; overflow is recorded as an omission.
 Normal delivery still follows the configured flush interval.
 
 These changes require an updated daemon. They cannot recover output omitted by

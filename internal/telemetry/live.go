@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"regexp"
 	"sync"
 	"unicode/utf8"
 )
@@ -299,7 +300,9 @@ func nextInteractionBoundary(pending *interactionBuffer) int {
 		i = end
 		pending.escStart = -1
 		if frameComplete {
-			return end
+			if boundary := safeFrameBoundary(data[:end]); boundary > 0 {
+				return boundary
+			}
 		}
 	}
 	for i < len(data) {
@@ -315,7 +318,9 @@ func nextInteractionBoundary(pending *interactionBuffer) int {
 			// synchronized update is a record boundary, including when split
 			// across PTY reads, so frames are archived while the session runs.
 			if pending.direction == DirectionAgent && pending.stream == StreamOutput && bytes.Equal(data[i:end], []byte("\x1b[?2026l")) {
-				return end
+				if boundary := safeFrameBoundary(data[:end]); boundary > 0 {
+					return boundary
+				}
 			}
 			i = end
 			continue
@@ -327,6 +332,67 @@ func nextInteractionBoundary(pending *interactionBuffer) int {
 	}
 	pending.scanned = i
 	return 0
+}
+
+// Frame markers are zero-width controls, not redaction boundaries. Retain
+// trailing words and any credential expression crossing the candidate cut so
+// the next redraw can complete it before DefaultRedactor sees the record.
+// The existing interaction buffer cap also bounds this carryover; overflowing
+// records produce an explicit omission instead of publishing an unsafe prefix.
+var frameWordsRE = regexp.MustCompile(`\S+`)
+var framePendingSecretRE = regexp.MustCompile(`(?i)\b` + secretKeyPattern + `"?\s*(?:[:=]\s*(?:"|bearer\s*)?)?$`)
+var framePrivateStartRE = regexp.MustCompile(`-----BEGIN [A-Z ]*`)
+
+func safeFrameBoundary(raw []byte) int {
+	if !utf8.Valid(raw) {
+		return len(raw)
+	} // Preserve malformed records as omission units.
+	escapes := ansiRE.FindAllIndex(raw, -1)
+	text := make([]byte, 0, len(raw))
+	offsets := make([]int, 0, len(raw))
+	nextEscape := 0
+	for i := 0; i < len(raw); {
+		if nextEscape < len(escapes) && i == escapes[nextEscape][0] {
+			i = escapes[nextEscape][1]
+			nextEscape++
+			continue
+		}
+		text = append(text, raw[i])
+		offsets = append(offsets, i)
+		i++
+	}
+	words := frameWordsRE.FindAllIndex(text, -1)
+	if len(words) < 3 {
+		return 0
+	}
+	cut := words[len(words)-2][0]
+	if pending := framePendingSecretRE.FindIndex(text); pending != nil && pending[0] < cut {
+		cut = pending[0]
+	}
+	for _, start := range framePrivateStartRE.FindAllIndex(text, -1) {
+		complete := privateKeyRE.FindIndex(text[start[0]:])
+		if (complete == nil || complete[0] != 0) && start[0] < cut {
+			cut = start[0]
+		}
+	}
+	// Moving the cut left can intersect another overlapping credential match.
+	for {
+		previous := cut
+		for _, pattern := range []*regexp.Regexp{privateKeyRE, bearerRE, credentialValueRE, quotedSecretRE, secretRE} {
+			for _, match := range pattern.FindAllIndex(text, -1) {
+				if match[0] < cut && match[1] > cut {
+					cut = match[0]
+				}
+			}
+		}
+		if cut == previous {
+			break
+		}
+	}
+	if cut == 0 {
+		return 0
+	}
+	return offsets[cut]
 }
 
 // ansiSequenceEndFrom reports where the ANSI escape sequence starting at

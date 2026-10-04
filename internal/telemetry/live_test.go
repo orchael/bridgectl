@@ -521,7 +521,7 @@ func TestFullScreenFramesAreCapturedBeforeSessionEnd(t *testing.T) {
 			sink := &memorySink{}
 			c := NewLiveCollector(sink, 64, true, nil, EventProviderOutput)
 			session := Session{SessionID: "full-screen", Provider: "codex"}
-			frame := "\x1b[?2026h\x1b[HPreviously visible token=top-secret\x1b[?2026l"
+			frame := "\x1b[?2026h\x1b[HPreviously visible token=top-secret frame complete \x1b[?2026l"
 			if split {
 				c.ObserveOutputChunk(session, []byte(frame[:len(frame)-2]))
 				c.ObserveOutputChunk(session, []byte(frame[len(frame)-2:]))
@@ -563,6 +563,35 @@ func TestRedrawMarkerDoesNotSplitOtherStreams(t *testing.T) {
 			pending.data = append(pending.data, '\n')
 			if got := nextInteractionBoundary(pending); got != len(pending.data) {
 				t.Fatalf("newline boundary=%d", got)
+			}
+		}
+	}
+}
+
+func TestRedrawBoundariesPreserveSecretRedaction(t *testing.T) {
+	for _, secret := range []string{
+		"token=top-secret", "token = top-secret", "token : Bearer top-secret",
+		`api_key="top secret value"`, "Bearer top-secret", "sk-abcdefghijklmnopqrst",
+		"-----BEGIN RSA PRIVATE KEY-----top-secret-----END RSA PRIVATE KEY-----",
+	} {
+		for split := 1; split < len(secret); split++ {
+			sink := &memorySink{}
+			c := NewLiveCollector(sink, 64, true, nil, EventProviderOutput)
+			session := Session{SessionID: "redraw-secret", Provider: "codex"}
+			c.ObserveOutputChunk(session, []byte("safe visible prefix "+secret[:split]+"\x1b[?2026l"))
+			c.ObserveOutputChunk(session, []byte("\x1b[?2026h"+secret[split:]+" trailing safe words \x1b[?2026l"))
+			c.SessionEnded(session)
+			if err := c.Close(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			var recorded strings.Builder
+			for _, event := range capturedEvents(sink.snapshot()) {
+				recorded.WriteString(event.Text)
+			}
+			got := recorded.String()
+			want := DefaultRedactor("safe visible prefix " + secret + " trailing safe words ")
+			if got != want || strings.Contains(got, "top-secret") || strings.Contains(got, "top secret value") || strings.Contains(got, "abcdefghijklmnopqrst") || !strings.Contains(got, "[REDACTED:") {
+				t.Fatalf("redraw split %d bypassed redaction for credential case %q", split, secret)
 			}
 		}
 	}
