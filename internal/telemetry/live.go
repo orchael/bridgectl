@@ -295,7 +295,7 @@ func nextInteractionBoundary(pending *interactionBuffer) int {
 			pending.escScanned = end
 			return 0
 		}
-		frameComplete := bytes.Equal(data[pending.escStart:end], []byte("\x1b[?2026l"))
+		frameComplete := pending.direction == DirectionAgent && pending.stream == StreamOutput && bytes.Equal(data[pending.escStart:end], []byte("\x1b[?2026l"))
 		i = end
 		pending.escStart = -1
 		if frameComplete {
@@ -314,7 +314,7 @@ func nextInteractionBoundary(pending *interactionBuffer) int {
 			// Full-screen providers redraw without line endings. A completed
 			// synchronized update is a record boundary, including when split
 			// across PTY reads, so frames are archived while the session runs.
-			if bytes.Equal(data[i:end], []byte("\x1b[?2026l")) {
+			if pending.direction == DirectionAgent && pending.stream == StreamOutput && bytes.Equal(data[i:end], []byte("\x1b[?2026l")) {
 				return end
 			}
 			i = end

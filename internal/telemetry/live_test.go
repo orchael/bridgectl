@@ -539,3 +539,31 @@ func TestFullScreenFramesAreCapturedBeforeSessionEnd(t *testing.T) {
 		})
 	}
 }
+
+func TestRedrawMarkerDoesNotSplitOtherStreams(t *testing.T) {
+	for _, direction := range []Direction{DirectionHuman, DirectionAgent} {
+		for _, split := range []bool{false, true} {
+			pending := &interactionBuffer{direction: direction, stream: StreamType("thinking"), escStart: -1}
+			if direction == DirectionHuman {
+				pending.stream = StreamInput
+			}
+			frame := []byte("token=before\x1b[?2026lafter")
+			if split {
+				pending.data = append(pending.data, frame[:len(frame)-6]...)
+				if got := nextInteractionBoundary(pending); got != 0 {
+					t.Fatalf("partial marker split at %d", got)
+				}
+				pending.data = append(pending.data, frame[len(frame)-6:]...)
+			} else {
+				pending.data = frame
+			}
+			if got := nextInteractionBoundary(pending); got != 0 {
+				t.Fatalf("%s input split at %d", direction, got)
+			}
+			pending.data = append(pending.data, '\n')
+			if got := nextInteractionBoundary(pending); got != len(pending.data) {
+				t.Fatalf("newline boundary=%d", got)
+			}
+		}
+	}
+}
