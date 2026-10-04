@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 const script = fileURLToPath(import.meta.url);
 const root = resolve(dirname(script), '..');
-const allowedTools = new Set(['list_attention', 'inspect_session', 'diagnose_session']);
+const allowedTools = new Set(['list_sessions', 'list_attention', 'inspect_session', 'diagnose_session']);
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Runs inside the existing web container using its existing signing identity.
@@ -183,11 +183,11 @@ function check(client) {
     const response = dispatch(JSON.stringify({ jsonrpc: '2.0', id, method,
       ...(method === 'initialize' ? { params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'bridgectl-dev-check', version: '1' } } } : {}),
     }), client.forward);
-    if (response.error || (method === 'tools/list' && !response.result?.tools?.some(t => t.name === 'diagnose_session'))) {
+    if (response.error || (method === 'tools/list' && ![...allowedTools].every(name => response.result?.tools?.some(t => t.name === name)))) {
       throw new Error('Bridge MCP check failed. Check the dev containers and enrollment membership.');
     }
   }
-  process.stderr.write('Bridge dev MCP ready: list_attention, inspect_session, diagnose_session\n');
+  process.stderr.write('Bridge dev MCP ready: list_sessions, list_attention, inspect_session, diagnose_session\n');
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === script) {

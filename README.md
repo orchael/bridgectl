@@ -147,11 +147,19 @@ make dev-claude DEV_MCP=0
 #### Bridge diagnostics in dev agents
 
 `dev-codex` and `dev-claude` attach a `bridge_dev` MCP server for that launch.
-It exposes `list_attention`, `inspect_session`, and `diagnose_session` through
+It exposes `list_sessions`, `list_attention`, `inspect_session`, and `diagnose_session` through
 the local Bridge API, including authoritative diagnostics requested over the
 bridgectl control connection. The adapter uses stdio, starts and stops with the
 agent, and opens no listening port. It does not change global Codex or Claude
 configuration, auto-approve tools, or expose response/approval tools.
+
+Call `list_sessions` with `{}` to discover all registry sessions, or with
+`{"status":"running"}` to filter by lifecycle status: `starting`, `running`,
+`attached`, `stopping`, `stopped`, `failed`, or `unknown`. Results are grouped by installation
+and include offline/stale last-known sessions; installations with no matching
+sessions are omitted. `list_attention` retains its live attention-only behavior.
+The local Bridge API must include the `list_sessions` tool; rebuild that API
+and restart the dev agent after updating both repositories.
 
 Prerequisites are Node.js (the repository specifies Node 24+), Docker access,
 the running local Bridge dev stack (`bridge-web-1`, `bridge-api-1`,

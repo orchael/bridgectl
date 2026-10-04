@@ -15,12 +15,12 @@ test('only read-only discovery, inspection and diagnostics can reach Bridge', ()
   const forward = message => {
     calls++;
     return { jsonrpc: '2.0', id: message.id, result: { tools: [
-      { name: 'diagnose_session' }, { name: 'list_attention' }, { name: 'inspect_session' },
+      { name: 'diagnose_session' }, { name: 'list_sessions' }, { name: 'list_attention' }, { name: 'inspect_session' },
       { name: 'decide_pending_approval' }, { name: 'respond_pending_input' },
     ] } };
   };
   assert.deepEqual(dispatch(rpc('tools/list'), forward).result.tools.map(t => t.name),
-    ['diagnose_session', 'list_attention', 'inspect_session']);
+    ['diagnose_session', 'list_sessions', 'list_attention', 'inspect_session']);
   for (const name of ['decide_pending_approval', 'respond_pending_input', 'unknown']) {
     assert.equal(dispatch(rpc('tools/call', { name }), forward).error.code, -32602);
   }
@@ -90,4 +90,14 @@ test('launch configuration preserves paths and stays scoped to the child agent',
   assert.ok(codex.includes('mcp_servers.bridge_dev.env.DEV_STATE_DIR="/tmp/repo with spaces/state"'));
   assert.deepEqual(codex.slice(-2), ['mcp', 'list']);
   assert.throws(() => agentArgs('other', config));
+});
+
+test('session listing forwards optional status unchanged', () => {
+  for (const args of [{}, { status: 'running' }, { status: 'stopped' }]) {
+    const response = dispatch(rpc('tools/call', { name: 'list_sessions', arguments: args }), message => {
+      assert.deepEqual(message.params, { name: 'list_sessions', arguments: args });
+      return { jsonrpc: '2.0', id: message.id, result: { content: [] } };
+    });
+    assert.equal(response.error, undefined);
+  }
 });
