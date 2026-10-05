@@ -317,7 +317,7 @@ func pendingFromExecApproval(env envelope) *bridge.PendingRequest {
 	if len(p.Command) > 0 {
 		summary = "Run: " + truncate(strings.Join(p.Command, " "), summaryCap)
 	}
-	return &bridge.PendingRequest{ID: p.CallID, Type: bridge.PendingRequestApproval, Summary: summary}
+	return &bridge.PendingRequest{ID: p.CallID, Type: bridge.PendingRequestApproval, Summary: summary, Kind: bridge.PendingKindCommand}
 }
 
 func pendingFromApplyPatch(env envelope) *bridge.PendingRequest {
@@ -335,7 +335,7 @@ func pendingFromApplyPatch(env envelope) *bridge.PendingRequest {
 	if len(paths) > 0 {
 		summary = "Apply changes to: " + truncate(strings.Join(paths, ", "), summaryCap)
 	}
-	return &bridge.PendingRequest{ID: p.CallID, Type: bridge.PendingRequestApproval, Summary: summary}
+	return &bridge.PendingRequest{ID: p.CallID, Type: bridge.PendingRequestApproval, Summary: summary, Kind: bridge.PendingKindFileChange}
 }
 
 func pendingFromUserInput(env envelope) *bridge.PendingRequest {
@@ -347,7 +347,7 @@ func pendingFromUserInput(env envelope) *bridge.PendingRequest {
 	if len(p.Questions) > 0 && p.Questions[0].Text != "" {
 		summary = truncate(p.Questions[0].Text, summaryCap)
 	}
-	return &bridge.PendingRequest{ID: p.ItemID, Type: bridge.PendingRequestInput, Summary: summary}
+	return &bridge.PendingRequest{ID: p.ItemID, Type: bridge.PendingRequestInput, Summary: summary, Kind: bridge.PendingKindQuestion}
 }
 
 func mustJSON(v any) json.RawMessage {

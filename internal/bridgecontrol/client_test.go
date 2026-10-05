@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1053,5 +1054,29 @@ func TestStatusUsesNegotiatedInstallation(t *testing.T) {
 	}
 	if st.InstallationID != "negotiated-installation" {
 		t.Fatalf("status has stale installation identity: %q", st.InstallationID)
+	}
+}
+
+// TestSetStatus_LastConnectedAtSurvivesDisconnectAndRestart covers the
+// diagnostic requirement: the last successful connection time is retained
+// when the state later changes, and when a new Client reads the old file.
+func TestSetStatus_LastConnectedAtSurvivesDisconnectAndRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "status.json")
+	c := &Client{cfg: Config{StatusPath: path, Logger: slog.Default()}}
+	c.setStatus(StateConnected, "")
+	first, _ := ReadStatus(path)
+	if first.LastConnectedAt.IsZero() {
+		t.Fatal("connected status must record last_connected_at")
+	}
+	c.setStatus(StateUnavailable, "boom")
+	st, _ := ReadStatus(path)
+	if !st.LastConnectedAt.Equal(first.LastConnectedAt) || st.State != StateUnavailable {
+		t.Fatalf("after failure: %+v, want last_connected_at %v", st, first.LastConnectedAt)
+	}
+	restarted := &Client{cfg: Config{StatusPath: path, Logger: slog.Default()}}
+	restarted.setStatus(StateConnecting, "")
+	st, _ = ReadStatus(path)
+	if !st.LastConnectedAt.Equal(first.LastConnectedAt) {
+		t.Fatalf("restart lost last_connected_at: %+v", st)
 	}
 }

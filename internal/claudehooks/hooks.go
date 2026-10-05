@@ -233,6 +233,23 @@ func Report(ctx context.Context, configPath string, input io.Reader) error {
 	return nil
 }
 
+// pendingKindForTool classifies a permission request from the structured tool
+// name Claude's hook reports — never from tool input or terminal text.
+func pendingKindForTool(tool string) bridge.PendingRequestKind {
+	switch tool {
+	case "Bash":
+		return bridge.PendingKindCommand
+	case "Edit", "Write", "MultiEdit", "NotebookEdit":
+		return bridge.PendingKindFileChange
+	case "AskUserQuestion":
+		return bridge.PendingKindQuestion
+	case "":
+		return bridge.PendingKindOther
+	default:
+		return bridge.PendingKindTool
+	}
+}
+
 type pending struct {
 	request bridge.PendingRequest
 	agent   string
@@ -277,11 +294,11 @@ func (s *state) apply(e Event) (bridge.Interaction, bool) {
 			id = e.Tool
 		}
 		key := e.AgentID + "/tool/" + id
-		add := func(key string, kind bridge.PendingRequestType) {
-			if old, ok := s.pending[key]; ok && old.request.Type == kind {
+		add := func(key string, typ bridge.PendingRequestType, kind bridge.PendingRequestKind) {
+			if old, ok := s.pending[key]; ok && old.request.Type == typ {
 				return
 			}
-			s.pending[key] = pending{request: bridge.PendingRequest{ID: uuid.NewString(), Type: kind}, agent: e.AgentID}
+			s.pending[key] = pending{request: bridge.PendingRequest{ID: uuid.NewString(), Type: typ, Kind: kind}, agent: e.AgentID}
 		}
 		switch e.Name {
 		case "UserPromptSubmit":
@@ -294,20 +311,20 @@ func (s *state) apply(e Event) (bridge.Interaction, bool) {
 		case "PreToolUse":
 			s.base = bridge.InteractionWorking
 			if e.Tool == "AskUserQuestion" {
-				add(key, bridge.PendingRequestInput)
+				add(key, bridge.PendingRequestInput, bridge.PendingKindQuestion)
 			}
 		case "PermissionRequest":
-			kind := bridge.PendingRequestApproval
+			typ := bridge.PendingRequestApproval
 			if e.Tool == "AskUserQuestion" {
-				kind = bridge.PendingRequestInput
+				typ = bridge.PendingRequestInput
 			}
-			add(key, kind)
+			add(key, typ, pendingKindForTool(e.Tool))
 		case "PostToolUse", "PostToolUseFailure":
 			delete(s.pending, key)
 			delete(s.tools, toolKey)
 			s.base = bridge.InteractionWorking
 		case "Elicitation":
-			add(e.AgentID+"/elicitation/"+e.Server+"/"+e.ElicitationID, bridge.PendingRequestInput)
+			add(e.AgentID+"/elicitation/"+e.Server+"/"+e.ElicitationID, bridge.PendingRequestInput, bridge.PendingKindQuestion)
 		case "ElicitationResult":
 			delete(s.pending, e.AgentID+"/elicitation/"+e.Server+"/"+e.ElicitationID)
 			s.base = bridge.InteractionWorking

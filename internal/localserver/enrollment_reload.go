@@ -194,14 +194,24 @@ func (s *Server) reloadEnrollment(ctx context.Context, reporting *reportingObser
 		// written, and waitForBridgeControl could report success — or a
 		// stale rejection — without this client ever attempting its own
 		// handshake.
-		if err := bridgecontrol.WriteStatus(filepath.Join(s.stateDir, "bridge-control-status.json"), bridgecontrol.Status{State: bridgecontrol.StateConnecting, UpdatedAt: time.Now()}); err != nil {
+		if err := bridgecontrol.WriteStatus(filepath.Join(s.stateDir, bridgecontrol.StatusFileName), bridgecontrol.Status{State: bridgecontrol.StateConnecting, UpdatedAt: time.Now(), LastConnectedAt: previousLastConnected(s.stateDir)}); err != nil {
 			s.logger.Warn("write bridge control status", "error", err)
 		}
 		control.Start(context.Background())
 	} else {
-		_ = bridgecontrol.WriteStatus(filepath.Join(s.stateDir, "bridge-control-status.json"), bridgecontrol.Status{State: bridgecontrol.StateNotProvisioned, UpdatedAt: time.Now()})
+		_ = bridgecontrol.WriteStatus(filepath.Join(s.stateDir, bridgecontrol.StatusFileName), bridgecontrol.Status{State: bridgecontrol.StateNotProvisioned, UpdatedAt: time.Now(), LastConnectedAt: previousLastConnected(s.stateDir)})
 	}
 	return nil
+}
+
+// previousLastConnected returns the last-successful-connection time recorded
+// in the existing status file, so a reload's synchronous status write does not
+// erase it before the new control client can carry it forward.
+func previousLastConnected(stateDir string) time.Time {
+	if prev, err := bridgecontrol.ReadStatus(filepath.Join(stateDir, bridgecontrol.StatusFileName)); err == nil {
+		return prev.LastConnectedAt
+	}
+	return time.Time{}
 }
 
 func (s *Server) startEnrollmentReload(reporting *reportingObservers, version string, historyLoaded bool) (context.CancelFunc, <-chan struct{}) {

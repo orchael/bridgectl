@@ -201,10 +201,56 @@ try_brew_install() {
   fi
 }
 
+# Loads nvm into this shell if it is installed (nvm is a shell function, so
+# it is invisible to a non-interactive script until nvm.sh is sourced).
+# nvm.sh is not written for set -eu, so relax them while it runs.
+load_nvm() {
+  local nvm_sh="${NVM_DIR:-$HOME/.nvm}/nvm.sh"
+  [ -s "$nvm_sh" ] || return 1
+  set +eu
+  # shellcheck disable=SC1090
+  . "$nvm_sh" --no-use >/dev/null 2>&1
+  local rc=$?
+  set -eu
+  [ "$rc" -eq 0 ] && type nvm >/dev/null 2>&1
+}
+
+# Installs (if needed) and activates the .nvmrc version through nvm, so the
+# developer does not have to run `nvm install && nvm use` by hand. This only
+# affects this script's process; a later shell still needs `nvm use` (or an
+# nvm default) to pick it up.
+try_nvm_use() {
+  load_nvm || return 1
+  echo "nvm detected: installing/activating Node ${REQUIRED_MAJOR} from .nvmrc..."
+  # nvm reads .nvmrc from the current directory, and `nvm use` must run in
+  # this shell (not a subshell) for the PATH change to stick.
+  local rc=0
+  pushd "$PROJECT_ROOT" >/dev/null
+  set +eu
+  nvm install >/dev/null && nvm use >/dev/null
+  rc=$?
+  set -eu
+  popd >/dev/null
+  if [ "$rc" -ne 0 ]; then
+    echo "nvm could not install/activate Node ${REQUIRED_MAJOR}." >&2
+    return 1
+  fi
+  return 0
+}
+
 # ── Main ──────────────────────────────────────────────────────────────────
 
 OS="$(detect_os)"
 print_header
+
+if ! node_installed || [ "$(node_major)" != "$REQUIRED_MAJOR" ]; then
+  # nvm owns the Node version when present: run it instead of telling the
+  # user to. `nvm use` modifies PATH in this shell, so re-detect afterwards.
+  if try_nvm_use; then
+    hash -r
+    NVM_ACTIVATED=1
+  fi
+fi
 
 if node_installed; then
   ACTUAL_MAJOR="$(node_major)"
@@ -212,6 +258,9 @@ if node_installed; then
 
   if [ "$ACTUAL_MAJOR" = "$REQUIRED_MAJOR" ]; then
     echo "Version OK: matches .nvmrc requirement (${REQUIRED_MAJOR})"
+    if [ "${NVM_ACTIVATED:-0}" -eq 1 ]; then
+      echo "(activated via nvm for this run; run 'nvm use' in your own shell to match)"
+    fi
     echo ""
 
     # Also ensure pnpm is available.

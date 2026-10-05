@@ -21,6 +21,7 @@ type fakeRPCClient struct {
 	resizeResp    *bridgev1.ResizeSessionResponse
 	healthResp    *bridgev1.HealthResponse
 	providersResp *bridgev1.ListProvidersResponse
+	diagnoseResp  *bridgev1.DiagnoseSessionResponse
 	err           error
 }
 
@@ -32,6 +33,9 @@ func (f *fakeRPCClient) StopSession(context.Context, *bridgev1.StopSessionReques
 }
 func (f *fakeRPCClient) GetSession(context.Context, *bridgev1.GetSessionRequest, ...grpc.CallOption) (*bridgev1.GetSessionResponse, error) {
 	return f.getResp, f.err
+}
+func (f *fakeRPCClient) DiagnoseSession(context.Context, *bridgev1.DiagnoseSessionRequest, ...grpc.CallOption) (*bridgev1.DiagnoseSessionResponse, error) {
+	return f.diagnoseResp, f.err
 }
 func (f *fakeRPCClient) ListSessions(context.Context, *bridgev1.ListSessionsRequest, ...grpc.CallOption) (*bridgev1.ListSessionsResponse, error) {
 	return f.listResp, f.err
@@ -88,6 +92,12 @@ func TestClientSessionMethods(t *testing.T) {
 	getResp, err := c.GetSession(context.Background(), &bridgev1.GetSessionRequest{})
 	if err != nil || getResp.GetSessionId() != "session-a" {
 		t.Fatalf("GetSession resp=%+v err=%v", getResp, err)
+	}
+
+	fake.diagnoseResp = &bridgev1.DiagnoseSessionResponse{ReportJson: []byte(`{"schema_version":1}`)}
+	diagResp, err := c.DiagnoseSession(context.Background(), &bridgev1.DiagnoseSessionRequest{SessionId: "session-a"})
+	if err != nil || string(diagResp.GetReportJson()) != `{"schema_version":1}` {
+		t.Fatalf("DiagnoseSession resp=%+v err=%v", diagResp, err)
 	}
 
 	fake.listResp = &bridgev1.ListSessionsResponse{Sessions: []*bridgev1.GetSessionResponse{{SessionId: "session-a"}}}

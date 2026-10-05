@@ -37,6 +37,18 @@ func (c *Client) GetSession(ctx context.Context, req *bridgev1.GetSessionRequest
 	return resp, err
 }
 
+// DiagnoseSession returns the daemon-built, schema-versioned diagnostic
+// snapshot of a session as a single JSON document.
+func (c *Client) DiagnoseSession(ctx context.Context, req *bridgev1.DiagnoseSessionRequest) (*bridgev1.DiagnoseSessionResponse, error) {
+	var resp *bridgev1.DiagnoseSessionResponse
+	err := c.invoke(ctx, func(callCtx context.Context) error {
+		var callErr error
+		resp, callErr = c.rpc.DiagnoseSession(callCtx, req)
+		return callErr
+	})
+	return resp, err
+}
+
 func (c *Client) ListSessions(ctx context.Context, req *bridgev1.ListSessionsRequest) (*bridgev1.ListSessionsResponse, error) {
 	var resp *bridgev1.ListSessionsResponse
 	err := c.invoke(ctx, func(callCtx context.Context) error {
