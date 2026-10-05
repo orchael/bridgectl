@@ -1322,3 +1322,31 @@ auth:
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestBridgeManagedTelemetryCapturesTerminalHistory(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		text       bool
+		output     bool
+	}{
+		{"managed defaults", "managed_by_bridge: true", true, true},
+		{"explicit restrictions", "managed_by_bridge: true\n  include_redacted_text: false\n  kinds: [question, answer]", false, false},
+		{"standalone defaults", "enabled: true", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Load(writeTestConfig(t, "telemetry:\n  "+tc.body+"\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			output := false
+			for _, kind := range cfg.Telemetry.Kinds {
+				if kind == "provider_output" {
+					output = true
+				}
+			}
+			if cfg.Telemetry.IncludeRedactedText != tc.text || output != tc.output {
+				t.Fatalf("unexpected capture policy: text=%v kinds=%v", cfg.Telemetry.IncludeRedactedText, cfg.Telemetry.Kinds)
+			}
+		})
+	}
+}

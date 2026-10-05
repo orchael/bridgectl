@@ -514,3 +514,109 @@ func capturedEvents(events []Event) []Event {
 	}
 	return captured
 }
+
+func TestFullScreenFramesAreCapturedBeforeSessionEnd(t *testing.T) {
+	for _, split := range []bool{false, true} {
+		t.Run(map[bool]string{false: "one chunk", true: "split terminator"}[split], func(t *testing.T) {
+			sink := &memorySink{}
+			c := NewLiveCollector(sink, 64, true, nil, EventProviderOutput)
+			session := Session{SessionID: "full-screen", Provider: "codex"}
+			frame := "\x1b[?2026h\x1b[HPreviously visible token=top-secret frame complete \x1b[?2026l"
+			if split {
+				c.ObserveOutputChunk(session, []byte(frame[:len(frame)-2]))
+				c.ObserveOutputChunk(session, []byte(frame[len(frame)-2:]))
+			} else {
+				c.ObserveOutputChunk(session, []byte(frame))
+			}
+			// Draining the sink without ending the session must retain the completed frame.
+			if err := c.Close(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			events := capturedEvents(sink.snapshot())
+			if len(events) != 1 || events[0].Kind != EventProviderOutput || !strings.Contains(events[0].Text, "Previously visible") || strings.Contains(events[0].Text, "top-secret") {
+				t.Fatalf("missing/unredacted frame: %+v", events)
+			}
+		})
+	}
+}
+
+func TestRedrawMarkerDoesNotSplitOtherStreams(t *testing.T) {
+	for _, direction := range []Direction{DirectionHuman, DirectionAgent} {
+		for _, split := range []bool{false, true} {
+			pending := &interactionBuffer{direction: direction, stream: StreamType("thinking"), escStart: -1}
+			if direction == DirectionHuman {
+				pending.stream = StreamInput
+			}
+			frame := []byte("token=before\x1b[?2026lafter")
+			if split {
+				pending.data = append(pending.data, frame[:len(frame)-6]...)
+				if got := nextInteractionBoundary(pending); got != 0 {
+					t.Fatalf("partial marker split at %d", got)
+				}
+				pending.data = append(pending.data, frame[len(frame)-6:]...)
+			} else {
+				pending.data = frame
+			}
+			if got := nextInteractionBoundary(pending); got != 0 {
+				t.Fatalf("%s input split at %d", direction, got)
+			}
+			pending.data = append(pending.data, '\n')
+			if got := nextInteractionBoundary(pending); got != len(pending.data) {
+				t.Fatalf("newline boundary=%d", got)
+			}
+		}
+	}
+}
+
+func TestRedrawBoundariesPreserveSecretRedaction(t *testing.T) {
+	for _, secret := range []string{
+		"token=top-secret", "token = top-secret", "token : Bearer top-secret",
+		`api_key="top secret value"`, "Bearer top-secret", "sk-abcdefghijklmnopqrst",
+		"-----BEGIN RSA PRIVATE KEY-----top-secret-----END RSA PRIVATE KEY-----",
+	} {
+		for split := 1; split < len(secret); split++ {
+			sink := &memorySink{}
+			c := NewLiveCollector(sink, 64, true, nil, EventProviderOutput)
+			session := Session{SessionID: "redraw-secret", Provider: "codex"}
+			c.ObserveOutputChunk(session, []byte("safe visible prefix "+secret[:split]+"\x1b[?2026l"))
+			c.ObserveOutputChunk(session, []byte("\x1b[?2026h"+secret[split:]+" trailing safe words \x1b[?2026l"))
+			c.SessionEnded(session)
+			if err := c.Close(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			var recorded strings.Builder
+			for _, event := range capturedEvents(sink.snapshot()) {
+				recorded.WriteString(event.Text)
+			}
+			got := recorded.String()
+			want := DefaultRedactor("safe visible prefix " + secret + " trailing safe words ")
+			if got != want || strings.Contains(got, "top-secret") || strings.Contains(got, "top secret value") || strings.Contains(got, "abcdefghijklmnopqrst") || !strings.Contains(got, "[REDACTED:") {
+				t.Fatalf("redraw split %d bypassed redaction for credential case %q", split, secret)
+			}
+		}
+	}
+}
+
+func TestShortRedrawSafetyChecksStayLinear(t *testing.T) {
+	for _, count := range []int{5000, 20000, 80000} {
+		pending := &interactionBuffer{direction: DirectionAgent, stream: StreamOutput, escStart: -1}
+		checked := 0
+		for i := 0; i < count; i++ {
+			before := pending.frameRetryAt
+			pending.data = append(pending.data, []byte(".\x1b[?2026l")...)
+			if got := nextInteractionBoundary(pending); got != 0 {
+				t.Fatalf("unsafe short redraw produced boundary %d", got)
+			}
+			if pending.frameRetryAt != before {
+				checked += len(pending.data)
+			}
+		}
+		if checked > 2*len(pending.data) {
+			t.Fatalf("%d frames: checked %d bytes for %d input bytes", count, checked, len(pending.data))
+		}
+		pending.data = append(pending.data, '\n')
+		if got := nextInteractionBoundary(pending); got != len(pending.data) {
+			t.Fatalf("record boundary delayed by retry state: %d", got)
+		}
+	}
+}

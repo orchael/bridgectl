@@ -1,8 +1,10 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"regexp"
 	"sync"
 	"unicode/utf8"
 )
@@ -38,6 +40,9 @@ type interactionBuffer struct {
 	// the entire buffered-so-far data from byte 0 — O(n^2) in the total
 	// bytes buffered before a boundary appears.
 	scanned int
+	// After an unsafe frame, retry only after the buffer doubles. This bounds
+	// total redaction scanning for short redraws or incomplete credentials.
+	frameRetryAt int
 	// escStart is the start index (within data) of a currently-open,
 	// not-yet-complete ANSI escape sequence, or -1 when none is open.
 	// escScanned is how far the terminator search within that sequence has
@@ -224,6 +229,7 @@ func (c *LiveCollector) observeInteraction(session Session, direction Direction,
 		c.flushInteraction(session, pending)
 		pending.data = nil
 		pending.scanned = 0
+		pending.frameRetryAt = 0
 		pending.escStart = -1
 		pending.utf8 = utf8State{}
 	}
@@ -242,6 +248,7 @@ func (c *LiveCollector) observeInteraction(session Session, direction Direction,
 		remainder := pending.data[boundary:]
 		pending.data = append([]byte(nil), remainder...)
 		pending.scanned = 0
+		pending.frameRetryAt = 0
 		pending.escStart = -1
 		// The remainder was never checked for UTF-8 completeness on its
 		// own (only as a suffix of the now-discarded, boundary-terminated
@@ -255,6 +262,7 @@ func (c *LiveCollector) observeInteraction(session Session, direction Direction,
 		c.analyzer.ObserveOmittedInteraction(session, direction, interactionKind(direction), stream, pending.data, OmittedBufferLimit)
 		pending.data = nil
 		pending.scanned = 0
+		pending.frameRetryAt = 0
 		pending.escStart = -1
 		pending.utf8 = utf8State{}
 		delete(c.pending, key)
@@ -286,6 +294,7 @@ func nextInteractionBoundary(pending *interactionBuffer) int {
 	data := pending.data
 	if pending.scanned < 0 || pending.scanned > len(data) {
 		pending.scanned = 0
+		pending.frameRetryAt = 0
 	}
 	i := pending.scanned
 	if pending.escStart >= 0 {
@@ -294,8 +303,14 @@ func nextInteractionBoundary(pending *interactionBuffer) int {
 			pending.escScanned = end
 			return 0
 		}
+		frameComplete := pending.direction == DirectionAgent && pending.stream == StreamOutput && bytes.Equal(data[pending.escStart:end], []byte("\x1b[?2026l"))
 		i = end
 		pending.escStart = -1
+		if frameComplete {
+			if boundary := pending.frameBoundary(end); boundary > 0 {
+				return boundary
+			}
+		}
 	}
 	for i < len(data) {
 		if data[i] == '\x1b' {
@@ -305,6 +320,14 @@ func nextInteractionBoundary(pending *interactionBuffer) int {
 				pending.escScanned = end
 				pending.scanned = i
 				return 0
+			}
+			// Full-screen providers redraw without line endings. A completed
+			// synchronized update is a record boundary, including when split
+			// across PTY reads, so frames are archived while the session runs.
+			if pending.direction == DirectionAgent && pending.stream == StreamOutput && bytes.Equal(data[i:end], []byte("\x1b[?2026l")) {
+				if boundary := pending.frameBoundary(end); boundary > 0 {
+					return boundary
+				}
 			}
 			i = end
 			continue
@@ -316,6 +339,81 @@ func nextInteractionBoundary(pending *interactionBuffer) int {
 	}
 	pending.scanned = i
 	return 0
+}
+
+// Geometric retry spacing makes unsuccessful safety checks linear in total
+// buffered bytes. Ordinary record boundaries still flush immediately; a safe
+// frame resets this state when its emitted prefix is removed.
+func (pending *interactionBuffer) frameBoundary(end int) int {
+	if end < pending.frameRetryAt {
+		return 0
+	}
+	boundary := safeFrameBoundary(pending.data[:end])
+	if boundary == 0 {
+		pending.frameRetryAt = end * 2
+	}
+	return boundary
+}
+
+// Frame markers are zero-width controls, not redaction boundaries. Retain
+// trailing words and any credential expression crossing the candidate cut so
+// the next redraw can complete it before DefaultRedactor sees the record.
+// The existing interaction buffer cap also bounds this carryover; overflowing
+// records produce an explicit omission instead of publishing an unsafe prefix.
+var frameWordsRE = regexp.MustCompile(`\S+`)
+var framePendingSecretRE = regexp.MustCompile(`(?i)\b` + secretKeyPattern + `"?\s*(?:[:=]\s*(?:"|bearer\s*)?)?$`)
+var framePrivateStartRE = regexp.MustCompile(`-----BEGIN [A-Z ]*`)
+
+func safeFrameBoundary(raw []byte) int {
+	if !utf8.Valid(raw) {
+		return len(raw)
+	} // Preserve malformed records as omission units.
+	escapes := ansiRE.FindAllIndex(raw, -1)
+	text := make([]byte, 0, len(raw))
+	offsets := make([]int, 0, len(raw))
+	nextEscape := 0
+	for i := 0; i < len(raw); {
+		if nextEscape < len(escapes) && i == escapes[nextEscape][0] {
+			i = escapes[nextEscape][1]
+			nextEscape++
+			continue
+		}
+		text = append(text, raw[i])
+		offsets = append(offsets, i)
+		i++
+	}
+	words := frameWordsRE.FindAllIndex(text, -1)
+	if len(words) < 3 {
+		return 0
+	}
+	cut := words[len(words)-2][0]
+	if pending := framePendingSecretRE.FindIndex(text); pending != nil && pending[0] < cut {
+		cut = pending[0]
+	}
+	for _, start := range framePrivateStartRE.FindAllIndex(text, -1) {
+		complete := privateKeyRE.FindIndex(text[start[0]:])
+		if (complete == nil || complete[0] != 0) && start[0] < cut {
+			cut = start[0]
+		}
+	}
+	// Moving the cut left can intersect another overlapping credential match.
+	for {
+		previous := cut
+		for _, pattern := range []*regexp.Regexp{privateKeyRE, bearerRE, credentialValueRE, quotedSecretRE, secretRE} {
+			for _, match := range pattern.FindAllIndex(text, -1) {
+				if match[0] < cut && match[1] > cut {
+					cut = match[0]
+				}
+			}
+		}
+		if cut == previous {
+			break
+		}
+	}
+	if cut == 0 {
+		return 0
+	}
+	return offsets[cut]
 }
 
 // ansiSequenceEndFrom reports where the ANSI escape sequence starting at

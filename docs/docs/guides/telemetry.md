@@ -79,6 +79,22 @@ Existing `.json` objects remain readable with `aws s3 cp ... - | jq .`.
 This compression is in the Bridge HTTPS ingestion path; the standalone gRPC
 collector's JSONL storage format is unchanged.
 
+### Terminal history capture
+
+Bridge-managed collectors default to all event kinds and redacted text capture
+when those settings are absent. Explicit `kinds` and `include_redacted_text`
+settings remain authoritative; standalone collector defaults are unchanged.
+Full-screen applications can complete a redraw without a newline. A synchronized
+output end marker now flushes the safe prefix into telemetry while the session runs.
+Trailing words and incomplete credential expressions remain buffered across redraws
+so secrets split by zero-width frame controls are redacted together. Carryover uses
+the existing buffer bound; overflow is recorded as an omission.
+Normal delivery still follows the configured flush interval.
+
+These changes require an updated daemon. They cannot recover output omitted by
+an earlier capture policy. Archived text is redacted and stripped of terminal
+controls, so it supports reading past output, not exact ANSI screen replay.
+
 ### Completeness checkpoints and delivery recovery
 
 Completeness tracking is on by default. The collector emits `telemetry_checkpoint`
