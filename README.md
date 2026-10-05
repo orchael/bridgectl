@@ -139,9 +139,18 @@ make dev-session-claude DEV_REPO=/workspace/my-repo
 make dev-codex DEV_REPO=/workspace/my-repo
 make dev-claude DEV_REPO=/workspace/my-repo
 
-# Standalone escape hatch when Bridge/Docker is unavailable.
+# Standalone escape hatch when Bridge/Docker is unavailable: same bridgectl
+# wrapper and MCP script, just skipping the local Bridge MCP connect/check.
 make dev-codex DEV_MCP=0
 make dev-claude DEV_MCP=0
+
+# Fully bridgectl-independent: no build, no dev server, no Docker, no MCP
+# script at all — just the real agent CLI, loading credentials from
+# AGENTS_ENV_FILE (~/.config/bridgectl/agents.env by default). Use this when
+# bridgectl itself (its build, its dev server, or its enrollment) is broken
+# and you just want an agent running against this repo.
+make local-codex
+make local-claude
 ```
 
 #### Bridge diagnostics in dev agents
