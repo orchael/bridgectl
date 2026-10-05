@@ -33,6 +33,7 @@ func newSessionCmd() *cobra.Command {
 		newSessionAttachCmd(),
 		newSessionWatchCmd(),
 		newSessionStopCmd(),
+		newSessionDiagnoseCmd(),
 		newSessionHookCmd(),
 	)
 

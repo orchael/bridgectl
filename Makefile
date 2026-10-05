@@ -1,4 +1,4 @@
-.PHONY: dev-server-start dev-server-stop dev-server-restart dev-server-status dev-server-logs dev-server-cpu-profile dev-server-goroutines dev-login dev-claude dev-codex dev-check dev-session-claude dev-session-codex build proto tools test test-telemetry-e2e test-telemetry-s3-e2e test-e2e test-e2e-live-telemetry test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down reset logs up-local down-local reset-local logs-local up-collector down-collector reset-collector ps-collector logs-collector up-step-ca down-step-ca reset-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
+.PHONY: dev-server-start dev-server-stop dev-server-restart dev-server-status dev-server-logs dev-server-cpu-profile dev-server-goroutines dev-login dev-claude dev-codex local-claude local-codex dev-check dev-session-claude dev-session-codex build proto tools test test-telemetry-e2e test-telemetry-s3-e2e test-e2e test-e2e-live-telemetry test-e2e-unprotected test-step-ca-e2e test-cover test-cover-maintained lint clean certs dev-certs dev-setup agents-setup setup-hosts fmt smoke smoke-apt-local smoke-deb smoke-provider-runtime-user smoke-container smoke-ec2 up down reset logs up-local down-local reset-local logs-local up-collector down-collector reset-collector ps-collector logs-collector up-step-ca down-step-ca reset-step-ca logs-step-ca step-ca-health step-ca-issue-client chat-example chat-claude chat-opencode chat-codex chat-gemini chat-ca-example chat-ca-claude chat-ca-opencode chat-ca-codex chat-ca-gemini sessions-list sessions-watch sessions-attach orchestrator-claude orchestrator-opencode web-install web-dev web-build web-start docs-install docs-build docs-start build-cli test-cli-e2e test-cli-e2e-docker install-user-service check-deps setup-node
 
 BIN_DIR := bin
 GOIMPORTS_VERSION ?= v0.44.0
@@ -117,7 +117,28 @@ dev-login: build
 	fi
 	$(DEV_BRIDGECTL) login $(LOGIN_ARGS)
 
-# Escape hatches: use the provider CLIs directly, with no bridgectl process.
+# Run provider CLIs directly, with a per-launch local Bridge MCP adapter.
+# DEV_MCP=0 preserves the standalone escape hatch without Docker/enrollment.
+DEV_MCP ?= 1
+DEV_MCP_WEB_CONTAINER ?= bridge-web-1
+DEV_MCP_DB_CONTAINER ?= bridge-db-1
+DEV_MCP_DATABASE ?= bridge
+# Keep a path containing spaces intact; make's abspath splits it into words.
+DEV_MCP_STATE_DIR = $(if $(filter /%,$(DEV_STATE_DIR)),$(DEV_STATE_DIR),$(CURDIR)/$(DEV_STATE_DIR))
+DEV_MCP_ENV = DEV_MCP="$(DEV_MCP)" DEV_STATE_DIR="$(DEV_MCP_STATE_DIR)" DEV_MCP_WEB_CONTAINER="$(DEV_MCP_WEB_CONTAINER)" DEV_MCP_DB_CONTAINER="$(DEV_MCP_DB_CONTAINER)" DEV_MCP_DATABASE="$(DEV_MCP_DATABASE)"
+DEV_MCP_SCRIPT := $(CURDIR)/scripts/dev-bridge-mcp.mjs
+
+.PHONY: dev-mcp dev-mcp-check test-dev-mcp
+# stdout must contain only MCP messages when this target is a stdio server.
+dev-mcp:
+	@$(DEV_MCP_ENV) node "$(DEV_MCP_SCRIPT)" serve
+
+dev-mcp-check:
+	@$(DEV_MCP_ENV) DEV_MCP_SESSION="$(DEV_MCP_SESSION)" node "$(DEV_MCP_SCRIPT)" check
+
+test-dev-mcp:
+	pnpm exec node --test scripts/dev-bridge-mcp.test.mjs
+
 # agents.env holds desktop agent credentials (CODEX_AUTH, CLAUDE_CODE_OAUTH_TOKEN, ...)
 # in the same KEY='value' shell-sourceable format the packaged service reads.
 AGENTS_ENV_FILE ?= $(HOME)/.config/bridgectl/agents.env
@@ -143,9 +164,36 @@ dev-claude:
 		echo "CLAUDE_CODE_OAUTH_TOKEN must be set (export it, or add it to $(AGENTS_ENV_FILE))" >&2; \
 		exit 1; \
 	fi; \
-	cd "$(DEV_REPO)" && claude
+	cd "$(DEV_REPO)" && $(DEV_MCP_ENV) node "$(DEV_MCP_SCRIPT)" claude
 
 dev-codex:
+	@command -v codex >/dev/null 2>&1 || { echo "codex is not on PATH" >&2; exit 1; }
+	@$(LOAD_AGENTS_ENV); \
+	if [ -z "$$CODEX_AUTH" ] && [ ! -s "$${CODEX_HOME:-$(CODEX_HOME_DEFAULT)}/auth.json" ]; then \
+		echo "CODEX_AUTH must be set (export it, or add it to $(AGENTS_ENV_FILE)), unless $${CODEX_HOME:-$(CODEX_HOME_DEFAULT)}/auth.json already exists" >&2; \
+		exit 1; \
+	fi; \
+	$(SETUP_CODEX_HOME); cd "$(DEV_REPO)" && $(DEV_MCP_ENV) node "$(DEV_MCP_SCRIPT)" codex
+
+# local-claude/local-codex: run the real agent CLI directly off
+# AGENTS_ENV_FILE, with zero Bridge dependency — no bridgectl build, no dev
+# server, no Docker, no local Bridge MCP adapter. dev-claude/dev-codex always
+# connect() to the Dockerized Bridge Postgres first (for the bridge_dev MCP
+# session-diagnostics tool) and fail the whole launch if that lookup comes up
+# empty, e.g. "No enrollment approver found in the local Bridge database" —
+# even though that MCP tool has nothing to do with whether the agent CLI
+# itself can run. These targets are the escape hatch for when bridgectl,
+# Docker, or dev enrollment is broken but you still just want an agent.
+local-claude:
+	@command -v claude >/dev/null 2>&1 || { echo "claude is not on PATH" >&2; exit 1; }
+	@$(LOAD_AGENTS_ENV); \
+	if [ -z "$$CLAUDE_CODE_OAUTH_TOKEN" ]; then \
+		echo "CLAUDE_CODE_OAUTH_TOKEN must be set (export it, or add it to $(AGENTS_ENV_FILE))" >&2; \
+		exit 1; \
+	fi; \
+	cd "$(DEV_REPO)" && claude
+
+local-codex:
 	@command -v codex >/dev/null 2>&1 || { echo "codex is not on PATH" >&2; exit 1; }
 	@$(LOAD_AGENTS_ENV); \
 	if [ -z "$$CODEX_AUTH" ] && [ ! -s "$${CODEX_HOME:-$(CODEX_HOME_DEFAULT)}/auth.json" ]; then \

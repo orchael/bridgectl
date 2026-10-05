@@ -11,6 +11,11 @@ service BridgeService {
   rpc StopSession(StopSessionRequest) returns (StopSessionResponse);
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  // DiagnoseSession returns the bounded, versioned diagnostic snapshot of a
+  // session (see docs/agent-diagnostics.md). The daemon builds it from its own
+  // Supervisor state and control-client files, so the result is the same for
+  // local and remote callers. Authorized exactly like GetSession.
+  rpc DiagnoseSession(DiagnoseSessionRequest) returns (DiagnoseSessionResponse);
 
   rpc AttachSession(AttachSessionRequest) returns (stream AttachSessionEvent);
   rpc WriteInput(WriteInputRequest) returns (WriteInputResponse);
@@ -161,6 +166,21 @@ message PendingInteractionRequest {
   string type = 2;
   // Optional structured summary; never terminal output or transcript text.
   string summary = 3;
+  // kind is a provider-assigned, fixed-vocabulary category of the request:
+  // command, file_change, tool, question or other. Empty when the provider did
+  // not classify it. Unlike summary it can never carry free text.
+  string kind = 4;
+}
+
+message DiagnoseSessionRequest {
+  string session_id = 1;
+}
+
+message DiagnoseSessionResponse {
+  // report_json is the canonical schema-versioned diagnostic document
+  // (internal/diagnose.Report) serialized as a single JSON object. It is
+  // opaque to the transport so the schema is owned by one Go type.
+  bytes report_json = 1;
 }
 
 message InteractionCapability {

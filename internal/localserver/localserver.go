@@ -900,6 +900,7 @@ func Start(cfg Config) (*Server, error) {
 	providerFallbacks := cfg.ProviderFallbacks
 
 	bridgeServer := server.New(sup, registry, logger, cfg.RateLimits, instanceID, providerFallbacks, jwtVerifier, CertsDir(stateDir), cfg.Version)
+	bridgeServer.SetDiagnoseStateDir(stateDir)
 	bridgev1.RegisterBridgeServiceServer(grpcServer, bridgeServer)
 
 	// Listen: TCP for secure mode, unix socket for local mode.

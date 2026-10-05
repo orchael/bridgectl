@@ -45,8 +45,12 @@ type Config struct {
 	CommandPath        string
 	ObserveFunc        func(string, uint64, int, int) (bridge.ActivityWindow, error)
 	InstructionFunc    func(context.Context, string, string, string) error
-	RespondFunc        func(context.Context, string, string, string) error
-	ApprovalFunc       func(context.Context, string, string, string) error
+	// DiagnoseFunc returns the canonical schema-versioned diagnostic report
+	// for a session as JSON (see DiagnosticRequest). nil disables the
+	// diagnose_session capability.
+	DiagnoseFunc func(sessionID string) ([]byte, error)
+	RespondFunc  func(context.Context, string, string, string) error
+	ApprovalFunc func(context.Context, string, string, string) error
 	// Endpoint is the control-plane WebSocket URL, e.g.
 	// "wss://control.bridge.orchael.dev/v1/control". Taken verbatim from
 	// Bridge's enrollment response; never hard-coded here.
@@ -110,10 +114,12 @@ type Client struct {
 	identityMu     sync.Mutex
 	organizationID string
 	installationID string
-	cfg            Config
-	revisions      *RevisionStore
-	rng            *rand.Rand
-	rngMu          sync.Mutex
+	// lastConnectedAt is guarded by identityMu; see Status.LastConnectedAt.
+	lastConnectedAt time.Time
+	cfg             Config
+	revisions       *RevisionStore
+	rng             *rand.Rand
+	rngMu           sync.Mutex
 
 	// interactions allocates bridgecontrol's own restart-durable wire
 	// revision for interaction-state updates, independent of the session
@@ -185,6 +191,12 @@ func New(cfg Config) *Client {
 // An empty base path (revision persistence disabled) stays empty, matching
 // RevisionStore's own in-memory-only fallback.
 func interactionRevisionPath(base string) string {
+	return InteractionRevisionPath(base)
+}
+
+// InteractionRevisionPath is the exported form of interactionRevisionPath for
+// read-only consumers (see `bridgectl session diagnose`).
+func InteractionRevisionPath(base string) string {
 	if base == "" {
 		return ""
 	}
@@ -313,7 +325,19 @@ func (c *Client) setStatus(state State, lastErr string) {
 	if installationID == "" {
 		installationID = c.cfg.InstallationID
 	}
-	st := Status{State: state, InstallationID: installationID, LastError: lastErr, UpdatedAt: time.Now().UTC()}
+	now := time.Now().UTC()
+	c.identityMu.Lock()
+	if state == StateConnected {
+		c.lastConnectedAt = now
+	} else if c.lastConnectedAt.IsZero() {
+		// Carry the value across a daemon restart.
+		if prev, err := ReadStatus(c.cfg.StatusPath); err == nil {
+			c.lastConnectedAt = prev.LastConnectedAt
+		}
+	}
+	lastConnected := c.lastConnectedAt
+	c.identityMu.Unlock()
+	st := Status{State: state, InstallationID: installationID, LastError: lastErr, UpdatedAt: now, LastConnectedAt: lastConnected}
 	if err := WriteStatus(c.cfg.StatusPath, st); err != nil {
 		c.cfg.Logger.Warn("bridgecontrol: failed to persist status", "error", err)
 	}
@@ -493,6 +517,14 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idleTimeout
 			if err := c.writeEnvelope(ctx, conn, "session_activity", result); err != nil {
 				return
 			}
+		case "diagnose_session":
+			var request DiagnosticRequest
+			if json.Unmarshal(env.Payload, &request) != nil {
+				continue
+			}
+			if err := c.writeEnvelope(ctx, conn, "session_diagnostic", c.diagnose(request)); err != nil {
+				return
+			}
 		case "command":
 			var command Command
 			if json.Unmarshal(env.Payload, &command) != nil {
@@ -641,7 +673,7 @@ func (c *Client) sendHello(ctx context.Context, conn *websocket.Conn) error {
 	if len(version) > maxBridgectlVersion {
 		version = version[:maxBridgectlVersion]
 	}
-	caps, _ := json.Marshal(map[string]bool{"terminal_session": c.cfg.TerminalSupervisor != nil, "observe_session": c.cfg.ObserveFunc != nil, "send_instruction": c.cfg.InstructionFunc != nil})
+	caps, _ := json.Marshal(map[string]bool{"terminal_session": c.cfg.TerminalSupervisor != nil, "observe_session": c.cfg.ObserveFunc != nil, "send_instruction": c.cfg.InstructionFunc != nil, "diagnose_session": c.cfg.DiagnoseFunc != nil})
 	return c.writeEnvelope(ctx, conn, msgHello, helloPayload{BridgectlVersion: version, Capabilities: caps})
 }
 

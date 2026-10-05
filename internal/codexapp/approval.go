@@ -34,7 +34,21 @@ func approvalPending(env envelope, p commandApprovalParams) *bridge.PendingReque
 	if approvalSupported(env, p) {
 		summary = approvalSummary(p)
 	}
-	return &bridge.PendingRequest{ID: "approval:" + hex.EncodeToString(sum[:]), Type: bridge.PendingRequestApproval, Summary: summary}
+	return &bridge.PendingRequest{ID: "approval:" + hex.EncodeToString(sum[:]), Type: bridge.PendingRequestApproval, Summary: summary, Kind: approvalKind(env.Method)}
+}
+
+// approvalKind classifies a v2 approval request from its JSON-RPC method (the
+// structured signal), since command, file-change and permission approvals all
+// flow through approvalPending.
+func approvalKind(method string) bridge.PendingRequestKind {
+	switch method {
+	case methodItemCommandExecApproval:
+		return bridge.PendingKindCommand
+	case methodItemFileChangeApproval:
+		return bridge.PendingKindFileChange
+	default: // permission grants and any future approval method
+		return bridge.PendingKindOther
+	}
 }
 func approvalSupported(env envelope, p commandApprovalParams) bool {
 	if env.Method != methodItemCommandExecApproval || len(env.ID) == 0 || p.ThreadID == "" || p.TurnID == "" || p.ItemID == "" || strings.TrimSpace(p.Cwd) == "" || bridge.ValidateResponse(p.Command) != nil {
