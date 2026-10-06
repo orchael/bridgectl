@@ -925,3 +925,5 @@ Mode: User-authorized security-sensitive bug fix. Governing requirement: PRD §7
 Scope: Step CA startup PKI and `server init` switch workflow. Preserve pre-existing generated-file edits. Risk: switching CA must fail before listening if issuance fails. Rollback: revert this branch; previous state remains if issuance fails.
 
 Evidence: `TestEnsurePKI_StepCASwitch` failed for URL and root changes before the fix and passed afterward. Updated the older local-server and CLI E2E expectations for root replacement. `make test` passed with race detection; `make lint` reported zero issues; `make test-cover-maintained` passed at 82.5%; `make build-cli` passed. The failure-path regression confirms a failed certificate request leaves the previous certificate and bundle untouched. No live service or user PKI files were changed.
+
+PR #284 CI follow-up: Codecov patch coverage was 47.61% against a 50% gate despite all Go tests and lint passing. Added focused checks that an unreadable configured root, saved bundle, or CA URL record fails startup, covering the error branches introduced by this change. Re-run CI after pushing.

@@ -475,6 +475,47 @@ func TestEnsurePKI_StepCASwitch(t *testing.T) {
 	}
 }
 
+func TestStepCAChangedRejectsUnreadableState(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		setup     func(t *testing.T, certsDir, rootPath, bundlePath string)
+		wantError string
+	}{
+		{
+			name: "missing configured root",
+			setup: func(t *testing.T, _, _, bundlePath string) {
+				require.NoError(t, os.WriteFile(bundlePath, []byte("old-root"), 0o644))
+			},
+			wantError: "read Step CA root",
+		},
+		{
+			name: "missing saved bundle",
+			setup: func(t *testing.T, _, rootPath, _ string) {
+				require.NoError(t, os.WriteFile(rootPath, []byte("root"), 0o644))
+			},
+			wantError: "read Step CA trust bundle",
+		},
+		{
+			name: "unreadable URL record",
+			setup: func(t *testing.T, certsDir, rootPath, bundlePath string) {
+				require.NoError(t, os.WriteFile(rootPath, []byte("root"), 0o644))
+				require.NoError(t, os.WriteFile(bundlePath, []byte("root-and-local-ca"), 0o644))
+				require.NoError(t, os.Mkdir(filepath.Join(certsDir, pkiStepCAURLFile), 0o700))
+			},
+			wantError: "read recorded Step CA URL",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			certsDir := t.TempDir()
+			rootPath := filepath.Join(certsDir, "root.crt")
+			bundlePath := filepath.Join(certsDir, "ca-bundle.crt")
+			tc.setup(t, certsDir, rootPath, bundlePath)
+			_, err := stepCAChanged(certsDir, &PKIMaterial{CABundlePath: bundlePath}, &StepCAConfig{URL: "https://ca.example", RootPath: rootPath})
+			require.ErrorContains(t, err, tc.wantError)
+		})
+	}
+}
+
 // TestEnsurePKI_StepCAExpiredCertRenewsAtStartup verifies that EnsurePKI renews
 // an expired Step CA certificate synchronously at startup instead of deferring
 // renewal to the background loop.
