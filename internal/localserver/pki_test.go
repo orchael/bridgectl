@@ -331,11 +331,11 @@ func TestEnsurePKI_StepCAHappyPath(t *testing.T) {
 	assert.NoError(t, err, "JWT key should exist")
 }
 
-// TestEnsurePKI_StepCAIdempotent verifies that a second EnsurePKI call with
-// Step CA config is a no-op when ca-bundle.crt already exists.
+// TestEnsurePKI_StepCARootUpdate verifies that a changed configured root is
+// installed on restart instead of silently reusing the old trust bundle.
 // The JWK stub writes fake (unparseable) certs, so ensureStepCACertFresh
 // treats them as unreadable and re-requests — the stub handles that idempotently.
-func TestEnsurePKI_StepCAIdempotent(t *testing.T) {
+func TestEnsurePKI_StepCARootUpdate(t *testing.T) {
 	stateDir := t.TempDir()
 	rootPEM := filepath.Join(stateDir, "root.crt")
 	require.NoError(t, os.WriteFile(rootPEM, []byte("fake-root-cert"), 0o644))
@@ -370,13 +370,109 @@ func TestEnsurePKI_StepCAIdempotent(t *testing.T) {
 
 	// Overwrite root file with different content.
 	require.NoError(t, os.WriteFile(rootPEM, []byte("changed-root"), 0o644))
-	// Second call: ensureStepCACertFresh triggers renewal (fake cert is unreadable),
-	// but the bundle should still have the original content from the first call.
+	// Second call: a changed configured root must replace the old bundle.
 	mat2, err := EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), stepCfg, 0)
 	require.NoError(t, err)
 	bundle, _ := os.ReadFile(mat2.CABundlePath)
-	assert.True(t, strings.HasPrefix(string(bundle), "fake-root-cert"), "bundle should start with original Step CA root, not overwritten")
-	assert.NotContains(t, string(bundle), "changed-root", "bundle should not reflect the overwritten root file")
+	assert.True(t, strings.HasPrefix(string(bundle), "changed-root"), "bundle should start with the newly configured root")
+}
+
+func TestEnsurePKI_StepCASwitch(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		changeURL  bool
+		changeRoot bool
+		legacy     bool
+	}{
+		{name: "URL changes with same root", changeURL: true},
+		{name: "root changes in legacy state", changeRoot: true, legacy: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			rootPath := filepath.Join(stateDir, "root.crt")
+			require.NoError(t, os.WriteFile(rootPath, []byte("first-root"), 0o644))
+			caCertPath, caKeyPath, err := pki.InitCA("test-ca", t.TempDir())
+			require.NoError(t, err)
+			caCert, caKey, err := pki.LoadCA(caCertPath, caKeyPath)
+			require.NoError(t, err)
+
+			issued := 0
+			failIssue := false
+			oldJWK := requestCertJWKFn
+			requestCertJWKFn = func(_ *StepCAConfig, _ []string, certPath, keyPath string, _ *slog.Logger) error {
+				issued++
+				if failIssue {
+					return fmt.Errorf("simulated CA failure")
+				}
+				srcCert, srcKey, err := pki.IssueCert(caCert, caKey, pki.CertTypeServer, "server", []string{"10.0.0.1"}, t.TempDir(), 24*time.Hour)
+				if err != nil {
+					return err
+				}
+				certData, err := os.ReadFile(srcCert)
+				if err != nil {
+					return err
+				}
+				keyData, err := os.ReadFile(srcKey)
+				if err != nil {
+					return err
+				}
+				require.NoError(t, os.WriteFile(certPath, certData, 0o644))
+				return os.WriteFile(keyPath, keyData, 0o600)
+			}
+			t.Cleanup(func() { requestCertJWKFn = oldJWK })
+
+			cfg := &StepCAConfig{URL: "https://first.example", RootPath: rootPath}
+			mat, err := EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), cfg, 0)
+			require.NoError(t, err)
+			require.Equal(t, 1, issued)
+			_, err = EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), cfg, 0)
+			require.NoError(t, err)
+			require.Equal(t, 1, issued, "unchanged CA must reuse a fresh certificate")
+			jwtBefore, err := os.ReadFile(mat.JWTSigningPub)
+			require.NoError(t, err)
+			clientBefore, err := os.ReadFile(mat.LocalClientCert)
+			require.NoError(t, err)
+			if tc.legacy {
+				err := os.Remove(filepath.Join(CertsDir(stateDir), ".pki-step-ca-url"))
+				require.True(t, err == nil || os.IsNotExist(err))
+			}
+			if tc.changeURL {
+				cfg.URL = "https://second.example"
+			}
+			if tc.changeRoot {
+				require.NoError(t, os.WriteFile(rootPath, []byte("second-root"), 0o644))
+			}
+
+			mat, err = EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), cfg, 0)
+			require.NoError(t, err)
+			require.Equal(t, 2, issued, "CA change must issue a new certificate")
+			bundle, err := os.ReadFile(mat.CABundlePath)
+			require.NoError(t, err)
+			if tc.changeRoot {
+				require.True(t, strings.HasPrefix(string(bundle), "second-root"))
+			}
+			jwtAfter, err := os.ReadFile(mat.JWTSigningPub)
+			require.NoError(t, err)
+			clientAfter, err := os.ReadFile(mat.LocalClientCert)
+			require.NoError(t, err)
+			require.Equal(t, jwtBefore, jwtAfter)
+			require.Equal(t, clientBefore, clientAfter)
+
+			certBefore, err := os.ReadFile(mat.ServerCertPath)
+			require.NoError(t, err)
+			bundleBefore := bundle
+			failIssue = true
+			cfg.URL = "https://unavailable.example"
+			_, err = EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), cfg, 0)
+			require.ErrorContains(t, err, "simulated CA failure")
+			certAfter, err := os.ReadFile(mat.ServerCertPath)
+			require.NoError(t, err)
+			bundleAfter, err := os.ReadFile(mat.CABundlePath)
+			require.NoError(t, err)
+			require.Equal(t, certBefore, certAfter)
+			require.Equal(t, bundleBefore, bundleAfter)
+		})
+	}
 }
 
 // TestEnsurePKI_StepCAExpiredCertRenewsAtStartup verifies that EnsurePKI renews
