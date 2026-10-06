@@ -914,3 +914,14 @@ Evidence:
   on the PR. No fourth review cycle was requested.
 
 ---
+# Step CA endpoint switch (2026-10-06)
+
+Mode: User-authorized security-sensitive bug fix. Governing requirement: PRD §7 Step CA server changes.
+
+- [x] Add failing tests for changed URL/root, unchanged settings, and failed issuance.
+- [x] Make startup reissue and rebuild trust when the configured Step CA changes, preserving local identities.
+- [x] Verify focused and full tests, coverage, and built binaries.
+
+Scope: Step CA startup PKI and `server init` switch workflow. Preserve pre-existing generated-file edits. Risk: switching CA must fail before listening if issuance fails. Rollback: revert this branch; previous state remains if issuance fails.
+
+Evidence: `TestEnsurePKI_StepCASwitch` failed for URL and root changes before the fix and passed afterward. Updated the older local-server and CLI E2E expectations for root replacement. `make test` passed with race detection; `make lint` reported zero issues; `make test-cover-maintained` passed at 82.5%; `make build-cli` passed. The failure-path regression confirms a failed certificate request leaves the previous certificate and bundle untouched. No live service or user PKI files were changed.

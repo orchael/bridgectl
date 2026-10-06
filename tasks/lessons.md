@@ -1,5 +1,20 @@
 # Lessons
 
+## 2026-10-06 Step CA Identity Must Be Part of PKI Reuse
+- Incident/bug: After `server init` changed the CA URL and root, `server start`
+  reused a fresh certificate and trust bundle issued by the former CA without
+  asking for the new provisioner password.
+- Root cause pattern: The PKI cache key included mode and requested SANs but
+  omitted the issuer identity. A valid certificate is not sufficient evidence
+  that it belongs to the currently configured CA.
+- Preventative rule: Before reusing external PKI material, compare the saved
+  issuer URL and trust root with the active configuration; stage replacements
+  before installing them, and do not carry password-file defaults across CA
+  changes in interactive setup.
+- Validation added: Tests cover URL and legacy-root switches, unchanged CA
+  reuse, preservation of local identities, and failed issuance rollback.
+
+
 ## 2026-09-14 Secret Tests Must Not Embed Provider-Shaped Literals
 - Incident/bug: GitHub push protection rejected a telemetry test commit because
   a synthetic AWS access-key fixture matched the real credential shape.

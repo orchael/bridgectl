@@ -149,8 +149,12 @@ func runServerInit() error {
 		}
 		stepCA.Provisioner = prompt(reader, "Provisioner name", provDefault)
 
-		if stepCA.Provisioner != "acme" {
-			pwFile := prompt(reader, "Provisioner password file (leave empty for interactive)", existing.StepCA.ProvisionerPasswordFile)
+		if !strings.EqualFold(stepCA.Provisioner, "acme") {
+			pwDefault := existing.StepCA.ProvisionerPasswordFile
+			if existing.StepCA.URL != "" && existing.StepCA.URL != stepCA.URL {
+				pwDefault = "" // a different CA may use a different provisioner password
+			}
+			pwFile := prompt(reader, "Provisioner password file (leave empty for interactive)", pwDefault)
 			stepCA.ProvisionerPasswordFile = pwFile
 		}
 	}
@@ -193,6 +197,12 @@ func runServerInit() error {
 	}
 
 	fmt.Printf("\nWrote %s\n", cfgPath)
+	if useStepCA && existing.StepCA.URL != "" && existing.StepCA.URL != stepCA.URL {
+		fmt.Println("Step CA changed: the next server start will request a new server certificate.")
+		if !strings.EqualFold(stepCA.Provisioner, "acme") && stepCA.ProvisionerPasswordFile == "" {
+			fmt.Println("The JWK provisioner password will be requested during foreground startup.")
+		}
+	}
 	fmt.Println("\nStart the server with:")
 	fmt.Println("  bridgectl server start")
 	return nil

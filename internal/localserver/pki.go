@@ -21,12 +21,39 @@ import (
 var safeNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
 const (
-	pkiModeAuto   = "auto"
-	pkiModeStepCA = "step-ca"
-	pkiModeTLS    = "tls"
-	pkiModeFile   = ".pki-mode"
-	pkiSANsFile   = ".pki-sans"
+	pkiModeAuto      = "auto"
+	pkiModeStepCA    = "step-ca"
+	pkiModeTLS       = "tls"
+	pkiModeFile      = ".pki-mode"
+	pkiSANsFile      = ".pki-sans"
+	pkiStepCAURLFile = ".pki-step-ca-url"
 )
+
+// stepCAChanged detects a CA switch before a still-valid certificate is reused.
+// Older installations have no URL record, so compare their saved bundle's
+// first certificate (the Step CA root) with the configured root file.
+func stepCAChanged(certsDir string, mat *PKIMaterial, stepCA *StepCAConfig) (bool, error) {
+	root, err := os.ReadFile(stepCA.RootPath)
+	if err != nil {
+		return false, fmt.Errorf("read Step CA root: %w", err)
+	}
+	bundle, err := os.ReadFile(mat.CABundlePath)
+	if err != nil {
+		return false, fmt.Errorf("read Step CA trust bundle: %w", err)
+	}
+	if !strings.HasPrefix(string(bundle), string(root)) {
+		return true, nil
+	}
+	recorded, err := os.ReadFile(filepath.Join(certsDir, pkiStepCAURLFile))
+	if err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("read recorded Step CA URL: %w", err)
+	}
+	return err == nil && strings.TrimSpace(string(recorded)) != strings.TrimRight(stepCA.URL, "/"), nil
+}
+
+func recordStepCAURL(certsDir, url string) error {
+	return os.WriteFile(filepath.Join(certsDir, pkiStepCAURLFile), []byte(strings.TrimRight(url, "/")+"\n"), 0o644)
+}
 
 // readPKIMode returns the PKI mode recorded in certsDir/.pki-mode, or "" if absent.
 func readPKIMode(certsDir string) string {
@@ -241,6 +268,23 @@ func EnsurePKI(stateDir string, serverSANs []string, logger *slog.Logger, stepCA
 		if _, err := os.Stat(mat.ServerCertPath); err == nil {
 			if _, err := os.Stat(mat.ServerKeyPath); err == nil {
 				if readPKIMode(certsDir) == requestedMode {
+					if requestedMode == pkiModeStepCA {
+						changed, err := stepCAChanged(certsDir, mat, stepCA)
+						if err != nil {
+							return nil, err
+						}
+						if changed {
+							logger.Info("Step CA changed, requesting a new server certificate before startup", "url", stepCA.URL)
+							if err := switchStepCA(mat, certsDir, serverSANs, logger, stepCA); err != nil {
+								return nil, err
+							}
+							_ = writePKISANs(certsDir, serverSANs)
+							return mat, nil
+						}
+						if err := recordStepCAURL(certsDir, stepCA.URL); err != nil {
+							return nil, fmt.Errorf("record Step CA URL: %w", err)
+						}
+					}
 					// Renew synchronously before returning so the server
 					// never starts listening with a stale or mismatched
 					// cert: either the operator restarted with a different
@@ -507,8 +551,48 @@ func ensurePKIStepCA(stateDir string, serverSANs []string, logger *slog.Logger, 
 	// or a changed --san value on the next start.
 	_ = writePKIMode(certsDir, pkiModeStepCA)
 	_ = writePKISANs(certsDir, serverSANs)
+	if err := recordStepCAURL(certsDir, stepCA.URL); err != nil {
+		return nil, fmt.Errorf("record Step CA URL: %w", err)
+	}
 
 	return mat, nil
+}
+
+// switchStepCA stages the replacement before touching live PKI material.
+// The local management CA and JWT keys are intentionally kept in place.
+func switchStepCA(mat *PKIMaterial, certsDir string, sans []string, logger *slog.Logger, stepCA *StepCAConfig) error {
+	staging, err := os.MkdirTemp(certsDir, ".step-ca-switch-")
+	if err != nil {
+		return fmt.Errorf("stage Step CA switch: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(staging) }()
+	certPath := filepath.Join(staging, "server.crt")
+	keyPath := filepath.Join(staging, "server.key")
+	bundlePath := filepath.Join(staging, "ca-bundle.crt")
+	if err := copyFile(stepCA.RootPath, bundlePath); err != nil {
+		return fmt.Errorf("stage Step CA root: %w", err)
+	}
+	if err := pki.AppendBundle(bundlePath, mat.CACertPath); err != nil {
+		return fmt.Errorf("stage local client trust: %w", err)
+	}
+	switch strings.ToLower(stepCA.Provisioner) {
+	case "acme":
+		err = requestCertACMEFn(stepCA, acmeSANs(sans), certPath, keyPath, logger)
+	default:
+		err = requestCertJWKFn(stepCA, sans, certPath, keyPath, logger)
+	}
+	if err != nil {
+		return fmt.Errorf("obtain server cert from new Step CA: %w", err)
+	}
+	for _, pair := range [][2]string{{certPath, mat.ServerCertPath}, {keyPath, mat.ServerKeyPath}, {bundlePath, mat.CABundlePath}} {
+		if err := os.Rename(pair[0], pair[1]); err != nil {
+			return fmt.Errorf("install new Step CA material: %w", err)
+		}
+	}
+	if err := recordStepCAURL(certsDir, stepCA.URL); err != nil {
+		return fmt.Errorf("record Step CA URL: %w", err)
+	}
+	return nil
 }
 
 // acmeSANs filters serverSANs for ACME compatibility. ACME / public CAs

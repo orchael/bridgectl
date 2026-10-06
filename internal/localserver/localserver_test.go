@@ -686,9 +686,10 @@ func TestDiscoverTargetSecureModeServerNameFromCert(t *testing.T) {
 	// Start the server. The Step CA path should derive tlsServerName from
 	// the cert, not compare its SANs against the freshly computed default.
 	srv, err := Start(Config{
-		StateDir:   dir,
-		ListenAddr: "127.0.0.1:0",
-		StepCAURL:  "https://ca.example.internal:443",
+		StateDir:       dir,
+		ListenAddr:     "127.0.0.1:0",
+		StepCAURL:      "https://ca.example.internal:443",
+		StepCARootPath: caCertPath,
 	})
 	if err != nil {
 		t.Fatalf("secure mode start failed: %v", err)

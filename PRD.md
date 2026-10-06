@@ -254,6 +254,17 @@ bridge-ca (root)
 - Certificate rotation: certs expire after 90 days; automated renewal via `bridge-ca renew`.
 - Revocation: CRL distribution point served by bridge daemon.
 
+#### Step CA server changes
+
+When `server init` changes the Step CA URL or root, the next `server start` must obtain a server certificate from the newly configured CA before listening. A valid certificate from the former CA must not be reused. Existing local client and JWT credentials remain valid. If issuance fails, startup fails and the previous certificate and trust bundle remain available for rollback. A password-based provisioner prompts during foreground startup when no password file is configured.
+
+Acceptance criteria:
+
+- A changed Step CA URL triggers issuance even when the requested SANs and root are unchanged.
+- A changed root triggers issuance for existing installations that have no saved Step CA URL metadata.
+- A failed CA switch does not replace the existing certificate or trust bundle.
+- Unchanged Step CA settings reuse a fresh certificate without asking for a provisioner password.
+
 #### Startup Client Registry
 
 When a bridge server is configured for Step CA-backed remote access, operators may declare known client issuers in the YAML config so the server attempts to trust their JWT public keys during startup.
