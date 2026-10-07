@@ -293,7 +293,7 @@ func serverVersionLine(ctx context.Context) string {
 	if serverVersion == version {
 		return fmt.Sprintf("  server        ✓ %s", serverVersion)
 	}
-	return fmt.Sprintf("  server        ! %s (differs from bridgectl %s — restart with bridgectl server stop && bridgectl server start)", serverVersion, version)
+	return fmt.Sprintf("  server        ! %s (differs from bridgectl %s — finish active sessions, then restart the service that owns the server; on Linux this may be bridge.service or bridgectl.service)", serverVersion, version)
 }
 
 // controlDoctorLine reports the control-plane connection state for
