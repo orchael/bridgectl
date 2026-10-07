@@ -486,7 +486,7 @@ Supported releases: Ubuntu **24.04 (noble)** and **25.04 (plucky)** on `amd64`.
 
 ```bash
 curl -fsSL https://orchael.github.io/bridgectl/install.sh | sudo bash
-sudo systemctl enable --now bridgectl
+systemctl --user enable --now bridge.service
 ```
 
 **Manual apt setup (noble example):**
@@ -500,8 +500,13 @@ echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/bridgectl.gpg] \
   | sudo tee /etc/apt/sources.list.d/bridgectl.list >/dev/null
 sudo apt-get update
 sudo apt-get install -y bridgectl
-sudo systemctl enable --now bridgectl
+systemctl --user enable --now bridge.service
 ```
+
+Run the `systemctl --user` command as the login user who will run the bridge.
+The package installs `bridge.service`, not a system unit named
+`bridgectl.service`. A managed host may provide a custom user unit instead;
+enable only one bridge unit per user.
 
 **Supported Ubuntu suites:** `noble` (24.04 LTS) and `plucky` (25.04). Replace `noble` above with `plucky` if you are on Ubuntu 25.04. The repository does not publish a `stable` or `jammy` suite — using any other suite name will result in a "does not have a Release file" error from apt.
 

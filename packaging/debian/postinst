@@ -6,14 +6,25 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 echo ""
-echo "AI Agent Bridge installed."
-echo ""
-echo "To start the bridge automatically when you log in, run:"
-echo "  systemctl --user enable --now bridge"
-echo ""
-echo "To start it immediately for this session:"
-echo "  systemctl --user start bridge"
-echo ""
+if [ "${1:-}" = configure ] && [ -n "${2:-}" ]; then
+  echo "AI Agent Bridge upgraded from $2."
+  echo "The package does not restart running user services; the old server binary may still be running."
+  echo "As the bridge login user, finish active sessions and check versions:"
+  echo "  bridgectl session list"
+  echo "  bridgectl doctor"
+  echo "Check which user unit is active, then reload systemd and restart only that unit:"
+  echo "  systemctl --user status bridge.service bridgectl.service"
+  echo "  systemctl --user daemon-reload"
+  echo "Choose one restart command for the active unit:"
+  echo "  Standalone: systemctl --user restart bridge.service"
+  echo "  ai-desktop: systemctl --user restart bridgectl.service"
+  echo "Do not enable both units on the same host."
+else
+  echo "AI Agent Bridge installed."
+  echo "As the bridge login user, start the package unit with:"
+  echo "  systemctl --user enable --now bridge.service"
+  echo "Hosts with a custom user unit should enable that unit instead."
+fi
 echo "Check status with:"
 echo "  bridgectl server status"
 echo ""
