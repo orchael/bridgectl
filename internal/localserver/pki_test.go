@@ -502,10 +502,14 @@ func TestStepCAChangedRejectsUnreadableState(t *testing.T) {
 			wantError: "read Step CA trust bundle",
 		},
 		{
+			// The URL record is only consulted once the root set matches, so
+			// the bundle has to carry the configured root for this case to
+			// reach it at all.
 			name: "unreadable URL record",
 			setup: func(t *testing.T, certsDir, rootPath, bundlePath string) {
-				require.NoError(t, os.WriteFile(rootPath, []byte("root"), 0o644))
-				require.NoError(t, os.WriteFile(bundlePath, []byte("root-and-local-ca"), 0o644))
+				root := stepCARootPEM(t)
+				require.NoError(t, os.WriteFile(rootPath, root, 0o644))
+				require.NoError(t, os.WriteFile(bundlePath, root, 0o644))
 				require.NoError(t, os.Mkdir(filepath.Join(certsDir, pkiStepCAURLFile), 0o700))
 			},
 			wantError: "read recorded Step CA URL",
