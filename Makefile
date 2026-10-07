@@ -27,7 +27,8 @@ build-cli:
 # Repository-local development. Keep this state separate from ~/.config/bridgectl
 # so a packaged/system bridgectl daemon can continue serving the desktop.
 DEV_STATE_DIR ?= $(CURDIR)/.dev/bridgectl
-DEV_CONFIG ?= $(CURDIR)/config/bridge-repo-dev.yaml
+# Preserve enrollment on subsequent starts; use the template only before login.
+DEV_CONFIG ?= $(if $(wildcard $(DEV_STATE_DIR)/bridge.yaml),$(DEV_STATE_DIR)/bridge.yaml,$(CURDIR)/config/bridge-repo-dev.yaml)
 DEV_LOG ?= $(CURDIR)/.dev/bridgectl-server.log
 DEV_REPO ?= $(CURDIR)
 DEV_BRIDGECTL = BRIDGECTL_STATE_DIR="$(DEV_STATE_DIR)" "$(CURDIR)/$(BRIDGE_CLI)"

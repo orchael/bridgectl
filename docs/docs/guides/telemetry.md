@@ -91,7 +91,15 @@ so secrets split by zero-width frame controls are redacted together. Carryover u
 the existing buffer bound; overflow is recorded as an omission.
 Normal delivery still follows the configured flush interval.
 
-These changes require an updated daemon. They cannot recover output omitted by
+Native PTY capture now interprets cursor movements, erase operations, wrapping,
+and alternate-screen updates in a bounded virtual terminal using the session's
+current dimensions. It archives changed rendered lines with line breaks instead
+of concatenating redraw fragments. Identical screen rows are not repeated.
+Secrets are masked at their original cell widths before rendering and checked
+again after cursor edits; device queries, clipboard controls and OSC/DCS payloads
+are discarded. Stream-JSON and non-terminal capture keep their existing behavior.
+
+These changes require rebuilding and restarting the daemon. They cannot recover output omitted by
 an earlier capture policy. Archived text is redacted and stripped of terminal
 controls, so it supports reading past output, not exact ANSI screen replay.
 

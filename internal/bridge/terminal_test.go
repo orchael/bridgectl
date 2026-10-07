@@ -47,3 +47,20 @@ func TestTerminalReplayBoundAndGap(t *testing.T) {
 		t.Fatal("end missing")
 	}
 }
+
+func TestTelemetrySessionUsesCurrentPTYGeometry(t *testing.T) {
+	ms := &managedSession{info: SessionInfo{SessionID: "s", Cols: 120, Rows: 42}}
+	session := telemetrySession(ms)
+	if session.Cols != 120 || session.Rows != 42 {
+		t.Fatalf("wrong PTY geometry: %+v", session)
+	}
+	ms.info.Cols = 90
+	if telemetrySession(ms).Cols != 90 {
+		t.Fatal("stale PTY geometry")
+	}
+	ms.streamJSON = true
+	session = telemetrySession(ms)
+	if session.Cols != 0 || session.Rows != 0 {
+		t.Fatal("stream JSON marked as terminal")
+	}
+}

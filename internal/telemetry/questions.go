@@ -97,6 +97,9 @@ type Event struct {
 // Session identifies an agent session without requiring telemetry to depend on
 // the bridge package.
 type Session struct {
+	// Cols and Rows are set only for native PTY sessions, not stream-JSON output.
+	Cols      uint32
+	Rows      uint32
 	SourceID  string
 	SessionID string
 	ActorID   string

@@ -930,7 +930,7 @@ func (s *Supervisor) waitLoop(ms *managedSession) {
 		ms.info.State = SessionStateStopped
 		slog.Info("session process exited", "session_id", ms.info.SessionID, "provider", ms.info.Provider, "exit_code", exitCode)
 	}
-	tsession := telemetry.Session{SessionID: ms.info.SessionID, ProjectID: ms.info.ProjectID, Provider: ms.info.Provider, RepoPath: ms.info.RepoPath}
+	tsession := telemetrySessionLocked(ms)
 	infoCopy := ms.info
 	ms.telemetryMu.Lock()
 	ms.cancel()
@@ -1068,7 +1068,7 @@ func (s *Supervisor) WriteInput(sessionID, clientID string, data []byte) (int, e
 	streamJSON := ms.streamJSON
 	stdin := ms.stdin
 	ptmx := ms.ptmx
-	tsession := telemetry.Session{SessionID: ms.info.SessionID, ProjectID: ms.info.ProjectID, Provider: ms.info.Provider, RepoPath: ms.info.RepoPath}
+	tsession := telemetrySessionLocked(ms)
 	ms.telemetryMu.Lock()
 	ms.mu.Unlock()
 	if s.telemetry != nil {
@@ -1486,7 +1486,17 @@ func (s *Supervisor) notifyControl(info SessionInfo) {
 func telemetrySession(ms *managedSession) telemetry.Session {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
-	return telemetry.Session{SessionID: ms.info.SessionID, ProjectID: ms.info.ProjectID, Provider: ms.info.Provider, RepoPath: ms.info.RepoPath}
+	return telemetrySessionLocked(ms)
+}
+
+// Caller holds ms.mu; stream-JSON output must retain its existing framing.
+func telemetrySessionLocked(ms *managedSession) telemetry.Session {
+	session := telemetry.Session{SessionID: ms.info.SessionID, ProjectID: ms.info.ProjectID, Provider: ms.info.Provider, RepoPath: ms.info.RepoPath}
+	if !ms.streamJSON {
+		session.Cols = ms.info.Cols
+		session.Rows = ms.info.Rows
+	}
+	return session
 }
 
 func (s *Supervisor) closeTelemetry(ctx context.Context) {
