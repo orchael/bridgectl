@@ -234,6 +234,9 @@ func bridgeEnvelope(id string, jsonl []byte, collectorVersion string) ([]byte, e
 		if e.Fingerprint != "" {
 			payload["fingerprint"] = e.Fingerprint
 		}
+		if e.Terminal != nil {
+			payload["terminal"] = e.Terminal
+		}
 		if e.Text != "" {
 			payload["text"] = e.Text
 		}

@@ -113,6 +113,8 @@ const (
 
 // OutputChunk is one retained output chunk from an agent session.
 type OutputChunk struct {
+	Cols      uint32 `json:",omitempty"`
+	Rows      uint32 `json:",omitempty"`
 	Seq       uint64
 	Timestamp time.Time
 	Payload   []byte

@@ -217,11 +217,11 @@ func (c *LiveCollector) SessionEnded(session Session) {
 	if frame := c.framer.FlushInput(frameKey(session)); frame != "" {
 		c.analyzer.ObserveInput(session, []byte(frame))
 	}
-	c.analyzer.ObserveSessionEnd(session)
 	if capture := c.terminals[key]; capture != nil {
 		capture.close()
 		delete(c.terminals, key)
 	}
+	c.analyzer.ObserveSessionEnd(session)
 }
 
 func (c *LiveCollector) observeInteraction(session Session, direction Direction, stream StreamType, data []byte) {
@@ -496,11 +496,12 @@ func (c *LiveCollector) emitInteraction(session Session, direction Direction, st
 	if direction == DirectionAgent {
 		if stream == StreamOutput && session.Cols > 0 && session.Rows > 0 && utf8.Valid(data) && c.renderTerminal {
 			text, redactions := c.renderedOutput(session, data)
-			if text != "" {
+			snapshot := c.terminals[sessionKey(session)].snapshot
+			if text != "" || snapshot != nil {
 				text = c.analyzer.redact(text)
-				c.analyzer.record(Event{Timestamp: c.analyzer.now().UTC(), SourceID: session.SourceID, ActorID: session.ActorID,
+				c.recordTerminal(session, Event{Timestamp: c.analyzer.now().UTC(), SourceID: session.SourceID, ActorID: session.ActorID,
 					SessionID: session.SessionID, ProjectID: session.ProjectID, Provider: session.Provider,
-					Direction: DirectionAgent, Kind: EventProviderOutput, Stream: stream, ByteCount: len(data), Text: text, Redactions: redactions})
+					Direction: DirectionAgent, Kind: EventProviderOutput, Stream: stream, ByteCount: len(data), Text: text, Redactions: redactions, Terminal: snapshot})
 				for _, frame := range c.framer.FeedOutput(frameKey(session), []byte(text)) {
 					c.analyzer.ObserveOutput(session, []byte(frame))
 				}

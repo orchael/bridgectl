@@ -1,6 +1,7 @@
 package bridgecontrol
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ import (
 // TerminalRequest is an ephemeral control request. ClientID must be scoped by
 // the authenticated gateway to the user and browser tab, never a local CLI ID.
 type TerminalRequest struct {
+	Stream         bool      `json:"stream,omitempty"`
 	ID             string    `json:"request_id"`
 	OrganizationID string    `json:"organization_id"`
 	InstallationID string    `json:"installation_id"`
@@ -38,6 +40,7 @@ type terminalLease struct {
 type terminalManager struct {
 	mu         sync.Mutex
 	leases     map[string]*terminalLease
+	streams    map[string]context.CancelFunc
 	supervisor func() *bridge.Supervisor
 	ttl        time.Duration
 }
@@ -59,6 +62,9 @@ func (m *terminalManager) release(key string) {
 func (m *terminalManager) close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	for _, cancel := range m.streams {
+		cancel()
+	}
 	for key := range m.leases {
 		m.release(key)
 	}
@@ -165,4 +171,61 @@ func (m *terminalManager) handle(r TerminalRequest) TerminalResult {
 		m.release(key)
 	}
 	return result
+}
+
+// startStream keeps the socket reader free for heartbeats, input, and cancel.
+// Subscribers have bounded lifetimes; no viewer can accumulate an unbounded queue.
+func (m *terminalManager) startStream(ctx context.Context, r TerminalRequest, send func(TerminalResult) error) {
+	m.mu.Lock()
+	if m.streams == nil {
+		m.streams = make(map[string]context.CancelFunc)
+	}
+	if _, exists := m.streams[r.ID]; exists || len(m.streams) >= 32 || r.Action != "watch" || r.KeepWriter {
+		m.mu.Unlock()
+		_ = send(TerminalResult{ID: r.ID, Code: "invalid_request"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	m.streams[r.ID] = cancel
+	m.mu.Unlock()
+	go func() {
+		defer func() { cancel(); m.mu.Lock(); delete(m.streams, r.ID); m.mu.Unlock() }()
+		result := m.handle(r)
+		if err := send(result); err != nil || result.Code != "" || result.Window.Ended {
+			return
+		}
+		after := result.Window.NextSequence
+		for {
+			// Coalesce fast PTY writes into frames instead of one packet per write.
+			timer := time.NewTimer(50 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			s := m.supervisor()
+			if s == nil {
+				return
+			}
+			w, err := s.WaitTerminalWindow(ctx, r.SessionID, r.ClientID, after)
+			if err != nil {
+				return
+			}
+			if err = send(TerminalResult{ID: r.ID, Window: w}); err != nil {
+				return
+			}
+			after = w.NextSequence
+			if w.Ended {
+				return
+			}
+		}
+	}()
+}
+func (m *terminalManager) cancelStream(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if cancel := m.streams[id]; cancel != nil {
+		cancel()
+	}
 }

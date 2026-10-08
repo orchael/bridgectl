@@ -100,8 +100,9 @@ again after cursor edits; device queries, clipboard controls and OSC/DCS payload
 are discarded. Stream-JSON and non-terminal capture keep their existing behavior.
 
 These changes require rebuilding and restarting the daemon. They cannot recover output omitted by
-an earlier capture policy. Archived text is redacted and stripped of terminal
-controls, so it supports reading past output, not exact ANSI screen replay.
+an earlier capture policy. The searchable text remains redacted and stripped of
+terminal controls; the styled checkpoint field described below preserves screen
+formatting for newly captured output.
 
 ### Completeness checkpoints and delivery recovery
 
@@ -230,3 +231,22 @@ bridgectl telemetry report --events ~/.config/bridgectl/telemetry/segments
 For downstream design examples, run the non-production metrics/API/model-packet
 sample documented in
 [`examples/telemetry-analysis`](https://github.com/orchael/bridgectl/tree/main/examples/telemetry-analysis).
+
+### Formatted terminal history
+
+Native PTY capture now includes versioned, redacted screen checkpoints in the
+`terminal` field of provider-output events. Each checkpoint records its grid
+size and SGR-styled cells; it is independent of earlier pages. Rapid redraws are
+coalesced over 100 ms, identical screens are omitted, and session shutdown
+flushes the last revision. Text capture permissions apply to checkpoints too.
+Device, clipboard, and hyperlink controls are never archived. This preserves
+colors and layout while keeping the existing secret masking policy. Checkpoints
+use the existing durable telemetry spool, checksums, fragmentation and S3 upload.
+Older text-only archives cannot regain discarded styles.
+
+The native replay buffer and durable local output chunks also retain resize
+geometry. Bridge subscriptions resume by sequence over the existing control
+WebSocket, coalesce writes into 50 ms batches, send idle state at most once per
+second, and expire after 30 seconds. Browser reconnection resumes its cursor;
+slow consumers reconnect instead of silently skipping bytes. No separate public
+port or raw terminal upload policy is introduced.

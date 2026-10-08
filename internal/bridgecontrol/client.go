@@ -496,6 +496,13 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idleTimeout
 			return
 		}
 		switch env.Type {
+		case "terminal_cancel":
+			var request struct {
+				ID string `json:"request_id"`
+			}
+			if json.Unmarshal(env.Payload, &request) == nil {
+				terminals.cancelStream(request.ID)
+			}
 		case "terminal_request":
 			var request TerminalRequest
 			if json.Unmarshal(env.Payload, &request) != nil {
@@ -503,6 +510,10 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idleTimeout
 			}
 			result := TerminalResult{ID: request.ID, Code: "invalid_request"}
 			if request.OrganizationID == c.organizationID && request.InstallationID == c.installationID {
+				if request.Stream {
+					terminals.startStream(ctx, request, func(result TerminalResult) error { return c.writeEnvelope(ctx, conn, "terminal_result", result) })
+					continue
+				}
 				result = terminals.handle(request)
 			}
 			if err := c.writeEnvelope(ctx, conn, "terminal_result", result); err != nil {
@@ -673,7 +684,7 @@ func (c *Client) sendHello(ctx context.Context, conn *websocket.Conn) error {
 	if len(version) > maxBridgectlVersion {
 		version = version[:maxBridgectlVersion]
 	}
-	caps, _ := json.Marshal(map[string]bool{"terminal_session": c.cfg.TerminalSupervisor != nil, "observe_session": c.cfg.ObserveFunc != nil, "send_instruction": c.cfg.InstructionFunc != nil, "diagnose_session": c.cfg.DiagnoseFunc != nil})
+	caps, _ := json.Marshal(map[string]bool{"terminal_session": c.cfg.TerminalSupervisor != nil, "terminal_stream": c.cfg.TerminalSupervisor != nil, "observe_session": c.cfg.ObserveFunc != nil, "send_instruction": c.cfg.InstructionFunc != nil, "diagnose_session": c.cfg.DiagnoseFunc != nil})
 	return c.writeEnvelope(ctx, conn, msgHello, helloPayload{BridgectlVersion: version, Capabilities: caps})
 }
 

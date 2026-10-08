@@ -3,6 +3,7 @@ package telemetry
 import (
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	uv "github.com/charmbracelet/ultraviolet"
@@ -17,21 +18,69 @@ import (
 type terminalCapture struct {
 	screen   *vt.Emulator
 	previous []string
+	styled   string
+	snapshot *TerminalSnapshot
+	pending  *Event
+	timer    *time.Timer
+	analyzer *Analyzer
 }
 
-func (t *terminalCapture) close() { _ = t.screen.Close() }
+func (t *terminalCapture) flush() {
+	if t.timer != nil {
+		t.timer.Stop()
+		t.timer = nil
+	}
+	if t.pending != nil {
+		t.analyzer.record(*t.pending)
+		t.pending = nil
+	}
+}
+func (t *terminalCapture) close() { t.flush(); _ = t.screen.Close() }
+
+// Coalesce redraw bursts, retaining the final styled screen and the redacted
+// text for search. The callback shares the collector lock with output/close.
+func (c *LiveCollector) recordTerminal(session Session, event Event) {
+	capture := c.terminals[sessionKey(session)]
+	if capture.pending != nil {
+		if event.Terminal != nil && capture.pending.Terminal != nil {
+			snapshot := *event.Terminal
+			snapshot.Scrollback = capture.pending.Terminal.Scrollback + snapshot.Scrollback
+			event.Terminal = &snapshot
+		}
+		event.Text = capture.pending.Text + event.Text
+		event.ByteCount += capture.pending.ByteCount
+		event.Redactions += capture.pending.Redactions
+		if event.Terminal == nil {
+			event.Terminal = capture.pending.Terminal
+		}
+	}
+	capture.pending = &event
+	if capture.timer == nil {
+		capture.timer = time.AfterFunc(100*time.Millisecond, func() {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if c.terminals[sessionKey(session)] == capture {
+				capture.flush()
+			}
+		})
+	}
+	if len(event.Text) > maxInteractionBufferSize || (event.Terminal != nil && len(event.Terminal.Scrollback) > maxInteractionBufferSize) {
+		capture.flush()
+	}
+}
 
 func (c *LiveCollector) renderedOutput(session Session, data []byte) (string, int) {
 	key := sessionKey(session)
 	capture := c.terminals[key]
 	cols, rows := min(int(session.Cols), 500), min(int(session.Rows), 300)
 	if capture == nil {
-		capture = &terminalCapture{screen: vt.NewEmulator(cols, rows)}
-		capture.screen.SetScrollbackSize(1)
+		capture = &terminalCapture{screen: vt.NewEmulator(cols, rows), analyzer: c.analyzer}
+		capture.screen.SetScrollbackSize(4096)
 		c.terminals[key] = capture
 	} else if capture.screen.Width() != cols || capture.screen.Height() != rows {
 		capture.screen.Resize(cols, rows)
 		capture.previous = nil
+		capture.styled = "<resized>"
 	}
 	// Redact the contiguous source text first. Masking keeps cell widths and ANSI
 	// positions intact, unlike inserting a variable-length redaction label.
@@ -61,6 +110,29 @@ func (c *LiveCollector) renderedOutput(session Session, data []byte) (string, in
 		}
 	}
 	capture.previous = lines
+	styled := capture.screen.Render()
+	// Drain native scrollback into the revision before another redraw can evict
+	// it. Redact across the scrollback/screen boundary, preserving SGR offsets.
+	scrolled := capture.screen.Scrollback().Lines()
+	history := make([]string, 0, len(scrolled)+1)
+	for _, line := range scrolled {
+		history = append(history, line.Render())
+	}
+	history = append(history, styled)
+	safeStyled, extra := maskTerminalSecrets(strings.Join(history, "\n"), true)
+	redactions += extra
+	split := strings.SplitN(safeStyled, "\n", len(scrolled)+1)
+	scrollback := ""
+	if len(scrolled) > 0 {
+		scrollback = strings.Join(split[:len(scrolled)], "\n") + "\n"
+	}
+	styled = split[len(split)-1]
+	capture.screen.ClearScrollback()
+	capture.snapshot = nil
+	if styled != capture.styled || scrollback != "" {
+		capture.styled = styled
+		capture.snapshot = &TerminalSnapshot{Version: 1, Cols: cols, Rows: rows, ANSI: styled, Scrollback: scrollback}
+	}
 	return changed.String(), redactions
 }
 
@@ -162,11 +234,11 @@ func layoutControl(seq string) bool {
 		}
 		return false
 	}
-	if !strings.ContainsRune("ABCDEFGHJKLMPSTX@`adefrsu", rune(command)) {
+	if !strings.ContainsRune("ABCDEFGHJKLMPSTX@`adefrsum", rune(command)) {
 		return false
 	}
 	for _, char := range params {
-		if char != ';' && (char < '0' || char > '9') {
+		if char != ';' && (command != 'm' || char != ':') && (char < '0' || char > '9') {
 			return false
 		}
 	}

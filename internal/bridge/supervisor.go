@@ -835,7 +835,9 @@ func (s *Supervisor) appendChunk(ms *managedSession, payload []byte, ctype Chunk
 	if ctype == ChunkTypeOutput && ms.stripANSI {
 		displayPayload = ansiEscape.ReplaceAll(payload, nil)
 	}
-	chunk := ms.buf.AppendTyped(displayPayload, ctype)
+	ms.mu.Lock()
+	chunk := ms.buf.AppendSized(displayPayload, ctype, ms.info.Cols, ms.info.Rows)
+	ms.mu.Unlock()
 	s.persistChunk(ms.info.SessionID, chunk)
 	ms.mu.Lock()
 	ms.info.OldestSeq = ms.buf.OldestSeq()
@@ -1165,7 +1167,12 @@ func (s *Supervisor) Resize(sessionID, clientID string, cols, rows uint32) error
 	if streamJSON {
 		return nil // no PTY to resize for stream-JSON sessions
 	}
-	return pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	if err := pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}); err != nil {
+		return err
+	}
+	// A zero-byte ordered frame persists resize geometry even if the PTY is idle.
+	s.appendChunk(ms, nil, ChunkTypeOutput)
+	return nil
 }
 
 // Attach connects clientID to the session. role controls whether the client

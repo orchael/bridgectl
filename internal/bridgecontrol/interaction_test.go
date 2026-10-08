@@ -75,6 +75,7 @@ func TestSendSnapshot_AlwaysIncludesCurrentInteraction(t *testing.T) {
 	got := snap.Sessions[0].Interaction
 	if got == nil {
 		t.Fatal("Interaction was omitted from the snapshot")
+		return
 	}
 	if got.State != InteractionWaitingForApproval {
 		t.Fatalf("State = %q, want %q", got.State, InteractionWaitingForApproval)
@@ -130,6 +131,7 @@ func TestSendSnapshot_UnsupportedProviderReportsUnknown(t *testing.T) {
 	got := snap.Sessions[0].Interaction
 	if got == nil {
 		t.Fatal("Interaction was omitted; an unsupported provider must still report an explicit unknown")
+		return
 	}
 	if got.State != InteractionUnknown {
 		t.Fatalf("State = %q, want %q", got.State, InteractionUnknown)

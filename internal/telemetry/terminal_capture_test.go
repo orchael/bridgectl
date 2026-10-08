@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -152,6 +153,63 @@ func TestTerminalCaptureSplitSecretFrames(t *testing.T) {
 		}
 		if strings.Contains(text.String(), "top-secret") || !strings.Contains(text.String(), "*") {
 			t.Fatalf("split %d unsafe: %q", split, text.String())
+		}
+	}
+}
+
+func TestStyledCheckpointRedactionResizeAndFinalFlush(t *testing.T) {
+	sink := &memorySink{}
+	c := NewLiveCollector(sink, 128, true, nil, EventProviderOutput)
+	session := Session{SessionID: "styled", Cols: 40, Rows: 8}
+	c.ObserveOutputChunk(session, []byte("\x1b[?2026h\x1b[H\x1b[31;1mRED 界\x1b[0m\x1b[2;1Htoken=private-value \x1b[?2026l"))
+	session.Cols = 60
+	c.ObserveOutputChunk(session, []byte("\x1b[?2026h\x1b[3;1H\x1b[34mBLUE\x1b[0m settled words \x1b[?2026l"))
+	c.SessionEnded(session)
+	if err := c.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var last *TerminalSnapshot
+	for _, event := range sink.snapshot() {
+		if event.Terminal != nil {
+			last = event.Terminal
+		}
+	}
+	if last == nil {
+		t.Fatal("missing checkpoint")
+		return
+	}
+	if last.Version != 1 || last.Cols != 60 || last.Rows != 8 {
+		t.Fatalf("geometry: %+v", last)
+	}
+	if !strings.Contains(last.ANSI, "\x1b[") || !strings.Contains(last.ANSI, "BLUE") || strings.Contains(last.ANSI, "private-value") {
+		t.Fatalf("unsafe or unstyled checkpoint: %q", last.ANSI)
+	}
+}
+
+func TestStyledCheckpointRetainsNativeScrollbackAndCapturePolicy(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		sink := &memorySink{}
+		c := NewLiveCollector(sink, 256, enabled, nil, EventProviderOutput)
+		session := Session{SessionID: "scroll", Cols: 40, Rows: 2}
+		for i := 0; i < 30; i++ {
+			c.ObserveOutputChunk(session, []byte(fmt.Sprintf("\x1b[31mLINE_%02d\x1b[0m\r\n", i)))
+		}
+		c.SessionEnded(session)
+		if err := c.Close(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		var output strings.Builder
+		for _, e := range sink.snapshot() {
+			if e.Terminal != nil {
+				output.WriteString(e.Terminal.Scrollback)
+				output.WriteString(e.Terminal.ANSI)
+			}
+		}
+		if !enabled && output.Len() != 0 {
+			t.Fatal("checkpoint bypassed text capture policy")
+		}
+		if enabled && (!strings.Contains(output.String(), "LINE_00") || !strings.Contains(output.String(), "LINE_29") || !strings.Contains(output.String(), "\x1b[")) {
+			t.Fatalf("lost styled scrollback: %q", output.String())
 		}
 	}
 }
