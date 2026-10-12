@@ -295,8 +295,19 @@ func TestSessionLifecycle_StartedUpdatedStopped(t *testing.T) {
 
 	c := newTestClient(t, fs.wsURL(), "bri_valid", func() []SessionSnapshot { return nil })
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-	go func() { _ = c.connectAndServe(ctx) }()
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		_ = c.connectAndServe(ctx)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-serveDone:
+		case <-time.After(testTimeout):
+			t.Error("control client did not stop after cancellation")
+		}
+	}()
 
 	// Wait until the server has already acked the initial snapshot (and the
 	// client has drained anything predating it) before notifying: a real
