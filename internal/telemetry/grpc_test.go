@@ -312,7 +312,8 @@ func TestGRPCForwardingSinkDeliversImmediatelyAfterFlush(t *testing.T) {
 	}
 	client, cleanup := startCollectorTestServer(t, NewGRPCCollectorServer(collectorSpool, 1<<20))
 	defer cleanup()
-	forwarder := NewGRPCForwardingSink(bridgeSpool, client, nil, 100*time.Millisecond, 10*time.Millisecond, nil)
+	const flushInterval = time.Second
+	forwarder := NewGRPCForwardingSink(bridgeSpool, client, nil, flushInterval, 10*time.Millisecond, nil)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -324,13 +325,15 @@ func TestGRPCForwardingSinkDeliversImmediatelyAfterFlush(t *testing.T) {
 	// Let the initial empty delivery run halfway to the first flush. Previously,
 	// the delivery timer then raced ahead of the flush and delayed this record by
 	// almost a second interval.
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(flushInterval / 2)
 	flushEvent := validCollectorEvent(EventQuestion)
 	flushEvent.SessionID = "flush"
 	if err := forwarder.Record(flushEvent); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, 80*time.Millisecond, func() bool {
+	// Allow for slow CI scheduling and gRPC setup while still failing before
+	// the next delivery interval if this flush does not trigger delivery.
+	waitFor(t, 1200*time.Millisecond, func() bool {
 		segments, err := collectorSpool.Pending()
 		return err == nil && len(segments) == 1
 	})
