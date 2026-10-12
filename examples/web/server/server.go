@@ -293,6 +293,12 @@ func (s *server) streamSession(w http.ResponseWriter, r *http.Request) {
 				return markReady()
 			}
 			return err
+		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_THINKING:
+			// Thinking consumes a sequence without producing terminal text.
+			// It can be the last replay event, so it must release input too.
+			if ev.Seq >= replayThrough {
+				return markReady()
+			}
 		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_ERROR:
 			_, _ = fmt.Fprintf(w, "data: {\"type\":\"error\",\"message\":%s}\n\n", jsonStr(ev.Error))
 			flusher.Flush()

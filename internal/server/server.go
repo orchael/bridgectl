@@ -349,6 +349,31 @@ func (s *BridgeServer) AttachSession(req *bridgev1.AttachSessionRequest, stream 
 		}
 		lastSeq = chunk.Seq
 	}
+	// The live channel is bounded and may overflow while durable replay is
+	// being sent. Repair every sequence gap from the journal before advancing
+	// the cursor, including output dropped just before the channel closes.
+	sendMissingThrough := func(target uint64) error {
+		for lastSeq < target {
+			page, err := s.supervisor.StoredReplayPage(req.SessionId, lastSeq)
+			if err != nil || len(page) == 0 || page[0].Seq != lastSeq+1 {
+				return status.Error(codes.Unavailable, "saved terminal output unavailable during live replay")
+			}
+			before := lastSeq
+			for _, saved := range page {
+				if saved.Seq > target || saved.Seq != lastSeq+1 {
+					break
+				}
+				if err := stream.Send(chunkToProto(req.SessionId, saved, true)); err != nil {
+					return err
+				}
+				lastSeq = saved.Seq
+			}
+			if lastSeq == before {
+				return status.Error(codes.Unavailable, "saved terminal output has a sequence gap")
+			}
+		}
+		return nil
+	}
 	for {
 		select {
 		case <-stream.Context().Done():
@@ -356,6 +381,11 @@ func (s *BridgeServer) AttachSession(req *bridgev1.AttachSessionRequest, stream 
 			return nil
 		case chunk, ok := <-state.Live:
 			if !ok {
+				if info, err := s.supervisor.Get(req.SessionId); err == nil && info.LastSeq > lastSeq {
+					if err := sendMissingThrough(info.LastSeq); err != nil {
+						return err
+					}
+				}
 				// Agent process exited; send a SESSION_EXIT event so
 				// the client learns the exit code without a separate
 				// GetSession call.  The live channel closes from the
@@ -385,6 +415,11 @@ func (s *BridgeServer) AttachSession(req *bridgev1.AttachSessionRequest, stream 
 			if !isControl {
 				if chunk.Seq <= lastSeq {
 					continue
+				}
+				if chunk.Seq > lastSeq+1 {
+					if err := sendMissingThrough(chunk.Seq - 1); err != nil {
+						return err
+					}
 				}
 				lastSeq = chunk.Seq
 			}

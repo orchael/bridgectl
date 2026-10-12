@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"os"
 	"os/exec"
 	"regexp"
@@ -801,19 +800,17 @@ func signalReaderDone(ms *managedSession) {
 }
 
 // closeLive marks the session output as exhausted and closes every observer
-// channel. Must only be called from readLoop or readLoopStreamJSON — after all
-// sends to observer channels are complete.
+// channel. Resize can also append output, so closure shares its lock with
+// appendChunk's sequence assignment and fanout.
 // The observers map is kept intact so deferred Detach calls (from AttachSession
 // goroutines draining their channels) can still clean up session state.
 func (s *Supervisor) closeLive(ms *managedSession) {
 	ms.mu.Lock()
 	ms.liveClosed = true
-	obs := make(map[string]*observerEntry, len(ms.observers))
-	maps.Copy(obs, ms.observers)
-	ms.mu.Unlock()
-	for _, entry := range obs {
+	for _, entry := range ms.observers {
 		close(entry.ch)
 	}
+	ms.mu.Unlock()
 }
 
 // appendChunk adds a new chunk with the given type to the session buffer and
@@ -836,10 +833,14 @@ func (s *Supervisor) appendChunk(ms *managedSession, payload []byte, ctype Chunk
 		displayPayload = ansiEscape.ReplaceAll(payload, nil)
 	}
 	ms.mu.Lock()
+	if ms.liveClosed {
+		ms.mu.Unlock()
+		return
+	}
 	chunk := ms.buf.AppendSized(displayPayload, ctype, ms.info.Cols, ms.info.Rows)
-	ms.mu.Unlock()
+	// Persistence and publication must follow sequence order even when PTY
+	// output and a resize arrive from different goroutines.
 	s.persistChunk(ms.info.SessionID, chunk)
-	ms.mu.Lock()
 	ms.info.OldestSeq = ms.buf.OldestSeq()
 	ms.info.LastSeq = ms.buf.LastSeq()
 	ms.lastActivity = time.Now()
