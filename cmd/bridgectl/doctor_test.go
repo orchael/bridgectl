@@ -184,9 +184,9 @@ func TestServerVersionLineMismatch(t *testing.T) {
 	defer func() { version = oldVersion }()
 
 	got := serverVersionLine(context.Background())
-	want := "  server        ! 1.2.3 (differs from bridgectl 1.4.0"
-	if !strings.HasPrefix(got, want) {
-		t.Fatalf("got %q want prefix %q", got, want)
+	want := "  server        ! 1.2.3 (differs from bridgectl 1.4.0 — finish active sessions, then restart the service that owns the server; on Linux this may be bridge.service or bridgectl.service)"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
 	}
 }
 
