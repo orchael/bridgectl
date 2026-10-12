@@ -112,10 +112,9 @@ func (b *ByteBuffer) OldestSeq() uint64 {
 func (b *ByteBuffer) LastSeq() uint64 {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	if len(b.chunks) == 0 {
-		return 0
-	}
-	return b.chunks[len(b.chunks)-1].Seq
+	// A chunk can exceed the entire memory budget. Its sequence still exists
+	// in the durable journal even when no bytes remain in this ring.
+	return b.nextSeq - 1
 }
 
 func nowUTC() time.Time {

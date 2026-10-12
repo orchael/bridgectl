@@ -21,6 +21,40 @@ type SessionStore interface {
 	Close() error
 }
 
+// ChunkPageStore supports bounded replay without loading a session into RAM.
+// Optional so other SessionStore implementations remain source compatible.
+type ChunkPageStore interface {
+	LoadChunkPage(sessionID string, after uint64, maxBytes int) ([]OutputChunk, error)
+}
+
+func (s *BoltSessionStore) LoadChunkPage(sessionID string, after uint64, maxBytes int) ([]OutputChunk, error) {
+	var chunks []OutputChunk
+	if after == ^uint64(0) {
+		return chunks, nil
+	}
+	prefix := []byte(sessionID + "/")
+	err := s.db.View(func(tx *bolt.Tx) error {
+		c := tx.Bucket(chunksBucket).Cursor()
+		total := 0
+		for k, v := c.Seek(chunkKey(sessionID, after+1)); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+			var chunk OutputChunk
+			if err := json.Unmarshal(v, &chunk); err != nil {
+				return err
+			}
+			if len(chunks) == 1024 || total+len(chunk.Payload) > maxBytes {
+				if len(chunks) == 0 {
+					return fmt.Errorf("terminal chunk exceeds replay window")
+				}
+				break
+			}
+			chunks = append(chunks, chunk)
+			total += len(chunk.Payload)
+		}
+		return nil
+	})
+	return chunks, err
+}
+
 // BoltSessionStore implements SessionStore using bbolt (an embedded key/value
 // store). Each session is stored as a JSON-encoded SessionInfo keyed by its
 // session ID inside the "sessions" bucket.

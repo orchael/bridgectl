@@ -63,6 +63,26 @@ must never forward xterm-generated input or resize the remote PTY.
 
 Terminal access intentionally sends real output, including any prompts, tool
 output or other text visible in the session. The adapter keeps no extra transcript
-store; output comes from the daemon's existing bounded replay buffer. Configure
+store; output comes from the daemon's memory ring and configured BoltDB journal. Configure
 gateway retention and access policies appropriately for its users. The structured
 status feed remains separate and does not include this terminal output.
+
+## Durable browser replay
+
+Configure `persistence.db_path` before starting sessions to retain PTY output
+outside the memory ring. Terminal watch reads and gRPC attach replay can page
+through the saved prefix in 64 KiB windows. Each output frame carries its captured
+columns and rows so browser emulators apply resizes in sequence.
+
+`examples/web` uses this replay through its Go SSE server. Run `make web-build`,
+then launch `./web --port 8080 --vite-port 0` from `examples/web`, with
+`BRIDGECTL_STATE_DIR` pointing to the intended daemon. Set `WEB_HOST=127.0.0.1`
+for a local-only example. Its writer waits for replay completion before sending
+input or resize requests. Viewers preserve the recorded grid and can scroll
+through xterm's 100,000-line browser buffer.
+
+Full-screen applications using the alternate buffer need persisted screen
+history in addition to ordinary terminal scrollback. Bridge's authenticated
+session page provides that through redacted telemetry checkpoints and backward
+pagination. Enable all telemetry event kinds and redacted text capture to populate
+it. The example is a direct terminal client, not a replacement for Bridge's archive.

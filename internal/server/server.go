@@ -306,7 +306,34 @@ func (s *BridgeServer) AttachSession(req *bridgev1.AttachSessionRequest, stream 
 	}); err != nil {
 		return err
 	}
-	if state.ReplayGap {
+	lastSeq := req.AfterSeq
+	replayBefore := state.OldestSeq
+	if len(state.Replay) == 0 && state.LastSeq > lastSeq {
+		replayBefore = state.LastSeq + 1
+	}
+	// Fill the prefix evicted from RAM from the durable journal in bounded
+	// pages. The live subscription was already established by Attach, so output
+	// arriving during replay remains ordered after the captured replay tail.
+	for replayBefore > lastSeq+1 {
+		page, err := s.supervisor.StoredReplayPage(req.SessionId, lastSeq)
+		if err != nil {
+			return status.Error(codes.Unavailable, "saved terminal output unavailable")
+		}
+		before := lastSeq
+		for _, chunk := range page {
+			if chunk.Seq >= replayBefore || chunk.Seq != lastSeq+1 {
+				break
+			}
+			if err := stream.Send(chunkToProto(req.SessionId, chunk, true)); err != nil {
+				return err
+			}
+			lastSeq = chunk.Seq
+		}
+		if lastSeq == before {
+			break
+		}
+	}
+	if replayBefore > lastSeq+1 || req.AfterSeq > state.LastSeq {
 		if err := stream.Send(&bridgev1.AttachSessionEvent{
 			Type:      bridgev1.AttachEventType_ATTACH_EVENT_TYPE_REPLAY_GAP,
 			SessionId: req.SessionId,
@@ -316,7 +343,6 @@ func (s *BridgeServer) AttachSession(req *bridgev1.AttachSessionRequest, stream 
 			return err
 		}
 	}
-	lastSeq := req.AfterSeq
 	for _, chunk := range state.Replay {
 		if err := stream.Send(chunkToProto(req.SessionId, chunk, true)); err != nil {
 			return err
@@ -651,6 +677,8 @@ func chunkToProto(sessionID string, chunk bridge.OutputChunk, replay bool) *brid
 		SessionId: sessionID,
 		Payload:   chunk.Payload,
 		Replay:    replay,
+		Cols:      chunk.Cols,
+		Rows:      chunk.Rows,
 	}
 	switch chunk.Type {
 	case bridge.ChunkTypeThinking:
