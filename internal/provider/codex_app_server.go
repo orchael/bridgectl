@@ -86,14 +86,14 @@ func (p *CodexAppServerProvider) BuildCommand(ctx context.Context, cfg bridge.Se
 	}
 
 	if !waitForPort(ctx, "127.0.0.1", port, portReadyTimeout) {
-		_ = appServerCmd.Process.Kill()
+		_ = killCompanionProcess(appServerCmd)
 		_ = appServerCmd.Wait()
 		return nil, fmt.Errorf("codex-app-server: companion app-server on %s never became reachable%s", endpoint, companionLogTail(logPath))
 	}
 
 	proxyEndpoint, observer, err := codexapp.Proxy(ctx, endpoint)
 	if err != nil {
-		_ = appServerCmd.Process.Kill()
+		_ = killCompanionProcess(appServerCmd)
 		_ = appServerCmd.Wait()
 		return nil, err
 	}
@@ -102,7 +102,7 @@ func (p *CodexAppServerProvider) BuildCommand(ctx context.Context, cfg bridge.Se
 	p.mu.Unlock()
 	go func() {
 		<-ctx.Done()
-		_ = appServerCmd.Process.Kill()
+		_ = killCompanionProcess(appServerCmd)
 		_ = appServerCmd.Wait()
 		p.mu.Lock()
 		delete(p.sessions, cfg.SessionID)
@@ -155,6 +155,7 @@ func (p *CodexAppServerProvider) launchCommands(ctx context.Context, cfg bridge.
 		}
 	}
 	app := exec.CommandContext(ctx, tui.Path, companionArgs...)
+	configureCompanionProcess(app)
 	app.Dir = tui.Dir
 	app.Env = append([]string(nil), tui.Env...)
 	return app, tui, nil
