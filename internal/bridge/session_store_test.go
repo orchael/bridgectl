@@ -49,7 +49,7 @@ func TestBoltSessionStore_ChunksPersistAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBoltSessionStore: %v", err)
 	}
-	chunk := OutputChunk{Seq: 42, Timestamp: time.Now().UTC(), Payload: []byte("data")}
+	chunk := OutputChunk{Cols: 120, Rows: 40, Seq: 42, Timestamp: time.Now().UTC(), Payload: []byte("data")}
 	if err := store.SaveChunk("sess-durable", chunk); err != nil {
 		t.Fatalf("SaveChunk: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestBoltSessionStore_ChunksPersistAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadChunks after reopen: %v", err)
 	}
-	if len(got) != 1 || got[0].Seq != 42 {
+	if len(got) != 1 || got[0].Seq != 42 || got[0].Cols != 120 || got[0].Rows != 40 {
 		t.Fatalf("expected chunk seq=42, got %+v", got)
 	}
 }

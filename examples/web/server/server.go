@@ -264,12 +264,41 @@ func (s *server) streamSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var replayThrough uint64
+	ready := false
+	markReady := func() error {
+		if ready {
+			return nil
+		}
+		ready = true
+		_, err := fmt.Fprint(w, "data: {\"type\":\"ready\"}\n\n")
+		flusher.Flush()
+		return err
+	}
 	err = stream.RecvAll(r.Context(), func(ev *bridgev1.AttachSessionEvent) error {
 		switch ev.Type {
+		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_ATTACHED:
+			replayThrough = ev.LastSeq
+			_, err := fmt.Fprintf(w, "data: {\"type\":\"geometry\",\"cols\":%d,\"rows\":%d}\n\n", ev.Cols, ev.Rows)
+			flusher.Flush()
+			if err == nil && replayThrough == 0 {
+				return markReady()
+			}
+			return err
 		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_OUTPUT:
 			encoded := base64.StdEncoding.EncodeToString(ev.Payload)
-			_, _ = fmt.Fprintf(w, "data: {\"type\":\"output\",\"data\":%s}\n\n", jsonStr(encoded))
+			_, err := fmt.Fprintf(w, "id: %d\ndata: {\"type\":\"output\",\"data\":%s,\"cols\":%d,\"rows\":%d}\n\n", ev.Seq, jsonStr(encoded), ev.Cols, ev.Rows)
 			flusher.Flush()
+			if err == nil && ev.Seq >= replayThrough {
+				return markReady()
+			}
+			return err
+		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_THINKING:
+			// Thinking consumes a sequence without producing terminal text.
+			// It can be the last replay event, so it must release input too.
+			if ev.Seq >= replayThrough {
+				return markReady()
+			}
 		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_ERROR:
 			_, _ = fmt.Fprintf(w, "data: {\"type\":\"error\",\"message\":%s}\n\n", jsonStr(ev.Error))
 			flusher.Flush()

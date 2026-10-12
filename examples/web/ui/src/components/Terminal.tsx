@@ -45,7 +45,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
   termContainer: {
     flex: 1,
-    overflow: 'hidden',
+    overflow: 'auto',
+    minHeight: 0,
     padding: '4px',
   },
   conflictOverlay: {
@@ -88,6 +89,8 @@ export default function Terminal({ sessionId, role, remote, onClose, onSwitchToW
       fontFamily: 'monospace',
       fontSize: 14,
       cursorBlink: true,
+      disableStdin: true,
+      scrollback: 100000,
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
@@ -98,6 +101,11 @@ export default function Terminal({ sessionId, role, remote, onClose, onSwitchToW
 
     const abort = new AbortController()
     abortRef.current = abort
+    let attached = false
+    let sendResize = () => {}
+    let rendering = Promise.resolve()
+    let inputQueue = Promise.resolve()
+    let pendingInputBytes = 0
 
     // Stream output from server via SSE
     streamSession(
@@ -106,20 +114,33 @@ export default function Terminal({ sessionId, role, remote, onClose, onSwitchToW
       remote,
       clientId.current,
       (event) => {
-        if (event.type === 'output' && event.data) {
-          const bytes = Uint8Array.from(atob(event.data), (c) => c.charCodeAt(0))
-          term.write(bytes)
-        } else if (event.type === 'error' && event.message) {
-          if (event.message.includes('already has an active writer')) {
-            setWriterConflict(true)
-          } else {
-            term.writeln(`\r\n\x1b[31m[error] ${event.message}\x1b[0m`)
+        rendering = rendering.then(async () => {
+          if (abort.signal.aborted) return
+          // Preserve the PTY grid even when the viewer's browser is narrower.
+          // Output frames carry dimensions at capture time, including resizes.
+          if (event.cols && event.rows && event.cols <= 500 && event.rows <= 300 &&
+              (term.cols !== event.cols || term.rows !== event.rows)) {
+            term.resize(event.cols, event.rows)
           }
-        } else if (event.type === 'end') {
-          if (!writerConflict) {
+          if (event.type === 'output' && event.data) {
+            const bytes = Uint8Array.from(atob(event.data), (c) => c.charCodeAt(0))
+            await new Promise<void>(resolve => term.write(bytes, resolve))
+          } else if (event.type === 'ready') {
+            attached = true
+            term.options.disableStdin = role !== 'writer'
+            if (role === 'writer') { fit.fit(); sendResize() }
+          } else if (event.type === 'error' && event.message) {
+            if (event.message.includes('already has an active writer')) {
+              setWriterConflict(true)
+            } else {
+              term.writeln(`\r\n\x1b[31m[error] ${event.message}\x1b[0m`)
+            }
+          } else if (event.type === 'end') {
+            attached = false
+            term.options.disableStdin = true
             term.writeln('\r\n\x1b[33m[session ended]\x1b[0m')
           }
-        }
+        }).catch(error => { if (!abort.signal.aborted) console.error('terminal render failed:', error) })
       },
       abort.signal
     )
@@ -128,15 +149,30 @@ export default function Terminal({ sessionId, role, remote, onClose, onSwitchToW
     let inputDispose: { dispose(): void } | undefined
     if (role === 'writer') {
       inputDispose = term.onData((data) => {
+        if (!attached) return
         const bytes = new TextEncoder().encode(data)
-        void writeInput(sessionId, clientId.current, bytes, remote).catch((err) => {
+        if (pendingInputBytes + bytes.length > 65536) {
+          attached = false
+          term.options.disableStdin = true
+          term.writeln('\r\n[input queue full; detach and attach again]')
+          return
+        }
+        pendingInputBytes += bytes.length
+        inputQueue = inputQueue.then(async () => {
+          if (abort.signal.aborted || !attached) return
+          for (let offset = 0; offset < bytes.length; offset += 4096) {
+            await writeInput(sessionId, clientId.current, bytes.subarray(offset, offset + 4096), remote)
+          }
+        }).catch((err) => {
+          attached = false
+          term.options.disableStdin = true
           console.error('writeInput failed:', err)
-        })
+        }).finally(() => { pendingInputBytes -= bytes.length })
       })
 
       // Send initial resize
-      const sendResize = () => {
-        const core = term as unknown as { _core?: { viewport?: { scrollBarWidth: number } } }
+      sendResize = () => {
+        if (!attached || abort.signal.aborted) return
         void resizeSession(
           sessionId,
           clientId.current,
@@ -145,12 +181,12 @@ export default function Terminal({ sessionId, role, remote, onClose, onSwitchToW
           remote
         ).catch((err) => {
           console.error('resizeSession failed:', err)
-          void core // suppress unused var warning
         })
       }
 
       // Resize observer
       const observer = new ResizeObserver(() => {
+        if (!attached) return
         fit.fit()
         sendResize()
       })

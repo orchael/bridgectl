@@ -67,36 +67,51 @@ const (
 	DecisionUnknown  Decision = "unknown"
 )
 
-// Event is safe to persist after Redactor has processed its text fields.
+// TerminalSnapshot is a self-contained, redacted screen revision. ANSI contains
+// printable cells and SGR attributes only, never cursor/device/clipboard controls.
+// Every revision is a checkpoint, so archived pages need no earlier raw bytes.
+type TerminalSnapshot struct {
+	Version    int    `json:"version"`
+	Cols       int    `json:"cols"`
+	Rows       int    `json:"rows"`
+	ANSI       string `json:"ansi"`
+	Scrollback string `json:"scrollback,omitempty"`
+}
+
+// Event is safe to persist after redaction of its text and terminal cells.
 type Event struct {
-	SchemaVersion    int             `json:"schema_version"`
-	Timestamp        time.Time       `json:"timestamp"`
-	SourceID         string          `json:"source_id,omitempty"`
-	ActorID          string          `json:"actor_id,omitempty"`
-	SessionID        string          `json:"session_id"`
-	ProjectID        string          `json:"project_id,omitempty"`
-	Provider         string          `json:"provider,omitempty"`
-	Direction        Direction       `json:"direction,omitempty"`
-	Kind             EventKind       `json:"kind"`
-	Stream           StreamType      `json:"stream,omitempty"`
-	Sequence         uint64          `json:"sequence"`
-	Class            QuestionClass   `json:"class,omitempty"`
-	Decision         Decision        `json:"decision,omitempty"`
-	Fingerprint      string          `json:"fingerprint,omitempty"`
-	Text             string          `json:"text,omitempty"`
-	ByteCount        int             `json:"byte_count,omitempty"`
-	Redactions       int             `json:"redactions,omitempty"`
-	ContentHash      string          `json:"content_sha256,omitempty"`
-	OmittedReason    string          `json:"omitted_reason,omitempty"`
-	LatencyMS        int64           `json:"latency_ms,omitempty"`
-	Context          *SessionContext `json:"context,omitempty"`
-	Completeness     *Completeness   `json:"completeness,omitempty"`
+	Terminal         *TerminalSnapshot `json:"terminal,omitempty"`
+	SchemaVersion    int               `json:"schema_version"`
+	Timestamp        time.Time         `json:"timestamp"`
+	SourceID         string            `json:"source_id,omitempty"`
+	ActorID          string            `json:"actor_id,omitempty"`
+	SessionID        string            `json:"session_id"`
+	ProjectID        string            `json:"project_id,omitempty"`
+	Provider         string            `json:"provider,omitempty"`
+	Direction        Direction         `json:"direction,omitempty"`
+	Kind             EventKind         `json:"kind"`
+	Stream           StreamType        `json:"stream,omitempty"`
+	Sequence         uint64            `json:"sequence"`
+	Class            QuestionClass     `json:"class,omitempty"`
+	Decision         Decision          `json:"decision,omitempty"`
+	Fingerprint      string            `json:"fingerprint,omitempty"`
+	Text             string            `json:"text,omitempty"`
+	ByteCount        int               `json:"byte_count,omitempty"`
+	Redactions       int               `json:"redactions,omitempty"`
+	ContentHash      string            `json:"content_sha256,omitempty"`
+	OmittedReason    string            `json:"omitted_reason,omitempty"`
+	LatencyMS        int64             `json:"latency_ms,omitempty"`
+	Context          *SessionContext   `json:"context,omitempty"`
+	Completeness     *Completeness     `json:"completeness,omitempty"`
 	contextDiscovery *sessionContextDiscovery
 }
 
 // Session identifies an agent session without requiring telemetry to depend on
 // the bridge package.
 type Session struct {
+	// Cols and Rows are set only for native PTY sessions, not stream-JSON output.
+	Cols      uint32
+	Rows      uint32
 	SourceID  string
 	SessionID string
 	ActorID   string

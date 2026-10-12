@@ -17,15 +17,17 @@ const maxInteractionBufferSize = 1 << 20
 
 // LiveCollector combines framing, analysis, and bounded asynchronous delivery.
 type LiveCollector struct {
-	analyzer    *Analyzer
-	async       *AsyncSink
-	framer      *Framer
-	onError     func(error)
-	sourceID    string
-	identity    LiveIdentity
-	mu          sync.Mutex
-	pending     map[sessionIdentity]*interactionBuffer
-	contextSink *sessionContextSink
+	analyzer       *Analyzer
+	async          *AsyncSink
+	framer         *Framer
+	onError        func(error)
+	sourceID       string
+	identity       LiveIdentity
+	mu             sync.Mutex
+	pending        map[sessionIdentity]*interactionBuffer
+	contextSink    *sessionContextSink
+	terminals      map[sessionIdentity]*terminalCapture
+	renderTerminal bool
 }
 
 type interactionBuffer struct {
@@ -121,15 +123,23 @@ func NewLiveCollectorWithIdentity(sink Sink, queueSize int, includeRedactedText 
 	async := NewAsyncSink(contextSink, queueSize, onError)
 	async.setCapturePolicy(kinds, includeRedactedText)
 	filtered := NewFilteredSink(async, kinds...)
+	renderTerminal := len(kinds) == 0
+	for _, kind := range kinds {
+		if kind == EventProviderOutput {
+			renderTerminal = true
+		}
+	}
 	return &LiveCollector{
-		analyzer:    NewAnalyzer(filtered, nil, WithIncludeRedactedText(includeRedactedText)),
-		async:       async,
-		framer:      NewFramer(defaultFrameBufferSize),
-		onError:     onError,
-		sourceID:    identity.SourceID,
-		identity:    identity,
-		pending:     make(map[sessionIdentity]*interactionBuffer),
-		contextSink: contextSink,
+		analyzer:       NewAnalyzer(filtered, nil, WithIncludeRedactedText(includeRedactedText)),
+		async:          async,
+		framer:         NewFramer(defaultFrameBufferSize),
+		onError:        onError,
+		sourceID:       identity.SourceID,
+		identity:       identity,
+		pending:        make(map[sessionIdentity]*interactionBuffer),
+		contextSink:    contextSink,
+		terminals:      make(map[sessionIdentity]*terminalCapture),
+		renderTerminal: renderTerminal && includeRedactedText,
 	}
 }
 
@@ -150,6 +160,10 @@ func (c *LiveCollector) SessionStarted(session Session) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.pending, sessionKey(session))
+	if capture := c.terminals[sessionKey(session)]; capture != nil {
+		capture.close()
+		delete(c.terminals, sessionKey(session))
+	}
 	c.framer.Reset(frameKey(session))
 	c.analyzer.ObserveSessionStart(session)
 	c.analyzer.record(Event{
@@ -202,6 +216,10 @@ func (c *LiveCollector) SessionEnded(session Session) {
 	}
 	if frame := c.framer.FlushInput(frameKey(session)); frame != "" {
 		c.analyzer.ObserveInput(session, []byte(frame))
+	}
+	if capture := c.terminals[key]; capture != nil {
+		capture.close()
+		delete(c.terminals, key)
 	}
 	c.analyzer.ObserveSessionEnd(session)
 }
@@ -476,6 +494,20 @@ func (c *LiveCollector) flushInteraction(session Session, pending *interactionBu
 
 func (c *LiveCollector) emitInteraction(session Session, direction Direction, stream StreamType, data []byte) {
 	if direction == DirectionAgent {
+		if stream == StreamOutput && session.Cols > 0 && session.Rows > 0 && utf8.Valid(data) && c.renderTerminal {
+			text, redactions := c.renderedOutput(session, data)
+			snapshot := c.terminals[sessionKey(session)].snapshot
+			if text != "" || snapshot != nil {
+				text = c.analyzer.redact(text)
+				c.recordTerminal(session, Event{Timestamp: c.analyzer.now().UTC(), SourceID: session.SourceID, ActorID: session.ActorID,
+					SessionID: session.SessionID, ProjectID: session.ProjectID, Provider: session.Provider,
+					Direction: DirectionAgent, Kind: EventProviderOutput, Stream: stream, ByteCount: len(data), Text: text, Redactions: redactions, Terminal: snapshot})
+				for _, frame := range c.framer.FeedOutput(frameKey(session), []byte(text)) {
+					c.analyzer.ObserveOutput(session, []byte(frame))
+				}
+			}
+			return
+		}
 		c.analyzer.ObserveProviderInteraction(session, stream, data)
 		if stream == StreamOutput && utf8.Valid(data) {
 			for _, frame := range c.framer.FeedOutput(frameKey(session), data) {
@@ -525,6 +557,12 @@ func (c *LiveCollector) Feedback() Feedback { return c.analyzer.Feedback() }
 func (c *LiveCollector) Dropped() uint64    { return c.async.Dropped() }
 func (c *LiveCollector) Failures() uint64   { return c.async.Failures() }
 func (c *LiveCollector) Close(ctx context.Context) error {
+	c.mu.Lock()
+	for key, capture := range c.terminals {
+		capture.close()
+		delete(c.terminals, key)
+	}
+	c.mu.Unlock()
 	err := c.async.Close(ctx)
 	if dropped := c.async.Dropped(); dropped > 0 && c.onError != nil {
 		c.onError(fmt.Errorf("telemetry queue dropped %d events", dropped))

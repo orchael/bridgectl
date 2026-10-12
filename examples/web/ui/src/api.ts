@@ -10,7 +10,9 @@ export interface Session {
 }
 
 export interface SessionEvent {
-  type: 'output' | 'error' | 'end'
+  type: 'output' | 'geometry' | 'ready' | 'error' | 'end'
+  cols?: number
+  rows?: number
   data?: string     // base64 for output
   message?: string  // for error
 }

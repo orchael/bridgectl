@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"os"
 	"os/exec"
 	"regexp"
@@ -801,19 +800,17 @@ func signalReaderDone(ms *managedSession) {
 }
 
 // closeLive marks the session output as exhausted and closes every observer
-// channel. Must only be called from readLoop or readLoopStreamJSON — after all
-// sends to observer channels are complete.
+// channel. Resize can also append output, so closure shares its lock with
+// appendChunk's sequence assignment and fanout.
 // The observers map is kept intact so deferred Detach calls (from AttachSession
 // goroutines draining their channels) can still clean up session state.
 func (s *Supervisor) closeLive(ms *managedSession) {
 	ms.mu.Lock()
 	ms.liveClosed = true
-	obs := make(map[string]*observerEntry, len(ms.observers))
-	maps.Copy(obs, ms.observers)
-	ms.mu.Unlock()
-	for _, entry := range obs {
+	for _, entry := range ms.observers {
 		close(entry.ch)
 	}
+	ms.mu.Unlock()
 }
 
 // appendChunk adds a new chunk with the given type to the session buffer and
@@ -835,9 +832,21 @@ func (s *Supervisor) appendChunk(ms *managedSession, payload []byte, ctype Chunk
 	if ctype == ChunkTypeOutput && ms.stripANSI {
 		displayPayload = ansiEscape.ReplaceAll(payload, nil)
 	}
-	chunk := ms.buf.AppendTyped(displayPayload, ctype)
-	s.persistChunk(ms.info.SessionID, chunk)
 	ms.mu.Lock()
+	s.appendChunkLocked(ms, displayPayload, ctype)
+	ms.mu.Unlock()
+}
+
+// appendChunkLocked publishes a chunk in the same order as its sequence and
+// persistence write. The caller must hold ms.mu.
+func (s *Supervisor) appendChunkLocked(ms *managedSession, displayPayload []byte, ctype ChunkType) {
+	if ms.liveClosed {
+		return
+	}
+	chunk := ms.buf.AppendSized(displayPayload, ctype, ms.info.Cols, ms.info.Rows)
+	// Persistence and publication must follow sequence order even when PTY
+	// output and a resize arrive from different goroutines.
+	s.persistChunk(ms.info.SessionID, chunk)
 	ms.info.OldestSeq = ms.buf.OldestSeq()
 	ms.info.LastSeq = ms.buf.LastSeq()
 	ms.lastActivity = time.Now()
@@ -848,7 +857,6 @@ func (s *Supervisor) appendChunk(ms *managedSession, payload []byte, ctype Chunk
 			slog.Warn("observer channel full, dropping chunk", "session_id", ms.info.SessionID, "client_id", clientID)
 		}
 	}
-	ms.mu.Unlock()
 }
 
 // fanoutControlEvent broadcasts a control chunk to all current observers
@@ -930,7 +938,7 @@ func (s *Supervisor) waitLoop(ms *managedSession) {
 		ms.info.State = SessionStateStopped
 		slog.Info("session process exited", "session_id", ms.info.SessionID, "provider", ms.info.Provider, "exit_code", exitCode)
 	}
-	tsession := telemetry.Session{SessionID: ms.info.SessionID, ProjectID: ms.info.ProjectID, Provider: ms.info.Provider, RepoPath: ms.info.RepoPath}
+	tsession := telemetrySessionLocked(ms)
 	infoCopy := ms.info
 	ms.telemetryMu.Lock()
 	ms.cancel()
@@ -1068,7 +1076,7 @@ func (s *Supervisor) WriteInput(sessionID, clientID string, data []byte) (int, e
 	streamJSON := ms.streamJSON
 	stdin := ms.stdin
 	ptmx := ms.ptmx
-	tsession := telemetry.Session{SessionID: ms.info.SessionID, ProjectID: ms.info.ProjectID, Provider: ms.info.Provider, RepoPath: ms.info.RepoPath}
+	tsession := telemetrySessionLocked(ms)
 	ms.telemetryMu.Lock()
 	ms.mu.Unlock()
 	if s.telemetry != nil {
@@ -1156,16 +1164,24 @@ func (s *Supervisor) Resize(sessionID, clientID string, cols, rows uint32) error
 		ms.mu.Unlock()
 		return ErrClientMismatch
 	}
+	if ms.streamJSON {
+		ms.info.Cols = cols
+		ms.info.Rows = rows
+		ms.lastActivity = time.Now()
+		ms.mu.Unlock()
+		return nil // no PTY to resize for stream-JSON sessions
+	}
+	if err := pty.Setsize(ms.ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}); err != nil {
+		ms.mu.Unlock()
+		return err
+	}
 	ms.info.Cols = cols
 	ms.info.Rows = rows
 	ms.lastActivity = time.Now()
-	streamJSON := ms.streamJSON
-	ptmx := ms.ptmx
+	// A zero-byte ordered frame persists resize geometry even if the PTY is idle.
+	s.appendChunkLocked(ms, nil, ChunkTypeOutput)
 	ms.mu.Unlock()
-	if streamJSON {
-		return nil // no PTY to resize for stream-JSON sessions
-	}
-	return pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	return nil
 }
 
 // Attach connects clientID to the session. role controls whether the client
@@ -1486,7 +1502,17 @@ func (s *Supervisor) notifyControl(info SessionInfo) {
 func telemetrySession(ms *managedSession) telemetry.Session {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
-	return telemetry.Session{SessionID: ms.info.SessionID, ProjectID: ms.info.ProjectID, Provider: ms.info.Provider, RepoPath: ms.info.RepoPath}
+	return telemetrySessionLocked(ms)
+}
+
+// Caller holds ms.mu; stream-JSON output must retain its existing framing.
+func telemetrySessionLocked(ms *managedSession) telemetry.Session {
+	session := telemetry.Session{SessionID: ms.info.SessionID, ProjectID: ms.info.ProjectID, Provider: ms.info.Provider, RepoPath: ms.info.RepoPath}
+	if !ms.streamJSON {
+		session.Cols = ms.info.Cols
+		session.Rows = ms.info.Rows
+	}
+	return session
 }
 
 func (s *Supervisor) closeTelemetry(ctx context.Context) {

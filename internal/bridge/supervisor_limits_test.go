@@ -3,8 +3,11 @@ package bridge
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 // TestWriteInputOversizedPayload verifies that WriteInput rejects payloads
@@ -289,4 +292,63 @@ func TestResizeSessionUpdatesSize(t *testing.T) {
 	}
 
 	_ = supervisor.Stop("resize-session", true)
+}
+
+func TestConcurrentResizeKeepsPTYAndReplayGeometryAligned(t *testing.T) {
+	registry := NewRegistry()
+	if err := registry.Register(&testProvider{id: "fake"}); err != nil {
+		t.Fatal(err)
+	}
+	sup := NewSupervisor(registry, DefaultPolicy(), 1024, time.Minute)
+	defer sup.Close()
+	const sessionID = "concurrent-resize"
+	if _, err := sup.Start(context.Background(), SessionConfig{
+		ProjectID: "project-a", SessionID: sessionID, RepoPath: t.TempDir(),
+		Options: map[string]string{"provider": "fake"}, InitialCols: 80, InitialRows: 24,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sup.Attach(sessionID, "writer", 0, AttachRoleWriter); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for worker := 0; worker < 2; worker++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				if err := sup.Resize(sessionID, "writer", uint32(80+worker*20+i), uint32(24+worker*20+i)); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}(worker)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	info, err := sup.Get(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup.mu.RLock()
+	ms := sup.sessions[sessionID]
+	sup.mu.RUnlock()
+	ms.mu.Lock()
+	rows, cols, err := pty.Getsize(ms.ptmx)
+	chunks := ms.buf.After(0)
+	ms.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("missing resize frames")
+	}
+	last := chunks[len(chunks)-1]
+	if uint32(cols) != info.Cols || uint32(rows) != info.Rows || last.Cols != info.Cols || last.Rows != info.Rows {
+		t.Fatalf("PTY=%dx%d metadata=%dx%d last frame=%dx%d", cols, rows, info.Cols, info.Rows, last.Cols, last.Rows)
+	}
 }
