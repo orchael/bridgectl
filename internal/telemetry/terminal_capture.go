@@ -86,10 +86,19 @@ func (c *LiveCollector) renderedOutput(session Session, data []byte) (string, in
 	// positions intact, unlike inserting a variable-length redaction label.
 	safe, redactions := maskTerminalSecrets(string(data), false)
 	_, _ = capture.screen.WriteString(terminalLayoutOnly(safe))
-	// Cursor edits can assemble a credential from separate records. Redact the
-	// resulting screen too, including credentials wrapping across screen rows.
-	screen, count := maskTerminalSecrets(capture.screen.String(), true)
+	// Cursor edits can assemble a credential across the scrollback/screen
+	// boundary. Mask that combined view before deriving searchable text, then
+	// replace masked screen cells so later redraws cannot reveal the value.
+	scrolled := capture.screen.Scrollback().Lines()
+	plainHistory := make([]string, 0, len(scrolled)+1)
+	for _, line := range scrolled {
+		plainHistory = append(plainHistory, ansi.Strip(line.Render()))
+	}
+	plainHistory = append(plainHistory, capture.screen.String())
+	safePlain, count := maskTerminalSecrets(strings.Join(plainHistory, "\n"), true)
 	redactions += count
+	plainParts := strings.SplitN(safePlain, "\n", len(scrolled)+1)
+	screen := plainParts[len(plainParts)-1]
 	lines := strings.Split(screen, "\n")
 	// Keep newly discovered secrets masked in emulator state as well. Removing
 	// the key on a later redraw must not make a previously masked value reappear.
@@ -113,7 +122,6 @@ func (c *LiveCollector) renderedOutput(session Session, data []byte) (string, in
 	styled := capture.screen.Render()
 	// Drain native scrollback into the revision before another redraw can evict
 	// it. Redact across the scrollback/screen boundary, preserving SGR offsets.
-	scrolled := capture.screen.Scrollback().Lines()
 	history := make([]string, 0, len(scrolled)+1)
 	for _, line := range scrolled {
 		history = append(history, line.Render())

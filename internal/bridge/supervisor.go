@@ -833,8 +833,14 @@ func (s *Supervisor) appendChunk(ms *managedSession, payload []byte, ctype Chunk
 		displayPayload = ansiEscape.ReplaceAll(payload, nil)
 	}
 	ms.mu.Lock()
+	s.appendChunkLocked(ms, displayPayload, ctype)
+	ms.mu.Unlock()
+}
+
+// appendChunkLocked publishes a chunk in the same order as its sequence and
+// persistence write. The caller must hold ms.mu.
+func (s *Supervisor) appendChunkLocked(ms *managedSession, displayPayload []byte, ctype ChunkType) {
 	if ms.liveClosed {
-		ms.mu.Unlock()
 		return
 	}
 	chunk := ms.buf.AppendSized(displayPayload, ctype, ms.info.Cols, ms.info.Rows)
@@ -851,7 +857,6 @@ func (s *Supervisor) appendChunk(ms *managedSession, payload []byte, ctype Chunk
 			slog.Warn("observer channel full, dropping chunk", "session_id", ms.info.SessionID, "client_id", clientID)
 		}
 	}
-	ms.mu.Unlock()
 }
 
 // fanoutControlEvent broadcasts a control chunk to all current observers
@@ -1159,20 +1164,23 @@ func (s *Supervisor) Resize(sessionID, clientID string, cols, rows uint32) error
 		ms.mu.Unlock()
 		return ErrClientMismatch
 	}
+	if ms.streamJSON {
+		ms.info.Cols = cols
+		ms.info.Rows = rows
+		ms.lastActivity = time.Now()
+		ms.mu.Unlock()
+		return nil // no PTY to resize for stream-JSON sessions
+	}
+	if err := pty.Setsize(ms.ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}); err != nil {
+		ms.mu.Unlock()
+		return err
+	}
 	ms.info.Cols = cols
 	ms.info.Rows = rows
 	ms.lastActivity = time.Now()
-	streamJSON := ms.streamJSON
-	ptmx := ms.ptmx
-	ms.mu.Unlock()
-	if streamJSON {
-		return nil // no PTY to resize for stream-JSON sessions
-	}
-	if err := pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}); err != nil {
-		return err
-	}
 	// A zero-byte ordered frame persists resize geometry even if the PTY is idle.
-	s.appendChunk(ms, nil, ChunkTypeOutput)
+	s.appendChunkLocked(ms, nil, ChunkTypeOutput)
+	ms.mu.Unlock()
 	return nil
 }
 

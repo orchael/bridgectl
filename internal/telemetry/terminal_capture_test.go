@@ -135,6 +135,25 @@ func TestTerminalCaptureWrappedCursorSecret(t *testing.T) {
 	}
 }
 
+func TestTerminalCaptureRedactsScrollbackScreenBoundary(t *testing.T) {
+	c := NewLiveCollector(&memorySink{}, 32, true, nil, EventProviderOutput)
+	t.Cleanup(func() { _ = c.Close(context.Background()) })
+	session := Session{SessionID: "scrollback-secret", Cols: 24, Rows: 2}
+	_, _ = c.renderedOutput(session, []byte("\x1b[Htoken="))
+	text, _ := c.renderedOutput(session, []byte("\x1b[2;1Hprivate-value\r\n"))
+	if strings.Contains(text, "private-value") {
+		t.Fatalf("credential reached searchable text: %q", text)
+	}
+	capture := c.terminals[sessionKey(session)]
+	if capture.snapshot == nil || strings.Contains(capture.snapshot.ANSI, "private-value") {
+		t.Fatalf("credential reached styled checkpoint: %+v", capture.snapshot)
+	}
+	text, _ = c.renderedOutput(session, []byte("\x1b[2;1Hsafe"))
+	if strings.Contains(text, "private-value") || strings.Contains(capture.snapshot.ANSI, "private-value") {
+		t.Fatalf("credential reappeared after redraw: text=%q checkpoint=%+v", text, capture.snapshot)
+	}
+}
+
 func TestTerminalCaptureSplitSecretFrames(t *testing.T) {
 	secret := "token=top-secret"
 	for split := 1; split < len(secret); split++ {
