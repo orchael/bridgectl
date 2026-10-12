@@ -172,7 +172,7 @@ run_remote_install() {
     "$ROOT_DIR/scripts/install.sh" "$SSH_USER@$PUBLIC_IP:/tmp/install.sh" >/dev/null
 
   ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$KEY_PATH" "$SSH_USER@$PUBLIC_IP" \
-    "chmod +x /tmp/install.sh && sudo APT_SUITE='$APT_SUITE' REPO_BASE_URL='$REPO_BASE_URL' /tmp/install.sh && sudo systemctl enable --now bridgectl && sudo systemctl is-active --quiet bridgectl"
+    "chmod +x /tmp/install.sh && sudo APT_SUITE='$APT_SUITE' REPO_BASE_URL='$REPO_BASE_URL' /tmp/install.sh && systemctl --user enable --now bridge.service && systemctl --user is-active --quiet bridge.service"
 }
 
 run_healthcheck() {

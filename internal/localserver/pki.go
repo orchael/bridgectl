@@ -1,7 +1,10 @@
 package localserver
 
 import (
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,12 +24,166 @@ import (
 var safeNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
 const (
-	pkiModeAuto   = "auto"
-	pkiModeStepCA = "step-ca"
-	pkiModeTLS    = "tls"
-	pkiModeFile   = ".pki-mode"
-	pkiSANsFile   = ".pki-sans"
+	pkiModeAuto        = "auto"
+	pkiModeStepCA      = "step-ca"
+	pkiModeTLS         = "tls"
+	pkiModeFile        = ".pki-mode"
+	pkiSANsFile        = ".pki-sans"
+	pkiStepCAURLFile   = ".pki-step-ca-url"
+	pkiStepCARootsFile = ".pki-step-ca-roots"
 )
+
+// certIdentities returns an order-independent identity for a PEM blob holding
+// CA certificates: the deduplicated SHA-256 fingerprints of each certificate's
+// DER bytes. Comparing fingerprint sets — rather than the blob's leading bytes
+// — means a root removed from the middle or the end of the configured file is
+// just as visible as one added to it.
+//
+// A non-empty blob with no parseable certificate has no fingerprints to
+// compare, so it falls back to a single fingerprint over its trimmed bytes;
+// that keeps an unparseable root file comparable with itself instead of
+// collapsing to "no roots at all", which would match every other such file.
+func certIdentities(pemData []byte) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	rest := pemData
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		sum := sha256.Sum256(block.Bytes)
+		fp := hex.EncodeToString(sum[:])
+		if _, dup := seen[fp]; dup {
+			continue
+		}
+		seen[fp] = struct{}{}
+		out = append(out, fp)
+	}
+	if len(out) == 0 {
+		trimmed := strings.TrimSpace(string(pemData))
+		if trimmed == "" {
+			return nil
+		}
+		sum := sha256.Sum256([]byte(trimmed))
+		return []string{"raw:" + hex.EncodeToString(sum[:])}
+	}
+	return out
+}
+
+// subtractIdentities returns the members of a that are not in b.
+func subtractIdentities(a, b []string) []string {
+	drop := make(map[string]struct{}, len(b))
+	for _, fp := range b {
+		drop[fp] = struct{}{}
+	}
+	out := make([]string, 0, len(a))
+	for _, fp := range a {
+		if _, skip := drop[fp]; !skip {
+			out = append(out, fp)
+		}
+	}
+	return out
+}
+
+// activeStepCARoots returns the identity of the Step CA root set the material
+// on disk was issued under.
+//
+// Installations written by this version record it explicitly in
+// .pki-step-ca-roots. Older ones are reconstructed from the trust bundle,
+// which ensurePKIStepCA writes as the configured roots followed by the local
+// management CA; that CA is bridgectl's own, so it is excluded before
+// comparing — except where it is also one of the configured roots, which
+// happens when an operator points --step-ca-root at the same certificate.
+// Excluding it there would make an unchanged configuration look like a root
+// had been removed.
+func activeStepCARoots(certsDir string, mat *PKIMaterial, configured []string) ([]string, error) {
+	if recorded, ok := readStepCARoots(certsDir); ok {
+		return recorded, nil
+	}
+	bundle, err := os.ReadFile(mat.CABundlePath)
+	if err != nil {
+		return nil, fmt.Errorf("read Step CA trust bundle: %w", err)
+	}
+	// A missing or unreadable local CA simply leaves nothing to exclude: the
+	// comparison then errs toward reporting a change, which reissues rather
+	// than silently keeping a certificate from a CA that may be gone.
+	localCA, _ := os.ReadFile(mat.CACertPath)
+	return subtractIdentities(certIdentities(bundle), subtractIdentities(certIdentities(localCA), configured)), nil
+}
+
+// readStepCARoots returns the Step CA root identity recorded by the most
+// recent successful install, and whether a record exists at all.
+func readStepCARoots(certsDir string) (roots []string, ok bool) {
+	data, err := os.ReadFile(filepath.Join(certsDir, pkiStepCARootsFile))
+	if err != nil {
+		return nil, false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			roots = append(roots, line)
+		}
+	}
+	return roots, true
+}
+
+// recordStepCARoots records the identity of the configured Step CA root set,
+// so a later start can tell an unchanged set from one a root was removed from.
+func recordStepCARoots(certsDir, rootPath string) error {
+	root, err := os.ReadFile(rootPath)
+	if err != nil {
+		return fmt.Errorf("read Step CA root: %w", err)
+	}
+	ids := certIdentities(root)
+	sort.Strings(ids)
+	data := strings.Join(ids, "\n") + "\n"
+	return os.WriteFile(filepath.Join(certsDir, pkiStepCARootsFile), []byte(data), 0o644)
+}
+
+// stepCAChanged detects a CA switch before a still-valid certificate is reused.
+// Either the configured root set or the configured URL moving is enough: a
+// certificate issued under a root that is no longer trusted must not outlive
+// it, and a new URL means a different CA even when the roots overlap.
+func stepCAChanged(certsDir string, mat *PKIMaterial, stepCA *StepCAConfig) (bool, error) {
+	root, err := os.ReadFile(stepCA.RootPath)
+	if err != nil {
+		return false, fmt.Errorf("read Step CA root: %w", err)
+	}
+	configured := certIdentities(root)
+	active, err := activeStepCARoots(certsDir, mat, configured)
+	if err != nil {
+		return false, err
+	}
+	if !stringSetsEqual(active, configured) {
+		return true, nil
+	}
+	recorded, err := os.ReadFile(filepath.Join(certsDir, pkiStepCAURLFile))
+	if err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("read recorded Step CA URL: %w", err)
+	}
+	return err == nil && strings.TrimSpace(string(recorded)) != strings.TrimRight(stepCA.URL, "/"), nil
+}
+
+func recordStepCAURL(certsDir, url string) error {
+	return os.WriteFile(filepath.Join(certsDir, pkiStepCAURLFile), []byte(strings.TrimRight(url, "/")+"\n"), 0o644)
+}
+
+// recordStepCAIdentity records both halves of the configured CA's identity —
+// its URL and its root set — as a unit, so neither can drift out of sync with
+// the certificate on disk.
+func recordStepCAIdentity(certsDir string, stepCA *StepCAConfig) error {
+	if err := recordStepCAURL(certsDir, stepCA.URL); err != nil {
+		return fmt.Errorf("record Step CA URL: %w", err)
+	}
+	if err := recordStepCARoots(certsDir, stepCA.RootPath); err != nil {
+		return fmt.Errorf("record Step CA roots: %w", err)
+	}
+	return nil
+}
 
 // readPKIMode returns the PKI mode recorded in certsDir/.pki-mode, or "" if absent.
 func readPKIMode(certsDir string) string {
@@ -241,6 +398,23 @@ func EnsurePKI(stateDir string, serverSANs []string, logger *slog.Logger, stepCA
 		if _, err := os.Stat(mat.ServerCertPath); err == nil {
 			if _, err := os.Stat(mat.ServerKeyPath); err == nil {
 				if readPKIMode(certsDir) == requestedMode {
+					if requestedMode == pkiModeStepCA {
+						changed, err := stepCAChanged(certsDir, mat, stepCA)
+						if err != nil {
+							return nil, err
+						}
+						if changed {
+							logger.Info("Step CA changed, requesting a new server certificate before startup", "url", stepCA.URL)
+							if err := switchStepCA(mat, certsDir, serverSANs, logger, stepCA); err != nil {
+								return nil, err
+							}
+							_ = writePKISANs(certsDir, serverSANs)
+							return mat, nil
+						}
+						if err := recordStepCAIdentity(certsDir, stepCA); err != nil {
+							return nil, err
+						}
+					}
 					// Renew synchronously before returning so the server
 					// never starts listening with a stale or mismatched
 					// cert: either the operator restarted with a different
@@ -507,8 +681,126 @@ func ensurePKIStepCA(stateDir string, serverSANs []string, logger *slog.Logger, 
 	// or a changed --san value on the next start.
 	_ = writePKIMode(certsDir, pkiModeStepCA)
 	_ = writePKISANs(certsDir, serverSANs)
+	if err := recordStepCAIdentity(certsDir, stepCA); err != nil {
+		return nil, err
+	}
 
 	return mat, nil
+}
+
+// switchStepCA stages the replacement before touching live PKI material.
+// The local management CA and JWT keys are intentionally kept in place.
+func switchStepCA(mat *PKIMaterial, certsDir string, sans []string, logger *slog.Logger, stepCA *StepCAConfig) error {
+	staging, err := os.MkdirTemp(certsDir, ".step-ca-switch-")
+	if err != nil {
+		return fmt.Errorf("stage Step CA switch: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(staging) }()
+	certPath := filepath.Join(staging, "server.crt")
+	keyPath := filepath.Join(staging, "server.key")
+	bundlePath := filepath.Join(staging, "ca-bundle.crt")
+	if err := copyFile(stepCA.RootPath, bundlePath); err != nil {
+		return fmt.Errorf("stage Step CA root: %w", err)
+	}
+	if err := pki.AppendBundle(bundlePath, mat.CACertPath); err != nil {
+		return fmt.Errorf("stage local client trust: %w", err)
+	}
+	switch strings.ToLower(stepCA.Provisioner) {
+	case "acme":
+		err = requestCertACMEFn(stepCA, acmeSANs(sans), certPath, keyPath, logger)
+	default:
+		err = requestCertJWKFn(stepCA, sans, certPath, keyPath, logger)
+	}
+	if err != nil {
+		return fmt.Errorf("obtain server cert from new Step CA: %w", err)
+	}
+	if err := installStepCAGeneration(certsDir, mat, certPath, keyPath, bundlePath); err != nil {
+		return err
+	}
+	if err := recordStepCAIdentity(certsDir, stepCA); err != nil {
+		return err
+	}
+	return nil
+}
+
+// installRenameFn is os.Rename, indirected so tests can fail an individual
+// step of the install and assert the previous generation comes back.
+var installRenameFn = os.Rename
+
+// stepCAInstall pairs one staged file with the live path it replaces and the
+// location its predecessor is moved aside to.
+type stepCAInstall struct {
+	staged string
+	live   string
+	backup string
+}
+
+// installStepCAGeneration replaces the live server certificate, key, and trust
+// bundle with a staged generation, treating the three as a unit.
+//
+// They only work together: a new certificate paired with the previous key
+// completes no handshake, and a bundle that no longer carries the issuing root
+// makes the certificate unverifiable. Replacing them with three independent
+// renames means a failure or crash after the first one leaves a mismatched
+// pair on disk with the previous generation already overwritten — the server
+// can neither start nor go back.
+//
+// Each live file is therefore moved aside into a backup directory before its
+// replacement lands, and anything already replaced is restored if a later step
+// fails. The backup directory sits inside certsDir so every move is a rename
+// within one filesystem, which preserves each file's mode (the server key stays
+// 0600) and cannot half-copy. It is removed once the whole generation is in
+// place; if a restore itself fails, it is deliberately left behind and named in
+// the error so the previous material is still recoverable by hand.
+func installStepCAGeneration(certsDir string, mat *PKIMaterial, certPath, keyPath, bundlePath string) error {
+	backupDir, err := os.MkdirTemp(certsDir, ".step-ca-backup-")
+	if err != nil {
+		return fmt.Errorf("stage Step CA rollback copy: %w", err)
+	}
+	keepBackup := false
+	defer func() {
+		if !keepBackup {
+			_ = os.RemoveAll(backupDir)
+		}
+	}()
+
+	installs := []stepCAInstall{
+		{staged: certPath, live: mat.ServerCertPath, backup: filepath.Join(backupDir, "server.crt")},
+		{staged: keyPath, live: mat.ServerKeyPath, backup: filepath.Join(backupDir, "server.key")},
+		{staged: bundlePath, live: mat.CABundlePath, backup: filepath.Join(backupDir, "ca-bundle.crt")},
+	}
+
+	// done holds every install whose live path has been vacated, including the
+	// one that failed partway: each needs its predecessor renamed back.
+	var done []stepCAInstall
+	for _, in := range installs {
+		if err := installRenameFn(in.live, in.backup); err != nil {
+			return rollbackStepCAGeneration(done, &keepBackup,
+				fmt.Errorf("back up existing Step CA material: %w", err))
+		}
+		done = append(done, in)
+		if err := installRenameFn(in.staged, in.live); err != nil {
+			return rollbackStepCAGeneration(done, &keepBackup,
+				fmt.Errorf("install new Step CA material: %w", err))
+		}
+	}
+	return nil
+}
+
+// rollbackStepCAGeneration restores the previous generation for every install
+// whose live path was already vacated, and returns cause so the caller reports
+// the original failure rather than the unwind. A restore that itself fails sets
+// keepBackup so the surviving files are not deleted along with the staging
+// area, and reports where they are.
+func rollbackStepCAGeneration(done []stepCAInstall, keepBackup *bool, cause error) error {
+	for _, in := range done {
+		if err := os.Rename(in.backup, in.live); err != nil {
+			*keepBackup = true
+			return fmt.Errorf("%w (rollback failed: previous %s left at %s: %v)",
+				cause, filepath.Base(in.live), in.backup, err)
+		}
+	}
+	return cause
 }
 
 // acmeSANs filters serverSANs for ACME compatibility. ACME / public CAs

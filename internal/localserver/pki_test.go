@@ -1,6 +1,7 @@
 package localserver
 
 import (
+	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"log/slog"
@@ -331,11 +332,11 @@ func TestEnsurePKI_StepCAHappyPath(t *testing.T) {
 	assert.NoError(t, err, "JWT key should exist")
 }
 
-// TestEnsurePKI_StepCAIdempotent verifies that a second EnsurePKI call with
-// Step CA config is a no-op when ca-bundle.crt already exists.
+// TestEnsurePKI_StepCARootUpdate verifies that a changed configured root is
+// installed on restart instead of silently reusing the old trust bundle.
 // The JWK stub writes fake (unparseable) certs, so ensureStepCACertFresh
 // treats them as unreadable and re-requests — the stub handles that idempotently.
-func TestEnsurePKI_StepCAIdempotent(t *testing.T) {
+func TestEnsurePKI_StepCARootUpdate(t *testing.T) {
 	stateDir := t.TempDir()
 	rootPEM := filepath.Join(stateDir, "root.crt")
 	require.NoError(t, os.WriteFile(rootPEM, []byte("fake-root-cert"), 0o644))
@@ -370,13 +371,159 @@ func TestEnsurePKI_StepCAIdempotent(t *testing.T) {
 
 	// Overwrite root file with different content.
 	require.NoError(t, os.WriteFile(rootPEM, []byte("changed-root"), 0o644))
-	// Second call: ensureStepCACertFresh triggers renewal (fake cert is unreadable),
-	// but the bundle should still have the original content from the first call.
+	// Second call: a changed configured root must replace the old bundle.
 	mat2, err := EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), stepCfg, 0)
 	require.NoError(t, err)
 	bundle, _ := os.ReadFile(mat2.CABundlePath)
-	assert.True(t, strings.HasPrefix(string(bundle), "fake-root-cert"), "bundle should start with original Step CA root, not overwritten")
-	assert.NotContains(t, string(bundle), "changed-root", "bundle should not reflect the overwritten root file")
+	assert.True(t, strings.HasPrefix(string(bundle), "changed-root"), "bundle should start with the newly configured root")
+}
+
+func TestEnsurePKI_StepCASwitch(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		changeURL  bool
+		changeRoot bool
+		legacy     bool
+	}{
+		{name: "URL changes with same root", changeURL: true},
+		{name: "root changes in legacy state", changeRoot: true, legacy: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			rootPath := filepath.Join(stateDir, "root.crt")
+			require.NoError(t, os.WriteFile(rootPath, []byte("first-root"), 0o644))
+			caCertPath, caKeyPath, err := pki.InitCA("test-ca", t.TempDir())
+			require.NoError(t, err)
+			caCert, caKey, err := pki.LoadCA(caCertPath, caKeyPath)
+			require.NoError(t, err)
+
+			issued := 0
+			failIssue := false
+			oldJWK := requestCertJWKFn
+			requestCertJWKFn = func(_ *StepCAConfig, _ []string, certPath, keyPath string, _ *slog.Logger) error {
+				issued++
+				if failIssue {
+					return fmt.Errorf("simulated CA failure")
+				}
+				srcCert, srcKey, err := pki.IssueCert(caCert, caKey, pki.CertTypeServer, "server", []string{"10.0.0.1"}, t.TempDir(), 24*time.Hour)
+				if err != nil {
+					return err
+				}
+				certData, err := os.ReadFile(srcCert)
+				if err != nil {
+					return err
+				}
+				keyData, err := os.ReadFile(srcKey)
+				if err != nil {
+					return err
+				}
+				require.NoError(t, os.WriteFile(certPath, certData, 0o644))
+				return os.WriteFile(keyPath, keyData, 0o600)
+			}
+			t.Cleanup(func() { requestCertJWKFn = oldJWK })
+
+			cfg := &StepCAConfig{URL: "https://first.example", RootPath: rootPath}
+			mat, err := EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), cfg, 0)
+			require.NoError(t, err)
+			require.Equal(t, 1, issued)
+			_, err = EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), cfg, 0)
+			require.NoError(t, err)
+			require.Equal(t, 1, issued, "unchanged CA must reuse a fresh certificate")
+			jwtBefore, err := os.ReadFile(mat.JWTSigningPub)
+			require.NoError(t, err)
+			clientBefore, err := os.ReadFile(mat.LocalClientCert)
+			require.NoError(t, err)
+			if tc.legacy {
+				// Material from a bridgectl version that recorded neither the
+				// CA URL nor the root set, so the switch check has to fall
+				// back to reconstructing the roots from the trust bundle.
+				for _, name := range []string{pkiStepCAURLFile, pkiStepCARootsFile} {
+					err := os.Remove(filepath.Join(CertsDir(stateDir), name))
+					require.True(t, err == nil || os.IsNotExist(err))
+				}
+			}
+			if tc.changeURL {
+				cfg.URL = "https://second.example"
+			}
+			if tc.changeRoot {
+				require.NoError(t, os.WriteFile(rootPath, []byte("second-root"), 0o644))
+			}
+
+			mat, err = EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), cfg, 0)
+			require.NoError(t, err)
+			require.Equal(t, 2, issued, "CA change must issue a new certificate")
+			bundle, err := os.ReadFile(mat.CABundlePath)
+			require.NoError(t, err)
+			if tc.changeRoot {
+				require.True(t, strings.HasPrefix(string(bundle), "second-root"))
+			}
+			jwtAfter, err := os.ReadFile(mat.JWTSigningPub)
+			require.NoError(t, err)
+			clientAfter, err := os.ReadFile(mat.LocalClientCert)
+			require.NoError(t, err)
+			require.Equal(t, jwtBefore, jwtAfter)
+			require.Equal(t, clientBefore, clientAfter)
+
+			certBefore, err := os.ReadFile(mat.ServerCertPath)
+			require.NoError(t, err)
+			bundleBefore := bundle
+			failIssue = true
+			cfg.URL = "https://unavailable.example"
+			_, err = EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), cfg, 0)
+			require.ErrorContains(t, err, "simulated CA failure")
+			certAfter, err := os.ReadFile(mat.ServerCertPath)
+			require.NoError(t, err)
+			bundleAfter, err := os.ReadFile(mat.CABundlePath)
+			require.NoError(t, err)
+			require.Equal(t, certBefore, certAfter)
+			require.Equal(t, bundleBefore, bundleAfter)
+		})
+	}
+}
+
+func TestStepCAChangedRejectsUnreadableState(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		setup     func(t *testing.T, certsDir, rootPath, bundlePath string)
+		wantError string
+	}{
+		{
+			name: "missing configured root",
+			setup: func(t *testing.T, _, _, bundlePath string) {
+				require.NoError(t, os.WriteFile(bundlePath, []byte("old-root"), 0o644))
+			},
+			wantError: "read Step CA root",
+		},
+		{
+			name: "missing saved bundle",
+			setup: func(t *testing.T, _, rootPath, _ string) {
+				require.NoError(t, os.WriteFile(rootPath, []byte("root"), 0o644))
+			},
+			wantError: "read Step CA trust bundle",
+		},
+		{
+			// The URL record is only consulted once the root set matches, so
+			// the bundle has to carry the configured root for this case to
+			// reach it at all.
+			name: "unreadable URL record",
+			setup: func(t *testing.T, certsDir, rootPath, bundlePath string) {
+				root := stepCARootPEM(t)
+				require.NoError(t, os.WriteFile(rootPath, root, 0o644))
+				require.NoError(t, os.WriteFile(bundlePath, root, 0o644))
+				require.NoError(t, os.Mkdir(filepath.Join(certsDir, pkiStepCAURLFile), 0o700))
+			},
+			wantError: "read recorded Step CA URL",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			certsDir := t.TempDir()
+			rootPath := filepath.Join(certsDir, "root.crt")
+			bundlePath := filepath.Join(certsDir, "ca-bundle.crt")
+			tc.setup(t, certsDir, rootPath, bundlePath)
+			_, err := stepCAChanged(certsDir, &PKIMaterial{CABundlePath: bundlePath}, &StepCAConfig{URL: "https://ca.example", RootPath: rootPath})
+			require.ErrorContains(t, err, tc.wantError)
+		})
+	}
 }
 
 // TestEnsurePKI_StepCAExpiredCertRenewsAtStartup verifies that EnsurePKI renews
@@ -1315,4 +1462,231 @@ func TestKnownProviderIDs(t *testing.T) {
 		assert.Contains(t, ids, want)
 	}
 	assert.NotContains(t, ids, "codex-app-server")
+}
+
+// stepCARootPEM returns the PEM bytes of a freshly generated CA certificate,
+// for tests that need a configured Step CA root file with real certificates in
+// it rather than a placeholder string.
+func stepCARootPEM(t *testing.T) []byte {
+	t.Helper()
+	certPath, _, err := pki.InitCA("test-root", t.TempDir())
+	require.NoError(t, err)
+	data, err := os.ReadFile(certPath)
+	require.NoError(t, err)
+	return data
+}
+
+// stubStepCAIssuer points requestCertJWKFn at a local CA for the duration of
+// the test and returns a counter of how many certificates it issued.
+func stubStepCAIssuer(t *testing.T) *int {
+	t.Helper()
+	caCertPath, caKeyPath, err := pki.InitCA("test-issuer", t.TempDir())
+	require.NoError(t, err)
+	caCert, caKey, err := pki.LoadCA(caCertPath, caKeyPath)
+	require.NoError(t, err)
+
+	issued := 0
+	oldJWK := requestCertJWKFn
+	requestCertJWKFn = func(_ *StepCAConfig, sans []string, certPath, keyPath string, _ *slog.Logger) error {
+		issued++
+		srcCert, srcKey, err := pki.IssueCert(caCert, caKey, pki.CertTypeServer, "server", sans, t.TempDir(), 24*time.Hour)
+		if err != nil {
+			return err
+		}
+		certData, err := os.ReadFile(srcCert)
+		if err != nil {
+			return err
+		}
+		keyData, err := os.ReadFile(srcKey)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(certPath, certData, 0o644); err != nil {
+			return err
+		}
+		return os.WriteFile(keyPath, keyData, 0o600)
+	}
+	t.Cleanup(func() { requestCertJWKFn = oldJWK })
+	return &issued
+}
+
+// TestEnsurePKI_StepCARootRemovedTriggersSwitch is a regression test for a
+// root dropped from the configured file rather than added to it. The bundle
+// still begins with the remaining root, so a leading-bytes comparison reads
+// the configuration as unchanged and keeps both the removed root in the active
+// trust bundle and a certificate that may have been issued under it. Comparing
+// the full root set catches the removal.
+func TestEnsurePKI_StepCARootRemovedTriggersSwitch(t *testing.T) {
+	stateDir := t.TempDir()
+	rootA := stepCARootPEM(t)
+	rootB := stepCARootPEM(t)
+
+	rootPath := filepath.Join(stateDir, "roots.crt")
+	require.NoError(t, os.WriteFile(rootPath, append(append([]byte{}, rootA...), rootB...), 0o644))
+
+	issued := stubStepCAIssuer(t)
+	cfg := &StepCAConfig{URL: "https://ca.example.internal", RootPath: rootPath}
+
+	mat, err := EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), cfg, 0)
+	require.NoError(t, err)
+	require.Equal(t, 1, *issued)
+	bundle, err := os.ReadFile(mat.CABundlePath)
+	require.NoError(t, err)
+	require.Contains(t, string(bundle), string(rootB), "both configured roots should be trusted initially")
+
+	// Drop the trailing root, leaving the URL and the leading root unchanged.
+	require.NoError(t, os.WriteFile(rootPath, rootA, 0o644))
+
+	mat, err = EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), cfg, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 2, *issued, "removing a configured root must reissue the server certificate")
+
+	bundle, err = os.ReadFile(mat.CABundlePath)
+	require.NoError(t, err)
+	assert.Contains(t, string(bundle), string(rootA), "the remaining configured root must stay trusted")
+	assert.NotContains(t, string(bundle), string(rootB), "the removed root must not survive in the active trust bundle")
+
+	// The rewritten record must settle: a third start sees no change.
+	_, err = EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), cfg, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 2, *issued, "an unchanged root set must not reissue")
+}
+
+// TestEnsurePKI_StepCARootRemovedTriggersSwitchLegacy covers the same removal
+// against material that predates the recorded root set, where the active roots
+// have to be reconstructed from the trust bundle by excluding the local
+// management CA bridgectl appended to it.
+func TestEnsurePKI_StepCARootRemovedTriggersSwitchLegacy(t *testing.T) {
+	stateDir := t.TempDir()
+	rootA := stepCARootPEM(t)
+	rootB := stepCARootPEM(t)
+
+	rootPath := filepath.Join(stateDir, "roots.crt")
+	require.NoError(t, os.WriteFile(rootPath, append(append([]byte{}, rootA...), rootB...), 0o644))
+
+	issued := stubStepCAIssuer(t)
+	cfg := &StepCAConfig{URL: "https://ca.example.internal", RootPath: rootPath}
+
+	_, err := EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), cfg, 0)
+	require.NoError(t, err)
+	require.Equal(t, 1, *issued)
+
+	// Simulate material written before .pki-step-ca-roots existed.
+	for _, name := range []string{pkiStepCAURLFile, pkiStepCARootsFile} {
+		err := os.Remove(filepath.Join(CertsDir(stateDir), name))
+		require.True(t, err == nil || os.IsNotExist(err))
+	}
+
+	// Without the record, an unchanged root set must still read as unchanged.
+	_, err = EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), cfg, 0)
+	require.NoError(t, err)
+	require.Equal(t, 1, *issued, "reconstructed roots must exclude the local management CA")
+
+	// Drop the record again, then remove the trailing root.
+	for _, name := range []string{pkiStepCAURLFile, pkiStepCARootsFile} {
+		require.NoError(t, os.Remove(filepath.Join(CertsDir(stateDir), name)))
+	}
+	require.NoError(t, os.WriteFile(rootPath, rootA, 0o644))
+
+	mat, err := EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), cfg, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 2, *issued, "removing a root must be detected without a recorded root set")
+
+	bundle, err := os.ReadFile(mat.CABundlePath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(bundle), string(rootB), "the removed root must not survive in the active trust bundle")
+}
+
+// TestEnsurePKI_StepCASwitchInstallFailureRollsBack covers a failure after
+// issuance succeeded, while the new generation is being moved into place.
+// Certificate, key, and bundle must move as a unit: leaving a new certificate
+// paired with the previous key would make the server unstartable with the
+// previous generation already gone.
+func TestEnsurePKI_StepCASwitchInstallFailureRollsBack(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// failOn is the 1-based rename the install should fail on. Renames
+		// alternate: move the live file aside, then move the staged one in,
+		// for the certificate, then the key, then the bundle.
+		failOn int
+	}{
+		{name: "fails moving the first live file aside", failOn: 1},
+		{name: "fails installing the certificate", failOn: 2},
+		{name: "fails installing the key", failOn: 4},
+		{name: "fails installing the bundle", failOn: 6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			rootPath := filepath.Join(stateDir, "root.crt")
+			require.NoError(t, os.WriteFile(rootPath, stepCARootPEM(t), 0o644))
+
+			issued := stubStepCAIssuer(t)
+			cfg := &StepCAConfig{URL: "https://first.example", RootPath: rootPath}
+
+			mat, err := EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), cfg, 0)
+			require.NoError(t, err)
+			require.Equal(t, 1, *issued)
+
+			certBefore, err := os.ReadFile(mat.ServerCertPath)
+			require.NoError(t, err)
+			keyBefore, err := os.ReadFile(mat.ServerKeyPath)
+			require.NoError(t, err)
+			bundleBefore, err := os.ReadFile(mat.CABundlePath)
+			require.NoError(t, err)
+			keyModeBefore, err := os.Stat(mat.ServerKeyPath)
+			require.NoError(t, err)
+
+			calls := 0
+			oldRename := installRenameFn
+			installRenameFn = func(oldPath, newPath string) error {
+				calls++
+				if calls == tc.failOn {
+					return fmt.Errorf("simulated install interruption")
+				}
+				return os.Rename(oldPath, newPath)
+			}
+			t.Cleanup(func() { installRenameFn = oldRename })
+
+			cfg.URL = "https://second.example"
+			_, err = EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), cfg, 0)
+			require.ErrorContains(t, err, "simulated install interruption")
+			require.Equal(t, 2, *issued, "issuance should have succeeded before the install failed")
+
+			certAfter, err := os.ReadFile(mat.ServerCertPath)
+			require.NoError(t, err)
+			keyAfter, err := os.ReadFile(mat.ServerKeyPath)
+			require.NoError(t, err)
+			bundleAfter, err := os.ReadFile(mat.CABundlePath)
+			require.NoError(t, err)
+			assert.Equal(t, certBefore, certAfter, "the previous certificate must be restored")
+			assert.Equal(t, keyBefore, keyAfter, "the previous key must be restored")
+			assert.Equal(t, bundleBefore, bundleAfter, "the previous trust bundle must be restored")
+
+			keyModeAfter, err := os.Stat(mat.ServerKeyPath)
+			require.NoError(t, err)
+			assert.Equal(t, keyModeBefore.Mode(), keyModeAfter.Mode(), "rollback must not relax the server key's permissions")
+
+			// The restored certificate and key must still form a usable pair.
+			_, err = tls.LoadX509KeyPair(mat.ServerCertPath, mat.ServerKeyPath)
+			assert.NoError(t, err, "certificate and key must still match after rollback")
+
+			entries, err := os.ReadDir(CertsDir(stateDir))
+			require.NoError(t, err)
+			for _, e := range entries {
+				assert.False(t, strings.HasPrefix(e.Name(), ".step-ca-backup-"),
+					"a successful rollback should not leave a backup directory behind, found %s", e.Name())
+				assert.False(t, strings.HasPrefix(e.Name(), ".step-ca-switch-"),
+					"the staging directory should be cleaned up, found %s", e.Name())
+			}
+
+			// Recovery: the next start retries the switch and succeeds.
+			installRenameFn = oldRename
+			mat, err = EnsurePKI(stateDir, []string{"10.0.0.1"}, testLogger(), cfg, 0)
+			require.NoError(t, err)
+			assert.Equal(t, 3, *issued, "the failed switch must be retried on the next start")
+			certRetried, err := os.ReadFile(mat.ServerCertPath)
+			require.NoError(t, err)
+			assert.NotEqual(t, certBefore, certRetried, "the retry must install the new certificate")
+		})
+	}
 }

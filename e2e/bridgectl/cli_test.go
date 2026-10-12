@@ -1760,24 +1760,20 @@ func (s *CLISuite) TestStepCAIdempotency() {
 	// First call — generates everything.
 	mat1, err := localserver.EnsurePKI(stateDir, []string{"10.0.0.1"}, logger, stepCfg, 0)
 	s.Require().NoError(err)
-	bundle1, err := os.ReadFile(mat1.CABundlePath)
+	_, err = os.ReadFile(mat1.CABundlePath)
 	s.Require().NoError(err)
 
 	// Overwrite root with different content.
 	s.Require().NoError(os.WriteFile(rootPEM, []byte("changed-root"), 0o644))
 
-	// Second call — should be no-op; bundle should retain original content.
+	// Second call — a changed configured root must replace the old trust bundle.
 	mat2, err := localserver.EnsurePKI(stateDir, []string{"10.0.0.1"}, logger, stepCfg, 0)
 	s.Require().NoError(err)
 	bundle2, err := os.ReadFile(mat2.CABundlePath)
 	s.Require().NoError(err)
 
-	s.Assert().Equal(bundle1, bundle2,
-		"ca-bundle.crt should not be regenerated on second call")
-	s.Assert().True(strings.HasPrefix(string(bundle2), "original-root"),
-		"bundle should retain the original Step CA root")
-	s.Assert().NotContains(string(bundle2), "changed-root",
-		"bundle should not reflect the overwritten root file")
+	s.Assert().True(strings.HasPrefix(string(bundle2), "changed-root"),
+		"bundle should contain the newly configured Step CA root")
 }
 
 // TestStepCATier1ClientIssuance verifies that Tier-1 client certificate
