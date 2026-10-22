@@ -109,6 +109,9 @@ Global config and feature overrides are passed to the companion as well.
 Loss of the observed connection resets interaction to unknown and removes remote
 response capability. Companion startup failure fails the session explicitly instead of silently
 falling back to an unobserved terminal. Both child processes stop with the session.
+The relay accepts app-server messages up to 64 MiB so large resumed thread
+snapshots can reach the TUI; larger messages close that connection with a logged
+error.
 See the [Codex app-server protocol](https://developers.openai.com/codex/app-server/)
 for the upstream event contract.
 

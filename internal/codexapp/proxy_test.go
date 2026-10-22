@@ -1,6 +1,7 @@
 package codexapp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"testing"
@@ -9,6 +10,39 @@ import (
 	"github.com/coder/websocket"
 	"github.com/orchael/bridgectl/internal/bridge"
 )
+
+func TestProxyRelaysLargeThreadSnapshot(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	server := newFakeAppServer(t)
+	endpoint, _, err := Proxy(ctx, server.wsURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tui, _, err := websocket.Dial(ctx, endpoint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tui.CloseNow() }()
+	upstream := server.acceptConn(t)
+	defer func() { _ = upstream.CloseNow() }()
+
+	// A real Codex app-server sent a frame above 16 MiB during startup,
+	// closing the relay and leaving the TUI in its reconnect loop.
+	payload := bytes.Repeat([]byte("x"), 17<<20)
+	upstream.SetReadLimit(relayReadLimit)
+	tui.SetReadLimit(relayReadLimit)
+	if err := upstream.Write(ctx, websocket.MessageText, payload); err != nil {
+		t.Fatal(err)
+	}
+	_, got, err := tui.Read(ctx)
+	if err != nil {
+		t.Fatalf("large app-server frame disconnected the TUI: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("large app-server frame changed in relay: got %d bytes, want %d", len(got), len(payload))
+	}
+}
 
 func TestProxyRequestBoundResponse(t *testing.T) {
 	for _, kind := range []string{"single", "secret", "multiple", "resolved", "other-thread"} {
