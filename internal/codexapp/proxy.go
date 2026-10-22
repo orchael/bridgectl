@@ -14,6 +14,11 @@ import (
 	"github.com/orchael/bridgectl/internal/bridge"
 )
 
+// Codex can send a large thread snapshot when resuming a conversation. Keep
+// this bounded, but above the 16 MiB limit that caused the TUI to reconnect
+// on real sessions.
+const relayReadLimit = 64 << 20
+
 // Proxy keeps the real TUI as the protocol owner. Codex sends pending
 // requests only to that owner, not to a second status observer. Forwarding
 // its connection gives responses the original RPC request identity and
@@ -39,11 +44,12 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 		conn, _, err := websocket.Dial(dialCtx, upstream, nil)
 		cancel()
 		if err != nil {
+			slog.Warn("codexapp relay upstream dial failed", "error", err)
 			return
 		}
 		defer func() { _ = conn.CloseNow() }()
-		conn.SetReadLimit(16 << 20)
-		tui.SetReadLimit(16 << 20)
+		conn.SetReadLimit(relayReadLimit)
+		tui.SetReadLimit(relayReadLimit)
 		defer func() {
 			client.mu.Lock()
 			defer client.mu.Unlock()
@@ -79,6 +85,7 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 			for {
 				typ, b, err := tui.Read(relayCtx)
 				if err != nil {
+					slog.Debug("codexapp relay TUI read ended", "error", err)
 					return
 				}
 				var request envelope
@@ -95,6 +102,9 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 				client.mu.Unlock()
 				err = conn.Write(relayCtx, typ, b)
 				if err != nil {
+					if relayCtx.Err() == nil {
+						slog.Warn("codexapp relay upstream write failed", "error", err)
+					}
 					return
 				}
 			}
@@ -102,6 +112,9 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 		for {
 			typ, b, err := conn.Read(relayCtx)
 			if err != nil {
+				if relayCtx.Err() == nil {
+					slog.Warn("codexapp relay upstream read ended", "error", err)
+				}
 				return
 			}
 			var env envelope
