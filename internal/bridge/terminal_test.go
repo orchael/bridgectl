@@ -43,10 +43,52 @@ func TestTerminalReplayBoundAndGap(t *testing.T) {
 	if !gap.Gap {
 		t.Fatal("missing replay gap")
 	}
+	if len(gap.Data) != 0 || gap.More {
+		t.Fatal("gap must not expose an arbitrary suffix as a complete screen")
+	}
 	ms.liveClosed = true
 	end, _ := s.TerminalWindow("s", "viewer", 13)
 	if !end.Ended {
 		t.Fatal("end missing")
+	}
+}
+
+func TestTerminalResizeOnlyWindowDoesNotWaitForOutput(t *testing.T) {
+	ms := &managedSession{buf: NewByteBuffer(100), info: SessionInfo{Cols: 80, Rows: 24}}
+	s := &Supervisor{sessions: map[string]*managedSession{"s": ms}}
+	ms.buf.AppendSized(nil, ChunkTypeOutput, 100, 30)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w, err := s.WaitTerminalWindow(ctx, "s", "viewer", 0)
+	if err != nil || w.FirstSequence != 1 || w.NextSequence != 1 || w.Cols != 100 {
+		t.Fatalf("resize-only frame delayed: %+v %v", w, err)
+	}
+}
+
+func TestTerminalWindowsPreserveSplitEscapeAndUTF8(t *testing.T) {
+	ms := &managedSession{buf: NewByteBuffer(200000), info: SessionInfo{Cols: 80, Rows: 24}}
+	s := &Supervisor{sessions: map[string]*managedSession{"s": ms}}
+	prefix := append(bytes.Repeat([]byte("x"), 65530), []byte("\x1b[38;")...)
+	ms.buf.AppendSized(prefix, ChunkTypeOutput, 80, 24)
+	ms.buf.AppendSized([]byte("2;71;71;71m\xe7"), ChunkTypeOutput, 80, 24)
+	ms.buf.AppendSized(nil, ChunkTypeOutput, 100, 30)
+	ms.buf.AppendSized([]byte("\x95\x8c\x1b[0m"), ChunkTypeOutput, 100, 30)
+	var got []byte
+	var after uint64
+	for range 4 {
+		w, err := s.TerminalWindow("s", "viewer", after)
+		if err != nil || w.Gap || w.FirstSequence != after+1 {
+			t.Fatalf("noncontiguous window: %+v %v", w, err)
+		}
+		got = append(got, w.Data...)
+		after = w.NextSequence
+		if !w.More {
+			break
+		}
+	}
+	want := append(bytes.Clone(prefix), []byte("2;71;71;71m界\x1b[0m")...)
+	if !bytes.Equal(got, want) || after != 4 {
+		t.Fatal("paged replay changed terminal bytes")
 	}
 }
 
