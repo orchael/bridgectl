@@ -18,13 +18,13 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "eslint": "^10.12.0",
+    "eslint": "^10.13.0",
     "globals": "^17.13.0",
-    "typescript-eslint": "^8.71.0"
+    "typescript-eslint": "^8.71.2"
   },
   "dependencies": {
-    "@anthropic-ai/claude-code": "2.1.289",
-    "@openai/codex": "0.160.0",
-    "opencode-ai": "1.18.34"
+    "@anthropic-ai/claude-code": "2.1.296",
+    "@openai/codex": "0.162.1",
+    "opencode-ai": "1.19.0"
   }
 }
