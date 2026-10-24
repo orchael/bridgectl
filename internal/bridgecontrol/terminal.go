@@ -165,6 +165,9 @@ func (m *terminalManager) handle(r TerminalRequest) TerminalResult {
 	}
 	result.Window, err = s.TerminalWindow(r.SessionID, r.ClientID, r.AfterSequence)
 	if err != nil {
+		if errors.Is(err, bridge.ErrSessionRecoveryUnavailable) {
+			return fail("recovery_unavailable")
+		}
 		return fail("unavailable")
 	}
 	if !result.Window.Writer && m.leases[key] != nil {
@@ -210,6 +213,9 @@ func (m *terminalManager) startStream(ctx context.Context, r TerminalRequest, se
 			}
 			w, err := s.WaitTerminalWindow(ctx, r.SessionID, r.ClientID, after)
 			if err != nil {
+				if errors.Is(err, bridge.ErrSessionRecoveryUnavailable) {
+					_ = send(TerminalResult{ID: r.ID, Code: "recovery_unavailable"})
+				}
 				return
 			}
 			if err = send(TerminalResult{ID: r.ID, Window: w}); err != nil {

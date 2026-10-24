@@ -17,14 +17,15 @@ func (s *Supervisor) StoredReplayPage(session string, after uint64) ([]OutputChu
 // TerminalWindow is a bounded, transient view of retained PTY output. Data is
 // encoded as base64 by JSON so split UTF-8 and escape sequences stay intact.
 type TerminalWindow struct {
-	More         bool   `json:"more"`
-	Data         []byte `json:"data"`
-	NextSequence uint64 `json:"next_sequence"`
-	Gap          bool   `json:"gap"`
-	Ended        bool   `json:"ended"`
-	Writer       bool   `json:"writer"`
-	Cols         uint32 `json:"cols"`
-	Rows         uint32 `json:"rows"`
+	More          bool   `json:"more"`
+	Data          []byte `json:"data"`
+	FirstSequence uint64 `json:"first_sequence,omitempty"`
+	NextSequence  uint64 `json:"next_sequence"`
+	Gap           bool   `json:"gap"`
+	Ended         bool   `json:"ended"`
+	Writer        bool   `json:"writer"`
+	Cols          uint32 `json:"cols"`
+	Rows          uint32 `json:"rows"`
 }
 
 // TerminalWindow reads without attaching, claiming a writer, or resizing a PTY.
@@ -75,8 +76,15 @@ func (s *Supervisor) TerminalWindow(sessionID, clientID string, after uint64) (T
 	}
 	w.Gap = oldest > after+1 || after > last
 	if w.Gap {
-		after = 0
-		w.NextSequence = 0
+		// A retained suffix is not a terminal checkpoint. It can start inside
+		// UTF-8 or an escape sequence and depends on lost cursor/mode state.
+		// Report the gap without feeding corrupt bytes to the viewer. It may
+		// rebuild from sequence zero using the durable journal, or use history
+		// when the beginning of that journal is no longer available.
+		w.FirstSequence = oldest
+		w.NextSequence = last
+		w.Ended = ms.liveClosed
+		return w, nil
 	}
 	first := true
 	for _, chunk := range chunks {
@@ -92,9 +100,15 @@ func (s *Supervisor) TerminalWindow(sessionID, clientID string, after uint64) (T
 			}
 			w.Cols, w.Rows = chunk.Cols, chunk.Rows
 		}
-		first = false
 		if len(w.Data)+len(chunk.Payload) > 65536 {
+			if first {
+				return TerminalWindow{}, ErrSessionRecoveryUnavailable
+			}
 			break
+		}
+		if first {
+			w.FirstSequence = chunk.Seq
+			first = false
 		}
 		w.Data = append(w.Data, chunk.Payload...)
 		w.NextSequence = chunk.Seq
@@ -115,7 +129,7 @@ func (s *Supervisor) WaitTerminalWindow(ctx context.Context, session, client str
 	}
 	changed := ms.buf.changes()
 	w, err := s.TerminalWindow(session, client, after)
-	if err != nil || len(w.Data) > 0 || w.Gap || w.Ended {
+	if err != nil || w.NextSequence != after || len(w.Data) > 0 || w.Gap || w.Ended {
 		return w, err
 	}
 	timer := time.NewTimer(time.Second)

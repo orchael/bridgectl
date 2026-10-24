@@ -232,3 +232,25 @@ func TestStyledCheckpointRetainsNativeScrollbackAndCapturePolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestRedrawDoesNotBecomeNativeScrollback(t *testing.T) {
+	c := NewLiveCollector(&memorySink{}, 256, true, nil, EventProviderOutput)
+	t.Cleanup(func() { _ = c.Close(context.Background()) })
+	session := Session{SessionID: "redraw-history", Cols: 40, Rows: 3}
+	c.renderedOutput(session, []byte("SCROLLED\r\nROW2\r\nROW3\r\nROW4"))
+	capture := c.terminals[sessionKey(session)]
+	if !strings.Contains(capture.snapshot.Scrollback, "SCROLLED") {
+		t.Fatal("real scrolling was lost")
+	}
+	for i := range 10 {
+		c.renderedOutput(session, []byte(fmt.Sprintf("\x1b[2J\x1b[HFRAME %d", i)))
+		if capture.snapshot == nil || capture.snapshot.Scrollback != "" {
+			t.Fatalf("redraw archived the previous screen: %+v", capture.snapshot)
+		}
+	}
+	// Scrolling and multiple clears within one frame retain only actual output.
+	c.renderedOutput(session, []byte("\r\nA\r\nB\r\nC\x1b[02J\x1b[HAFTER\x1b[2J\x1b[HFINAL"))
+	if !strings.Contains(capture.snapshot.Scrollback, "FRAME 9") || strings.Contains(capture.snapshot.Scrollback, "AFTER") {
+		t.Fatalf("incorrect scrollback around clear: %q", capture.snapshot.Scrollback)
+	}
+}
