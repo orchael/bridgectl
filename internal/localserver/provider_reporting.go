@@ -19,5 +19,8 @@ func sessionProvider(sc provider.StdioConfig, transport string) bridge.Provider 
 	if sc.ProviderID == "codex" || sc.ProviderID == "codex-app-server" {
 		return provider.NewCodexProvider(sc)
 	}
+	if sc.ProviderID == "claude" || sc.ProviderID == "claude-chat" {
+		return provider.NewClaudeProvider(sc)
+	}
 	return provider.NewStdioProvider(sc)
 }
