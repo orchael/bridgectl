@@ -17,14 +17,17 @@ import (
 // ClaudeHooksProvider keeps the native terminal and observes session-local
 // hooks. Observation works without a telemetry collector or remote service.
 type ClaudeHooksProvider struct {
-	*StdioProvider
+	*ClaudeProvider
 	mu       sync.Mutex
 	sessions map[string]*claudehooks.Observer
 }
 
+// NewClaudeHooksProvider builds on ClaudeProvider so hooks mode accepts the
+// same credential sources as the plain provider, mirroring how
+// CodexAppServerProvider builds on CodexProvider.
 func NewClaudeHooksProvider(cfg StdioConfig) *ClaudeHooksProvider {
 	cfg.InteractionCapabilities = claudehooks.Capabilities()
-	return &ClaudeHooksProvider{StdioProvider: NewStdioProvider(cfg), sessions: make(map[string]*claudehooks.Observer)}
+	return &ClaudeHooksProvider{ClaudeProvider: NewClaudeProvider(cfg), sessions: make(map[string]*claudehooks.Observer)}
 }
 
 func (p *ClaudeHooksProvider) BuildCommand(ctx context.Context, cfg bridge.SessionConfig) (*exec.Cmd, error) {

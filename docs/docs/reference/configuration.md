@@ -62,7 +62,7 @@ allowed_paths:
 | `providers.<name>.binary` | Provider executable. |
 | `providers.<name>.args` | Arguments prepended when starting the provider. |
 | `providers.<name>.transport` | Omit for native Claude/Codex structured reporting; `stdio` explicitly disables it; `opencode_server` selects OpenCode HTTP/SSE. |
-| `providers.<name>.required_env` | Environment variables required before the provider is considered healthy. |
+| `providers.<name>.required_env` | Environment variables required before the provider is considered healthy. Ignored for `claude`, `claude-chat`, `codex`, and `codex-app-server`, which validate credentials themselves (see the authentication sections below). |
 | `telemetry.source_id` | Stable bridge identity; generated privately when empty. |
 | `telemetry.actor_id`, `telemetry.source_label` | Optional descriptive labels, not authenticated identities. |
 | `telemetry.identity_key_file` | Private 32-byte HMAC key used for machine, directory, and repository pseudonyms. |
@@ -86,11 +86,39 @@ When `feature_flags.provider_fallbacks` is true, a provider can declare fallback
 providers:
   claude:
     binary: "./node_modules/@anthropic-ai/claude-code/bin/claude.exe"
-    required_env: ["CLAUDE_CODE_OAUTH_TOKEN"]
     fallbacks: ["codex"]
 ```
 
 If `claude` is unavailable, the server can select `codex` for the session.
+
+## Claude Authentication
+
+Claude accepts an explicit credential in the environment or the credentials
+the `claude` CLI stores for itself, checked in that order:
+
+1. `CLAUDE_CODE_OAUTH_TOKEN` in the daemon or prepared session environment.
+2. Any other environment source the CLI authenticates with: `ANTHROPIC_API_KEY`,
+   `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, or `CLAUDE_CODE_USE_VERTEX`.
+   Only presence is checked; the cloud backends bring their own credentials.
+3. `$HOME/.claude/.credentials.json` (`%USERPROFILE%` on Windows), holding a
+   non-empty OAuth access token.
+4. On macOS, the login keychain item for service `Claude Code-credentials`.
+
+A `required_env` entry for `claude` is ignored: the provider owns this check so
+a host authenticated through the CLI's own store is not reported as having no
+credentials. Only the stored shape is validated, never server-side validity, so
+a logged-out placeholder counts as unauthenticated.
+
+bridgectl never seeds or rewrites Claude credentials — unlike Codex, which
+bootstraps an `auth.json`. The CLI owns its store and reads it directly, so only
+provider availability is decided here and no secret is read. The keychain probe
+queries attributes only, never the secret, so it cannot raise an interactive
+keychain prompt.
+
+Home discovery uses the session's `HOME`, matching Codex. A daemon running
+under a service account with its own `HOME` therefore sees that account's
+credentials, not an interactive user's — set `CLAUDE_CODE_OAUTH_TOKEN` or
+`ANTHROPIC_API_KEY` for headless installs.
 
 ## Codex Authentication
 

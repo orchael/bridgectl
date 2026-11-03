@@ -17,15 +17,14 @@ import (
 // This provider does not declare ApprovalStateSupported: bridgectl does not
 // currently wire a response path for Claude's permission/control-request
 // protocol, so it must never claim WaitingForApproval.
-func NewClaudeChatProvider() *StdioProvider {
-	return NewStdioProvider(StdioConfig{
+func NewClaudeChatProvider() *ClaudeProvider {
+	return NewClaudeProvider(StdioConfig{
 		ProviderID:     "claude-chat",
 		Binary:         "claude",
 		DefaultArgs:    []string{"--output-format", "stream-json", "--verbose"},
 		StartupTimeout: 60 * time.Second,
 		StopGrace:      10 * time.Second,
 		StartupProbe:   "none",
-		RequiredEnv:    []string{"CLAUDE_CODE_OAUTH_TOKEN"},
 		StreamJSON:     true,
 		InteractionCapabilities: bridge.InteractionCapabilities{
 			InteractionStateSupported: true,

@@ -24,7 +24,6 @@ providers:
     args: ["--verbose"]
     startup_timeout: "60s"
     startup_probe: "prompt"
-    required_env: ["CLAUDE_CODE_OAUTH_TOKEN"]
     fallbacks: ["codex"]
     prompt_pattern: "(?m)(❯|>\\s*$)"
   codex:

@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -85,7 +86,7 @@ func (c *LiveCollector) renderedOutput(session Session, data []byte) (string, in
 	// Redact the contiguous source text first. Masking keeps cell widths and ANSI
 	// positions intact, unlike inserting a variable-length redaction label.
 	safe, redactions := maskTerminalSecrets(string(data), false)
-	_, _ = capture.screen.WriteString(terminalLayoutOnly(safe))
+	capture.writeLayout(terminalLayoutOnly(safe))
 	// Cursor edits can assemble a credential across the scrollback/screen
 	// boundary. Mask that combined view before deriving searchable text, then
 	// replace masked screen cells so later redraws cannot reveal the value.
@@ -142,6 +143,27 @@ func (c *LiveCollector) renderedOutput(session Session, data []byte) (string, in
 		capture.snapshot = &TerminalSnapshot{Version: 1, Cols: cols, Rows: rows, ANSI: styled, Scrollback: scrollback}
 	}
 	return changed.String(), redactions
+}
+
+var eraseDisplayRE = regexp.MustCompile("\x1b\\[0*2J")
+
+// The emulator archives the entire screen on ED 2. A TUI uses that command
+// for redraws, not scrolling: retaining those cells as native scrollback
+// duplicates every animation frame. Keep real scrolled lines around the clear
+// while letting the emulator perform its normal erase (including attributes).
+func (t *terminalCapture) writeLayout(data string) {
+	start := 0
+	for _, match := range eraseDisplayRE.FindAllStringIndex(data, -1) {
+		_, _ = t.screen.WriteString(data[start:match[0]])
+		backlog := slices.Clone(t.screen.Scrollback().Lines())
+		_, _ = t.screen.WriteString(data[match[0]:match[1]])
+		t.screen.ClearScrollback()
+		for _, line := range backlog {
+			t.screen.Scrollback().Push(line)
+		}
+		start = match[1]
+	}
+	_, _ = t.screen.WriteString(data[start:])
 }
 
 // maskTerminalSecrets applies the same credential patterns as DefaultRedactor,
