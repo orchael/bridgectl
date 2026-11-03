@@ -27,8 +27,10 @@ func newTestClaudeProvider(platform string, keychain func(string) bool) *ClaudeP
 
 func clearClaudeEnv(t *testing.T) string {
 	t.Helper()
-	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
-	_ = os.Unsetenv("CLAUDE_CODE_OAUTH_TOKEN")
+	for _, key := range append([]string{"CLAUDE_CODE_OAUTH_TOKEN"}, claudeEnvAuthVars...) {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	return home
@@ -60,6 +62,50 @@ func TestResolveClaudeAuth_TokenWins(t *testing.T) {
 	}
 	if got.kind != claudeAuthToken {
 		t.Fatalf("kind = %q, want %q", got.kind, claudeAuthToken)
+	}
+}
+
+func TestResolveClaudeAuth_EnvSources(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want bool
+	}{
+		{"api key", "ANTHROPIC_API_KEY=sk-ant-test", true},
+		{"gateway auth token", "ANTHROPIC_AUTH_TOKEN=tok", true},
+		{"bedrock", "CLAUDE_CODE_USE_BEDROCK=1", true},
+		{"vertex", "CLAUDE_CODE_USE_VERTEX=1", true},
+		{"blank api key", "ANTHROPIC_API_KEY=   ", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := []string{tc.env, "HOME=" + t.TempDir()}
+			got, err := resolveClaudeAuthWith(env, "linux", noKeychain)
+			if !tc.want {
+				if err == nil {
+					t.Fatalf("expected no auth, got kind %q", got.kind)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.kind != claudeAuthEnv {
+				t.Fatalf("kind = %q, want %q", got.kind, claudeAuthEnv)
+			}
+		})
+	}
+}
+
+// An install configured for API-key auth (required_env: [ANTHROPIC_API_KEY])
+// must stay available with no OAuth token or native credentials on the host.
+func TestClaudeProviderHealth_APIKeyOnly(t *testing.T) {
+	clearClaudeEnv(t)
+	p := newTestClaudeProvider("darwin", noKeychain)
+
+	env := []string{"ANTHROPIC_API_KEY=sk-ant-test", "HOME=" + t.TempDir()}
+	if err := p.HealthWithEnv(context.Background(), env); err != nil {
+		t.Fatalf("expected healthy with API key, got: %v", err)
 	}
 }
 

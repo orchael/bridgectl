@@ -93,13 +93,16 @@ If `claude` is unavailable, the server can select `codex` for the session.
 
 ## Claude Authentication
 
-Claude accepts either an explicit `CLAUDE_CODE_OAUTH_TOKEN` or the credentials
+Claude accepts an explicit credential in the environment or the credentials
 the `claude` CLI stores for itself, checked in that order:
 
 1. `CLAUDE_CODE_OAUTH_TOKEN` in the daemon or prepared session environment.
-2. `$HOME/.claude/.credentials.json` (`%USERPROFILE%` on Windows), holding a
+2. Any other environment source the CLI authenticates with: `ANTHROPIC_API_KEY`,
+   `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, or `CLAUDE_CODE_USE_VERTEX`.
+   Only presence is checked; the cloud backends bring their own credentials.
+3. `$HOME/.claude/.credentials.json` (`%USERPROFILE%` on Windows), holding a
    non-empty OAuth access token.
-3. On macOS, the login keychain item for service `Claude Code-credentials`.
+4. On macOS, the login keychain item for service `Claude Code-credentials`.
 
 A `required_env` entry for `claude` is ignored: the provider owns this check so
 a host authenticated through the CLI's own store is not reported as having no
@@ -114,8 +117,8 @@ keychain prompt.
 
 Home discovery uses the session's `HOME`, matching Codex. A daemon running
 under a service account with its own `HOME` therefore sees that account's
-credentials, not an interactive user's — set `CLAUDE_CODE_OAUTH_TOKEN` for
-headless installs.
+credentials, not an interactive user's — set `CLAUDE_CODE_OAUTH_TOKEN` or
+`ANTHROPIC_API_KEY` for headless installs.
 
 ## Codex Authentication
 

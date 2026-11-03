@@ -33,9 +33,23 @@ type claudeAuthKind string
 
 const (
 	claudeAuthToken       claudeAuthKind = "token"
+	claudeAuthEnv         claudeAuthKind = "env"
 	claudeAuthCredentials claudeAuthKind = "credentials-file"
 	claudeAuthKeychain    claudeAuthKind = "keychain"
 )
+
+// claudeEnvAuthVars are the other environment-based sources the `claude` CLI
+// authenticates with: an Anthropic API key, a gateway bearer token, or a
+// third-party cloud backend that brings its own credentials. FilterEnv passes
+// all of them through, so any one of them makes the provider available —
+// otherwise an install configured for API-key or Bedrock/Vertex auth would be
+// rejected before launch even though the CLI would start fine.
+var claudeEnvAuthVars = []string{
+	"ANTHROPIC_API_KEY",
+	"ANTHROPIC_AUTH_TOKEN",
+	"CLAUDE_CODE_USE_BEDROCK",
+	"CLAUDE_CODE_USE_VERTEX",
+}
 
 type claudeAuthSource struct {
 	kind claudeAuthKind
@@ -98,6 +112,11 @@ func resolveClaudeAuthWith(env []string, platform string, keychainLookup func(st
 	if strings.TrimSpace(envValue(env, "CLAUDE_CODE_OAUTH_TOKEN")) != "" {
 		return claudeAuthSource{kind: claudeAuthToken}, nil
 	}
+	for _, key := range claudeEnvAuthVars {
+		if strings.TrimSpace(envValue(env, key)) != "" {
+			return claudeAuthSource{kind: claudeAuthEnv}, nil
+		}
+	}
 
 	if home := claudeUserHome(env, platform); home != "" {
 		credentials := filepath.Join(home, ".claude", claudeCredentialsFile)
@@ -118,5 +137,5 @@ func resolveClaudeAuthWith(env []string, platform string, keychainLookup func(st
 	}
 
 	return claudeAuthSource{}, fmt.Errorf(
-		"claude requires CLAUDE_CODE_OAUTH_TOKEN or native CLI credentials; run 'claude setup-token' or 'claude' to log in")
+		"claude requires CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY, or native CLI credentials; run 'claude setup-token' or 'claude' to log in")
 }
