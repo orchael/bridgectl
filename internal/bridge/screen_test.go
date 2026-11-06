@@ -124,6 +124,9 @@ func TestCheckpointContinuesLikeUninterruptedTerminal(t *testing.T) {
 		{"graphics designated in G1, shifted out after", []string{"\x1b)0plain"}, "\x0eqqq\x0fq"},
 		{"G1 shifted out before, shifted in after", []string{"\x1b)0\x0eqq"}, "q\x0fq"},
 		{"UK set in G2 with locking shift", []string{"\x1b*A\x1bn#"}, "#\x1b(B\x0f#"},
+		{"leave 1049 alternate screen", []string{"shell line 1\r\n$ codex\r\n\x1b[33m", "\x1b[?1049h\x1b[H\x1b[2J\x1b[1;1HCodex UI\x1b[5;3Hprompt"}, "\x1b[?1049l\x1b[0mback in shell\r\nmore"},
+		{"leave 1047 with main margins and saved cursor", []string{"\x1b[2;6r\x1b[3;3H\x1b[32m\x1b7\x1b[0m\x1b[4;1Hmain text", "\x1b[?1047hALT"}, "\x1b[?1047l\x1b8after restore\n\n\n\nscroll"},
+		{"alternate screen margins then leave", []string{"main\r\n", "\x1b[?1049h\x1b[3;5rinside"}, "\n\n\nX\x1b[?1049lY\n\n\n\n\n\n\n\n\nZ"},
 		{"alt screen with modes", []string{"\x1b[?1049h\x1b[?2004h\x1b[?1h\x1b[?25l\x1b[H\x1b[2Jfull screen"}, "\x1b[2;1Hrow two"},
 	}
 	for _, tc := range tests {

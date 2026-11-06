@@ -150,7 +150,9 @@ func (l *liveScreen) checkpoint(seq uint64) []byte {
 
 // render draws the whole grid on a viewer in any prior state so that the
 // next chunk continues exactly as on an uninterrupted terminal: soft reset,
-// the active screen buffer, every row with SGR attributes and hyperlinks,
+// the main buffer and, when the app is in the alternate screen, the
+// alternate buffer entered the same way (1049 or 1047), each with every row
+// with SGR attributes and hyperlinks, its cursor, saved cursor and margins,
 // the saved cursor, scrolling margins, input/render modes, the cursor with
 // its pending-wrap flag, the active pen, and finally any escape sequence or
 // UTF-8 character the last chunk left incomplete. It returns nil (no
@@ -177,42 +179,43 @@ func (l *liveScreen) render() []byte {
 	// emulators without DECSTR start from the same state: SGR, hyperlink,
 	// G0-G3 ASCII with G0 shifted in, origin mode off.
 	b.WriteString("\x1b[!p\x1b[0m\x1b]8;;\x1b\\\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b[?6l")
+	// Start on the viewer's main buffer with full-screen margins and no
+	// autowrap while drawing, so a full last column cannot scroll.
+	b.WriteString("\x1b[?1049l\x1b[r\x1b[?7l\x1b[H\x1b[2J")
 	if e.IsAltScreen() {
-		b.WriteString("\x1b[?1049h")
-	} else {
-		b.WriteString("\x1b[?1049l")
-	}
-	// Full-screen margins and no autowrap while drawing, so a full last
-	// column cannot scroll.
-	b.WriteString("\x1b[r\x1b[?7l\x1b[H\x1b[2J")
-	line := make(uv.Line, width)
-	for y := range height {
-		for x := range line {
-			if c := e.CellAt(x, y); c != nil {
-				line[x] = *c
-			} else {
-				line[x] = uv.Cell{}
-			}
+		// The main buffer is still there underneath and reappears when the
+		// app leaves the alternate screen, so restore it first, then enter
+		// the alternate screen the way the app did.
+		var enter string
+		switch {
+		case l.modes[ansi.ModeAltScreenSaveCursor]:
+			// 1049 saves the main cursor on entry (DECSC), replacing the
+			// saved cursor; the live main buffer's saved cursor equals it.
+			enter = ansi.SetMode(ansi.ModeAltScreenSaveCursor)
+		case l.modes[ansi.ModeAltScreen]:
+			enter = ansi.SetMode(ansi.ModeAltScreen)
+		default:
+			return nil
 		}
-		row := line.Render()
-		if row == "" {
-			continue
+		m := st.main
+		if m.scroll.Min.X != 0 || m.scroll.Max.X != width {
+			return nil
 		}
-		writeCUP(&b, y, 0)
-		b.WriteString(row)
+		drawGrid(&b, m.screen.CellAt, width, height)
+		b.WriteString("\x1b[0m")
+		if !l.modes[ansi.ModeAltScreenSaveCursor] {
+			writeSavedCursor(&b, m.saved)
+		}
+		writeMargins(&b, m.scroll, height)
+		writeCUP(&b, m.cursor.Y, m.cursor.X)
+		writePen(&b, m.cursor.Pen, m.cursor.Link)
+		b.WriteString(enter)
+		b.WriteString("\x1b[0m\x1b]8;;\x1b\\\x1b[r\x1b[H\x1b[2J")
 	}
+	drawGrid(&b, e.CellAt, width, height)
 	b.WriteString("\x1b[0m")
-	// Saved cursor (DECSC): position and pen, restored later by DECRC.
-	writeCUP(&b, st.saved.Y, st.saved.X)
-	writePen(&b, st.saved.Pen, st.saved.Link)
-	b.WriteString("\x1b7\x1b[0m\x1b]8;;\x1b\\")
-	if st.scroll.Min.Y != 0 || st.scroll.Max.Y != height {
-		b.WriteString("\x1b[")
-		b.WriteString(strconv.Itoa(st.scroll.Min.Y + 1))
-		b.WriteByte(';')
-		b.WriteString(strconv.Itoa(st.scroll.Max.Y))
-		b.WriteByte('r')
-	}
+	writeSavedCursor(&b, st.saved)
+	writeMargins(&b, st.scroll, height)
 	for _, mode := range checkpointModes {
 		if l.modes[mode] {
 			b.WriteString(ansi.SetMode(mode))
@@ -248,6 +251,45 @@ func (l *liveScreen) render() []byte {
 	writePen(&b, st.cursor.Pen, st.cursor.Link)
 	b.Write(pending)
 	return b.Bytes()
+}
+
+// drawGrid writes every non-blank row of a buffer at absolute positions.
+func drawGrid(b *bytes.Buffer, cellAt func(x, y int) *uv.Cell, width, height int) {
+	line := make(uv.Line, width)
+	for y := range height {
+		for x := range line {
+			if c := cellAt(x, y); c != nil {
+				line[x] = *c
+			} else {
+				line[x] = uv.Cell{}
+			}
+		}
+		row := line.Render()
+		if row == "" {
+			continue
+		}
+		writeCUP(b, y, 0)
+		b.WriteString(row)
+	}
+}
+
+// writeSavedCursor sets the DECSC slot: position and pen, restored by DECRC.
+func writeSavedCursor(b *bytes.Buffer, saved vt.Cursor) {
+	writeCUP(b, saved.Y, saved.X)
+	writePen(b, saved.Pen, saved.Link)
+	b.WriteString("\x1b7\x1b[0m\x1b]8;;\x1b\\")
+}
+
+// writeMargins sets DECSTBM when the region is not the full screen.
+func writeMargins(b *bytes.Buffer, scroll uv.Rectangle, height int) {
+	if scroll.Min.Y == 0 && scroll.Max.Y == height {
+		return
+	}
+	b.WriteString("\x1b[")
+	b.WriteString(strconv.Itoa(scroll.Min.Y + 1))
+	b.WriteByte(';')
+	b.WriteString(strconv.Itoa(scroll.Max.Y))
+	b.WriteByte('r')
 }
 
 // writePen sets the SGR attributes and hyperlink of a pen from a reset state.
