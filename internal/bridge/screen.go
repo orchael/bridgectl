@@ -155,13 +155,17 @@ func (l *liveScreen) checkpoint(seq uint64) []byte {
 // its pending-wrap flag, the active pen, and finally any escape sequence or
 // UTF-8 character the last chunk left incomplete. It returns nil (no
 // checkpoint) for state it cannot reproduce faithfully: unreadable emulator
-// internals, left/right margins, shifted character sets, or an overlong
-// incomplete sequence.
+// internals, left/right margins, an unknown character set or pending single
+// shift, or an overlong incomplete sequence.
 func (l *liveScreen) render() []byte {
 	e := l.emu
 	width, height := e.Width(), e.Height()
 	st, ok := readVTState(e)
-	if !ok || st.charset || l.modes[ansi.ModeLeftRightMargin] || st.scroll.Min.X != 0 || st.scroll.Max.X != width {
+	if !ok || l.modes[ansi.ModeLeftRightMargin] || st.scroll.Min.X != 0 || st.scroll.Max.X != width {
+		return nil
+	}
+	charsets, ok := st.charsetSequence()
+	if !ok {
 		return nil
 	}
 	pending, ok := l.pending.prefix()
@@ -171,8 +175,8 @@ func (l *liveScreen) render() []byte {
 	var b bytes.Buffer
 	// DECSTR for real terminals, plus explicit resets of what it covers so
 	// emulators without DECSTR start from the same state: SGR, hyperlink,
-	// G0 ASCII shifted in, origin mode off.
-	b.WriteString("\x1b[!p\x1b[0m\x1b]8;;\x1b\\\x1b(B\x0f\x1b[?6l")
+	// G0-G3 ASCII with G0 shifted in, origin mode off.
+	b.WriteString("\x1b[!p\x1b[0m\x1b]8;;\x1b\\\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b[?6l")
 	if e.IsAltScreen() {
 		b.WriteString("\x1b[?1049h")
 	} else {
@@ -238,6 +242,9 @@ func (l *liveScreen) render() []byte {
 		}
 		b.WriteString("\x1b[0m\x1b]8;;\x1b\\")
 	}
+	// Character sets last: the grid and the wrap cell hold mapped glyphs and
+	// are drawn in ASCII.
+	b.WriteString(charsets)
 	writePen(&b, st.cursor.Pen, st.cursor.Link)
 	b.Write(pending)
 	return b.Bytes()

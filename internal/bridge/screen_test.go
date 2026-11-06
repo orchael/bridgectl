@@ -3,6 +3,7 @@ package bridge
 import (
 	"bytes"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -86,8 +87,13 @@ func assertCheckpointContinues(t *testing.T, cols, rows int, a []string, b strin
 	if !want.cursor.Pen.Equal(&got.cursor.Pen) || want.cursor.Link != got.cursor.Link {
 		t.Fatalf("pen=%+v link=%+v want %+v %+v", got.cursor.Pen, got.cursor.Link, want.cursor.Pen, want.cursor.Link)
 	}
-	if want.scroll != got.scroll || want.phantom != got.phantom || want.charset != got.charset {
+	if want.scroll != got.scroll || want.phantom != got.phantom || want.gl != got.gl || want.gsingle != got.gsingle {
 		t.Fatalf("state=%+v want %+v", got, want)
+	}
+	for i := range want.charsets {
+		if reflect.ValueOf(want.charsets[i]).Pointer() != reflect.ValueOf(got.charsets[i]).Pointer() {
+			t.Fatalf("G%d charset differs", i)
+		}
 	}
 	if want.saved.Position != got.saved.Position || !want.saved.Pen.Equal(&got.saved.Pen) {
 		t.Fatalf("saved cursor=%+v want %+v", got.saved, want.saved)
@@ -114,6 +120,10 @@ func TestCheckpointContinuesLikeUninterruptedTerminal(t *testing.T) {
 		{"split 3-byte UTF-8", []string{"\x1b[2;1H\xe7", "\x95"}, "\x8c!"},
 		{"split OSC title", []string{"before\x1b]0;tit"}, "le\x07after"},
 		{"split ST", []string{"\x1b]8;;https://example.test\x1b"}, "\\link\x1b]8;;\x1b\\"},
+		{"graphics charset in G0", []string{"\x1b(0lqqk"}, "x\x1b(Bplain"},
+		{"graphics designated in G1, shifted out after", []string{"\x1b)0plain"}, "\x0eqqq\x0fq"},
+		{"G1 shifted out before, shifted in after", []string{"\x1b)0\x0eqq"}, "q\x0fq"},
+		{"UK set in G2 with locking shift", []string{"\x1b*A\x1bn#"}, "#\x1b(B\x0f#"},
 		{"alt screen with modes", []string{"\x1b[?1049h\x1b[?2004h\x1b[?1h\x1b[?25l\x1b[H\x1b[2Jfull screen"}, "\x1b[2;1Hrow two"},
 	}
 	for _, tc := range tests {
@@ -130,7 +140,7 @@ func TestCheckpointDeclinesStateItCannotReproduce(t *testing.T) {
 		resume string // completes the state; a checkpoint is available again
 	}{
 		{"overlong unterminated OSC", []string{"\x1b]52;c;" + strings.Repeat("A", maxPendingInput+10)}, "\x07"},
-		{"graphics character set", []string{"\x1b(0qqq"}, "\x1b(B"},
+		{"pending single shift", []string{"\x1b*0\x8e"}, "q"},
 		{"left and right margins", []string{"\x1b[?69h\x1b[2;10s"}, "\x1b[1;40s\x1b[?69l"},
 	}
 	for _, tc := range tests {
