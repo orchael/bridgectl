@@ -368,14 +368,16 @@ Screen checkpoints (`internal/bridge/screen.go`):
   sequence. It is not redacted (unlike the telemetry capture) and has no
   scrollback; memory is bounded by the grid. Device-query replies are
   discarded. On a gap, TerminalWindow (Bridge web) and AttachSession (gRPC)
-  send a self-contained redraw (reset, alt screen, styled rows, saved cursor,
+  send a self-contained redraw (reset, the main buffer then the alternate
+  buffer when active, entered as 1049 or 1047, styled rows, charsets, saved cursor,
   scroll margins, input modes, cursor with pending wrap, active pen, and the
   incomplete escape/UTF-8 prefix the last chunk left in the parser) instead
   of the retained suffix, capped at 64 KiB. Pen, margins, saved cursor and
   wrap state are unexported in x/vt and are read by a type-checked
   reflection accessor (screen_vtstate.go) pinned to the go.mod version; if
   it cannot read them, or the state cannot be reproduced (left/right
-  margins, shifted charsets, prefix over 4 KiB), no checkpoint is sent. When output
+  margins, unknown charset or pending single shift, prefix over 4 KiB),
+  no checkpoint is sent. When output
   ends the final screen is rendered once and the emulator is released.
   Nothing is persisted; sessions recovered after a daemon restart and
   history sessions have no checkpoint.
