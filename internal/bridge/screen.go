@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"strconv"
+	"sync"
 
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
@@ -52,6 +53,8 @@ type liveScreen struct {
 	// emulator can be released while late viewers still get the last screen.
 	frozen []byte
 	closed bool
+	// final renders frozen once, off the session lock (see freeze).
+	final sync.Once
 }
 
 func newLiveScreen() *liveScreen {
@@ -118,16 +121,27 @@ func (l *liveScreen) apply(chunk OutputChunk) {
 	l.seq = chunk.Seq
 }
 
-// freeze renders the final screen and releases the emulator.
+// freeze marks the screen final. Rendering it is deferred to a goroutine so
+// that ending a session (including a forced shutdown with a short deadline)
+// never waits for a full-screen render while holding the session lock. No
+// output is applied after freeze, so the emulator is immutable from here on.
 func (l *liveScreen) freeze() {
 	if l == nil || l.closed {
 		return
 	}
-	if !l.disabled && l.emu != nil {
-		l.frozen = l.render()
-	}
-	l.emu = nil
 	l.closed = true
+	go l.finalize()
+}
+
+// finalize renders the final checkpoint once and releases the emulator.
+// Callers that need the result before the goroutine finishes block on it.
+func (l *liveScreen) finalize() {
+	l.final.Do(func() {
+		if !l.disabled && l.emu != nil {
+			l.frozen = l.render()
+		}
+		l.emu = nil
+	})
 }
 
 // checkpoint returns self-contained ANSI that redraws the screen as of seq, or
@@ -138,6 +152,7 @@ func (l *liveScreen) checkpoint(seq uint64) []byte {
 	}
 	var data []byte
 	if l.closed {
+		l.finalize()
 		data = l.frozen
 	} else if l.emu != nil {
 		data = l.render()

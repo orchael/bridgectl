@@ -337,6 +337,8 @@ func TestTerminalGapCheckpointSurvivesSessionEnd(t *testing.T) {
 		_, _ = ref.WriteString(line)
 	}
 	s.closeLive(ms)
+	// The final render runs off the session lock; wait for it.
+	ms.screen.finalize()
 	if ms.screen.emu != nil {
 		t.Fatal("emulator retained after output ended")
 	}
