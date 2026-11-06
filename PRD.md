@@ -334,6 +334,7 @@ The bridge must be installable on supported Ubuntu hosts through a signed apt re
 - A clean Ubuntu host can install `bridgectl`, start the systemd service, and pass a basic daemon health check.
 - A clean Ubuntu container can run the packaged provider runtime installer as a non-root login user and install provider CLIs into the user-owned runtime directory without mutating `/opt/bridgectl`.
 - After an apt upgrade, `bridgectl doctor` identifies a running daemon whose version differs from the installed CLI and directs the user to restart the owning user service after active sessions finish. Installation documentation distinguishes the package's `bridge.service` user unit from custom units such as an ai-desktop's `bridgectl.service`.
+- `bridgectl doctor` and `config.ValidateNodeRuntime` treat the `.nvmrc` Node major as a minimum, consistent with `package.json` `"engines": {"node": ">=24"}`: a newer major on `PATH` passes, an older one is reported (#305).
 - The release workflow includes smoke coverage that validates apt installation in containers and on an EC2 host.
 - `README.md` and `docs/` describe package installation, runtime prerequisites, and service behavior accurately.
 

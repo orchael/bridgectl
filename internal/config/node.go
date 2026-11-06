@@ -42,8 +42,11 @@ func parseNodeMajorVersion(s string) (int, error) {
 	return major, nil
 }
 
+// nodeVersionMatchesRequirement treats the .nvmrc major as a minimum, matching
+// package.json's engines range (">=24"). .nvmrc pins the development version;
+// newer Node majors are supported at runtime.
 func nodeVersionMatchesRequirement(requiredMajor, actualMajor int) bool {
-	return requiredMajor == actualMajor
+	return actualMajor >= requiredMajor
 }
 
 func RequiredNodeMajor(projectRoot string) (int, error) {
@@ -66,7 +69,7 @@ func ValidateNodeRuntime(projectRoot string) error {
 
 	nodePath, err := lookPathNode("node")
 	if err != nil {
-		return fmt.Errorf("node not found on PATH; install Node.js %d and ensure it is available before starting bridge", requiredMajor)
+		return fmt.Errorf("node not found on PATH; install Node.js %d or newer and ensure it is available before starting bridge", requiredMajor)
 	}
 
 	output, err := runCommand(nodePath, "--version")
@@ -79,7 +82,7 @@ func ValidateNodeRuntime(projectRoot string) error {
 		return fmt.Errorf("parse node version from %q: %w", strings.TrimSpace(string(output)), err)
 	}
 	if !nodeVersionMatchesRequirement(requiredMajor, actualMajor) {
-		return fmt.Errorf("node on PATH is v%d but bridge requires v%d from .nvmrc", actualMajor, requiredMajor)
+		return fmt.Errorf("node on PATH is v%d but bridge requires v%d or newer (from .nvmrc)", actualMajor, requiredMajor)
 	}
 	return nil
 }

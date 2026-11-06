@@ -59,7 +59,7 @@ func TestNodeVersionMatchesRequirement(t *testing.T) {
 		want     bool
 	}{
 		{name: "match", required: 24, actual: 24, want: true},
-		{name: "mismatch", required: 24, actual: 25, want: false},
+		{name: "newer major", required: 24, actual: 25, want: true},
 		{name: "older", required: 24, actual: 22, want: false},
 	}
 
