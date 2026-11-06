@@ -61,4 +61,4 @@ stream, err := client.AttachSession(ctx, &bridgev1.AttachSessionRequest{
 })
 ```
 
-`AfterSeq` lets a client resume from the last event it processed. If the buffer no longer contains the requested range, the stream emits a replay-gap event.
+`AfterSeq` lets a client resume from the last event it processed. If neither the memory buffer nor the durable journal contains the requested range, the stream emits a `REPLAY_GAP` event. For a live PTY session it then sends one `OUTPUT` event (`replay=true`) whose `seq` equals the gap's `last_seq` and whose payload redraws the current screen from scratch (reset, active screen buffer, styled grid, input modes, cursor). Write it to the terminal like any output and continue from that sequence; the retained suffix before it is not sent, because it cannot be drawn without the lost earlier output. `bridgectl session attach` clears the local terminal on attach and on a gap, so shell text never mixes with the redrawn application.

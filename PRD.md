@@ -175,6 +175,24 @@ Takeover acceptance criteria:
 - Failed observer attachments also return a command error.
 - A stream that ends before acknowledging attachment returns a command error, including server-originated cancellation; local user cancellation remains a clean exit. Writer exit discards queued terminal input before restoring the terminal, so keystrokes cannot be interpreted by the parent shell.
 
+Terminal gap acceptance criteria (#306):
+- Each live PTY session keeps its current screen (VT emulator at the session size, fed under the same lock that assigns output sequences, not redacted, no scrollback, nothing persisted, released when output ends).
+- When a viewer's cursor falls outside retained output, the Bridge terminal window reports `gap: true` with `data` set to a self-contained checkpoint of the current screen and `next_sequence` equal to the sequence it represents; later output continues in order. No wire-format change.
+- `AttachSession` sends the same checkpoint as one `OUTPUT` event at the gap's `last_seq` instead of the retained suffix.
+- With an idle full-screen app (Codex at a prompt), a viewer forced into a gap shows the current screen with no keystroke or repaint.
+- Output after a checkpoint continues exactly as on an uninterrupted terminal: the checkpoint restores the main buffer underneath an active alternate screen, character-set designations and shifts, the active pen and link, saved cursor, scroll margins and origin mode, pending wrap, and any escape sequence or UTF-8 character split across the chunk boundary.
+- Checkpoints over 64 KiB, terminals larger than 500x300, state that cannot be reproduced (custom tab stops, left/right margins, an unknown character set or pending single shift, an unterminated sequence over 4 KiB or one that already executed a control), recovered sessions and history sessions fall back to a gap without data.
+
+Local attach redraw acceptance criteria (#307):
+- On a terminal, `bridgectl session attach`/`watch` clear the local screen (soft reset, clear, home) after `ATTACHED`, so attaching from a shell leaves no shell characters in the redrawn app.
+- On `REPLAY_GAP`, `session attach`, `run` and remote `session start` clear the screen and then draw the server's checkpoint (or live output when none exists); a gap shows a clean, possibly blank, screen followed by live output.
+- The gap notice is printed on stderr after the terminal is restored (immediately when stdout is not a terminal), never inside the app's screen, and carries no sequence numbers (those are logged at debug level).
+
+Writer message acceptance criteria (#308):
+- An attach rejected because another client holds the writer slot (`ErrWriterConflict` / gRPC `AlreadyExists`) prints `Another client is controlling this session.` followed by the `--observe` and `--take-over` commands for that session (with `--remote` when used). The holder's kind is not reported because the server does not track it.
+- Writer events print `You now control this session.` for the claimer, `Another client took control. You are watching.` for the client that lost control, and plain wording for watchers. No gRPC codes or client IDs appear in user-facing text; IDs are logged at debug level.
+- Unit tests cover the error mapping and the event wording.
+
 ---
 
 ### 6.3 Deliverables
@@ -334,6 +352,7 @@ The bridge must be installable on supported Ubuntu hosts through a signed apt re
 - A clean Ubuntu host can install `bridgectl`, start the systemd service, and pass a basic daemon health check.
 - A clean Ubuntu container can run the packaged provider runtime installer as a non-root login user and install provider CLIs into the user-owned runtime directory without mutating `/opt/bridgectl`.
 - After an apt upgrade, `bridgectl doctor` identifies a running daemon whose version differs from the installed CLI and directs the user to restart the owning user service after active sessions finish. Installation documentation distinguishes the package's `bridge.service` user unit from custom units such as an ai-desktop's `bridgectl.service`.
+- `bridgectl doctor` and `config.ValidateNodeRuntime` treat the `.nvmrc` Node major as a minimum, consistent with `package.json` `"engines": {"node": ">=24"}`: a newer major on `PATH` passes, an older one is reported (#305).
 - The release workflow includes smoke coverage that validates apt installation in containers and on an EC2 host.
 - `README.md` and `docs/` describe package installation, runtime prerequisites, and service behavior accurately.
 

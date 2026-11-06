@@ -38,7 +38,7 @@ See the Docusaurus documentation under [docs/](docs/) for architecture details.
 ### Prerequisites
 
 - [Go 1.26+](https://go.dev/dl/)
-- **Node.js 24.x** (for provider CLIs -- use the version in `.nvmrc`). Install via any of these methods:
+- **Node.js 24 or newer** (for provider CLIs -- `.nvmrc` pins 24 for development, and `bridgectl doctor` accepts that major or newer). Install via any of these methods:
   - [nvm](https://github.com/nvm-sh/nvm) (recommended): `nvm install` after cloning
   - **macOS Homebrew**: `brew install node@24`
   - **Windows winget**: `winget install OpenJS.NodeJS --version 24`

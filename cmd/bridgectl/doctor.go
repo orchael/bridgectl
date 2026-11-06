@@ -247,7 +247,8 @@ func doctorProviderRoot() string {
 	return "."
 }
 
-// nodeVersionLine reports Node's version against the .nvmrc requirement.
+// nodeVersionLine reports Node's version against the .nvmrc requirement. The
+// .nvmrc major is a minimum, consistent with package.json "engines".
 // It gives config.ValidateNodeRuntime (previously dead code — implemented
 // and tested but with no production caller) its first real caller.
 func nodeVersionLine(ctx context.Context, projectRoot string) string {
@@ -257,7 +258,7 @@ func nodeVersionLine(ctx context.Context, projectRoot string) string {
 	}
 	nodePath, lookErr := exec.LookPath("node")
 	if lookErr != nil {
-		return fmt.Sprintf("  node          ! not found on PATH (requires %d from .nvmrc)", requiredMajor)
+		return fmt.Sprintf("  node          ! not found on PATH (requires %d or newer, from .nvmrc)", requiredMajor)
 	}
 	if err := config.ValidateNodeRuntime(projectRoot); err != nil {
 		return fmt.Sprintf("  node          ! %v (resolved %s)", err, nodePath)
@@ -266,7 +267,7 @@ func nodeVersionLine(ctx context.Context, projectRoot string) string {
 	if vErr != nil {
 		return fmt.Sprintf("  node          ! could not read node --version: %v (resolved %s)", vErr, nodePath)
 	}
-	return fmt.Sprintf("  node          ✓ %s (requires %d from .nvmrc, resolved %s)", strings.TrimSpace(string(versionOut)), requiredMajor, nodePath)
+	return fmt.Sprintf("  node          ✓ %s (requires %d or newer, from .nvmrc, resolved %s)", strings.TrimSpace(string(versionOut)), requiredMajor, nodePath)
 }
 
 // serverVersionLine reports the running daemon's version against the CLI's

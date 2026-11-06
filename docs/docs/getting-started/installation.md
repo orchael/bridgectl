@@ -63,6 +63,11 @@ bridgectl doctor
 installed CLI. Do not enable `bridge.service` on a host that already uses a
 custom bridge unit.
 
+`doctor` also checks the `node` on `PATH` against `.nvmrc` in the provider
+root. The `.nvmrc` major is a minimum, matching `"engines": {"node": ">=24"}`
+in `package.json`: Node 24 or any newer major passes, and an older major is
+reported as a problem.
+
 ## GitHub Releases
 
 Download pre-built binaries from [GitHub Releases](https://github.com/orchael/bridgectl/releases).

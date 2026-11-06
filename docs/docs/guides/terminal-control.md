@@ -42,7 +42,25 @@ Successful results contain a `window` with base64 `data`, `next_sequence`,
 `gap`, `ended`, `writer`, `cols` and `rows`. Feed decoded bytes directly to the
 terminal emulator, then advance the cursor. Serialize requests to preserve input
 and output order. Do not automatically retry uncertain input. A `gap` means
-retained output expired: reset the emulator and display the available history.
+retained output expired: reset the emulator, then write `data`. On a gap,
+`data` is not a suffix of the stream but a self-contained checkpoint of the
+current screen (soft reset; the main buffer and, when the app is in the
+alternate screen, the alternate buffer entered the same way, so leaving it
+later reveals the right main screen; every row with its colors and
+attributes, character sets, saved cursor, scroll margins, keyboard/mouse/paste
+modes, cursor position, visibility and pending wrap, the active colors and
+link, and any escape sequence or UTF-8 character still incomplete at that
+point), and `next_sequence` is the sequence that screen corresponds to.
+Keep reading from `next_sequence`; later output continues in order. A viewer
+that falls behind while the application is idle (for example Codex waiting at
+an approval prompt) therefore shows the current screen immediately. `data` is
+empty on a gap when no live screen exists (session history, sessions recovered
+after a daemon restart, terminals larger than 500x300, a checkpoint over
+64 KiB (both buffers count), or terminal state a checkpoint cannot reproduce
+faithfully: custom tab stops, left/right margins, an unknown character set or
+pending single shift, or an unterminated sequence that is over 4 KiB or has
+already executed a control character);
+display the available history in that case.
 The window contains up to 64 KiB; input is limited to 16 KiB per request.
 Resize accepts 2–500 columns and 1–300 rows. Stream-JSON providers do not have a
 native PTY and are unavailable through this terminal path.

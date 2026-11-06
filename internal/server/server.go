@@ -342,8 +342,27 @@ func (s *BridgeServer) AttachSession(req *bridgev1.AttachSessionRequest, stream 
 		}); err != nil {
 			return err
 		}
+		// The retained suffix cannot be drawn on its own. When the current
+		// screen is known, send it as replayed output at LastSeq instead:
+		// it resets the client terminal and redraws it, and later chunks
+		// continue in order. Older clients simply write it like any output.
+		if len(state.Checkpoint) > 0 {
+			if err := stream.Send(chunkToProto(req.SessionId, bridge.OutputChunk{
+				Seq:       state.LastSeq,
+				Timestamp: time.Now().UTC(),
+				Payload:   state.Checkpoint,
+				Cols:      state.Cols,
+				Rows:      state.Rows,
+			}, true)); err != nil {
+				return err
+			}
+			lastSeq = state.LastSeq
+		}
 	}
 	for _, chunk := range state.Replay {
+		if chunk.Seq <= lastSeq {
+			continue
+		}
 		if err := stream.Send(chunkToProto(req.SessionId, chunk, true)); err != nil {
 			return err
 		}

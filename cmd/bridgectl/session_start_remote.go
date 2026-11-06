@@ -140,6 +140,7 @@ func runRemoteSession(dir, providerName, project string, timeout time.Duration, 
 	}()
 
 	// Receive session output → stdout.
+	display := newAttachDisplay(os.Stdout, os.Stderr, term.IsTerminal(int(os.Stdout.Fd())))
 	err = stream.RecvAll(ctx, func(ev *bridgev1.AttachSessionEvent) error {
 		switch ev.Type {
 		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_OUTPUT:
@@ -149,8 +150,7 @@ func runRemoteSession(dir, providerName, project string, timeout time.Duration, 
 			_, writeErr := os.Stdout.Write(ev.Payload)
 			return writeErr
 		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_REPLAY_GAP:
-			_, writeErr := fmt.Fprintf(os.Stderr, "\r\n[bridgectl] replay gap: oldest=%d last=%d\r\n", ev.OldestSeq, ev.LastSeq)
-			return writeErr
+			return display.replayGap(ev)
 		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_ERROR:
 			if err := codexAuthExpiredError(providerName, ev.Error); err != nil {
 				return err
@@ -161,6 +161,7 @@ func runRemoteSession(dir, providerName, project string, timeout time.Duration, 
 		}
 	})
 	restore()
+	display.printDeferredNotices()
 
 	if detached.Load() {
 		fmt.Fprintf(os.Stderr, "\r\nDetached from session %s\r\n", sessionID)

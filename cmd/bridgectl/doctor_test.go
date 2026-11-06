@@ -112,7 +112,7 @@ func TestNodeVersionLineNotFoundOnPath(t *testing.T) {
 	}
 	t.Setenv("PATH", t.TempDir()) // empty: no "node" binary anywhere on PATH
 	got := nodeVersionLine(context.Background(), dir)
-	want := "  node          ! not found on PATH (requires 24 from .nvmrc)"
+	want := "  node          ! not found on PATH (requires 24 or newer, from .nvmrc)"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}
@@ -125,7 +125,19 @@ func TestNodeVersionLinePass(t *testing.T) {
 	}
 	writeFakeNode(t, "v24.1.0")
 	got := nodeVersionLine(context.Background(), dir)
-	if !strings.HasPrefix(got, "  node          ✓ v24.1.0 (requires 24 from .nvmrc, resolved ") {
+	if !strings.HasPrefix(got, "  node          ✓ v24.1.0 (requires 24 or newer, from .nvmrc, resolved ") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestNodeVersionLineNewerMajorPasses(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".nvmrc"), []byte("24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeNode(t, "v25.9.0")
+	got := nodeVersionLine(context.Background(), dir)
+	if !strings.HasPrefix(got, "  node          ✓ v25.9.0 (requires 24 or newer, from .nvmrc, resolved ") {
 		t.Fatalf("got %q", got)
 	}
 }
@@ -137,7 +149,7 @@ func TestNodeVersionLineMismatch(t *testing.T) {
 	}
 	writeFakeNode(t, "v20.0.0")
 	got := nodeVersionLine(context.Background(), dir)
-	want := "  node          ! node on PATH is v20 but bridge requires v24 from .nvmrc"
+	want := "  node          ! node on PATH is v20 but bridge requires v24 or newer (from .nvmrc)"
 	if !strings.HasPrefix(got, want) {
 		t.Fatalf("got %q want prefix %q", got, want)
 	}

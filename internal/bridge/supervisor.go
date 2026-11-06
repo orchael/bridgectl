@@ -39,13 +39,18 @@ const (
 // AttachState is returned by Supervisor.Attach and holds the replay buffer,
 // live output channel, and session metadata for the attaching client.
 type AttachState struct {
-	ClientID     string
-	Role         AttachRole
-	Replay       []OutputChunk
-	Live         <-chan OutputChunk
-	ReplayGap    bool
-	OldestSeq    uint64
-	LastSeq      uint64
+	ClientID  string
+	Role      AttachRole
+	Replay    []OutputChunk
+	Live      <-chan OutputChunk
+	ReplayGap bool
+	OldestSeq uint64
+	LastSeq   uint64
+	// Checkpoint redraws the current screen as of LastSeq (see
+	// liveScreen.checkpoint). Nil when the screen is unavailable. Transports
+	// use it instead of a retained suffix when they cannot replay from the
+	// start of the session.
+	Checkpoint   []byte
 	ExitRecorded bool
 	ExitCode     int
 	Cols         uint32
@@ -138,6 +143,10 @@ type managedSession struct {
 	// The writer (if any) is always in observers too — activeWriter names it.
 	observers  map[string]*observerEntry
 	liveClosed bool // set by closeLive; new observers receive a pre-closed channel
+
+	// screen tracks the current PTY screen for gap checkpoints. Nil for
+	// stream-JSON, recovered and history sessions. Protected by ms.mu.
+	screen *liveScreen
 }
 
 func NewSupervisor(registry *Registry, policy Policy, outputBufSize int, idleTimeout time.Duration, opts ...SupervisorOption) *Supervisor {
@@ -501,7 +510,12 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 
 	now := nowUTC()
 	interactionCaps := interactionCapabilitiesFor(provider)
+	var screen *liveScreen
+	if !useStreamJSON {
+		screen = newLiveScreen()
+	}
 	ms := &managedSession{
+		screen: screen,
 		info: SessionInfo{
 			SessionID: cfg.SessionID,
 			ProjectID: cfg.ProjectID,
@@ -807,6 +821,7 @@ func signalReaderDone(ms *managedSession) {
 func (s *Supervisor) closeLive(ms *managedSession) {
 	ms.mu.Lock()
 	ms.liveClosed = true
+	ms.screen.freeze()
 	for _, entry := range ms.observers {
 		close(entry.ch)
 	}
@@ -844,6 +859,11 @@ func (s *Supervisor) appendChunkLocked(ms *managedSession, displayPayload []byte
 		return
 	}
 	chunk := ms.buf.AppendSized(displayPayload, ctype, ms.info.Cols, ms.info.Rows)
+	if ms.screen != nil && ctype == ChunkTypeOutput {
+		// Same lock as sequence assignment: the screen always matches the
+		// newest sequence, whatever readers observe.
+		ms.screen.apply(chunk)
+	}
 	// Persistence and publication must follow sequence order even when PTY
 	// output and a resize arrive from different goroutines.
 	s.persistChunk(ms.info.SessionID, chunk)
@@ -1274,6 +1294,7 @@ func (s *Supervisor) Attach(sessionID, clientID string, afterSeq uint64, role At
 		ReplayGap:    oldest > 0 && afterSeq > 0 && afterSeq < oldest-1,
 		OldestSeq:    oldest,
 		LastSeq:      last,
+		Checkpoint:   ms.screen.checkpoint(last),
 		ExitRecorded: ms.info.ExitRecorded,
 		ExitCode:     ms.info.ExitCode,
 		Cols:         ms.info.Cols,

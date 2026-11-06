@@ -125,6 +125,26 @@ cd /path/to/repo
 # session should no longer be listed
 ```
 
+**Take-over, writer conflict and screen redraw** (use `--provider codex` or
+`--provider claude` for a full-screen app; keep the session idle at a prompt):
+
+1. With Terminal 1 still attached as writer, run
+   `./bin/bridgectl session attach <session-id>` in Terminal 2. Expect
+   `Another client is controlling this session.` plus the `--observe` and
+   `--take-over` commands, and no `rpc error`/`AlreadyExists` text.
+2. Type some shell text in Terminal 2, then run
+   `./bin/bridgectl session attach --take-over <session-id>`. Expect the screen
+   to clear and the app's current screen (for example the approval prompt) to
+   appear immediately, with no shell characters inside it, and
+   `[bridgectl] You now control this session.` Terminal 1 prints
+   `[bridgectl] Another client took control. You are watching.`
+3. Force a replay gap on a long session (or a dev server with a small
+   `sessions.event_buffer_size` in an isolated config): attach again; expect a clean
+   redraw of the current screen with no keystroke needed, and the notice
+   `Earlier session output was no longer available...` only after detaching.
+4. In Bridge web, open the same session while the app is idle; a viewer that
+   falls behind redraws the current screen instead of staying blank.
+
 `--provider echo` needs no external CLI or API key and is the fastest way
 to exercise the session lifecycle. Swap in `--provider claude` or
 `--provider codex` if you want to test a real provider and have the
