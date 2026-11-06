@@ -46,6 +46,8 @@ type liveScreen struct {
 	modes    map[ansi.DECMode]bool
 	seq      uint64
 	disabled bool
+	// pending is input the emulator's parser holds across a chunk boundary.
+	pending pendingInput
 	// frozen holds the final checkpoint after the session output ends, so the
 	// emulator can be released while late viewers still get the last screen.
 	frozen []byte
@@ -111,6 +113,7 @@ func (l *liveScreen) apply(chunk OutputChunk) {
 	}
 	if len(chunk.Payload) > 0 {
 		_, _ = l.emu.Write(chunk.Payload)
+		l.pending.feed(chunk.Payload)
 	}
 	l.seq = chunk.Seq
 }
@@ -145,21 +148,39 @@ func (l *liveScreen) checkpoint(seq uint64) []byte {
 	return bytes.Clone(data)
 }
 
-// render draws the whole grid on a viewer in any prior state: soft reset,
+// render draws the whole grid on a viewer in any prior state so that the
+// next chunk continues exactly as on an uninterrupted terminal: soft reset,
 // the active screen buffer, every row with SGR attributes and hyperlinks,
-// input/render modes, then the cursor position and visibility.
+// the saved cursor, scrolling margins, input/render modes, the cursor with
+// its pending-wrap flag, the active pen, and finally any escape sequence or
+// UTF-8 character the last chunk left incomplete. It returns nil (no
+// checkpoint) for state it cannot reproduce faithfully: unreadable emulator
+// internals, left/right margins, shifted character sets, or an overlong
+// incomplete sequence.
 func (l *liveScreen) render() []byte {
 	e := l.emu
+	width, height := e.Width(), e.Height()
+	st, ok := readVTState(e)
+	if !ok || st.charset || l.modes[ansi.ModeLeftRightMargin] || st.scroll.Min.X != 0 || st.scroll.Max.X != width {
+		return nil
+	}
+	pending, ok := l.pending.prefix()
+	if !ok {
+		return nil
+	}
 	var b bytes.Buffer
-	b.WriteString("\x1b[!p\x1b[0m")
+	// DECSTR for real terminals, plus explicit resets of what it covers so
+	// emulators without DECSTR start from the same state: SGR, hyperlink,
+	// G0 ASCII shifted in, origin mode off.
+	b.WriteString("\x1b[!p\x1b[0m\x1b]8;;\x1b\\\x1b(B\x0f\x1b[?6l")
 	if e.IsAltScreen() {
 		b.WriteString("\x1b[?1049h")
 	} else {
 		b.WriteString("\x1b[?1049l")
 	}
-	// Disable autowrap while drawing so a full last column cannot scroll.
-	b.WriteString("\x1b[?7l\x1b[H\x1b[2J")
-	width, height := e.Width(), e.Height()
+	// Full-screen margins and no autowrap while drawing, so a full last
+	// column cannot scroll.
+	b.WriteString("\x1b[r\x1b[?7l\x1b[H\x1b[2J")
 	line := make(uv.Line, width)
 	for y := range height {
 		for x := range line {
@@ -177,6 +198,17 @@ func (l *liveScreen) render() []byte {
 		b.WriteString(row)
 	}
 	b.WriteString("\x1b[0m")
+	// Saved cursor (DECSC): position and pen, restored later by DECRC.
+	writeCUP(&b, st.saved.Y, st.saved.X)
+	writePen(&b, st.saved.Pen, st.saved.Link)
+	b.WriteString("\x1b7\x1b[0m\x1b]8;;\x1b\\")
+	if st.scroll.Min.Y != 0 || st.scroll.Max.Y != height {
+		b.WriteString("\x1b[")
+		b.WriteString(strconv.Itoa(st.scroll.Min.Y + 1))
+		b.WriteByte(';')
+		b.WriteString(strconv.Itoa(st.scroll.Max.Y))
+		b.WriteByte('r')
+	}
 	for _, mode := range checkpointModes {
 		if l.modes[mode] {
 			b.WriteString(ansi.SetMode(mode))
@@ -184,9 +216,41 @@ func (l *liveScreen) render() []byte {
 			b.WriteString(ansi.ResetMode(mode))
 		}
 	}
-	pos := e.CursorPosition()
-	writeCUP(&b, pos.Y, pos.X)
+	pos := st.cursor.Position
+	cupY := pos.Y
+	if l.modes[ansi.ModeOrigin] {
+		b.WriteString(ansi.SetMode(ansi.ModeOrigin))
+		cupY -= st.scroll.Min.Y
+	}
+	writeCUP(&b, cupY, pos.X)
+	if st.phantom && l.modes[ansi.ModeAutoWrap] {
+		// Pending wrap: redraw the last-column cell in place, so the viewer
+		// sets its own wrap flag and the next character wraps.
+		cell := e.CellAt(pos.X, pos.Y)
+		if cell == nil || cell.Width != 1 {
+			return nil
+		}
+		writePen(&b, cell.Style, cell.Link)
+		if cell.Content == "" {
+			b.WriteByte(' ')
+		} else {
+			b.WriteString(cell.Content)
+		}
+		b.WriteString("\x1b[0m\x1b]8;;\x1b\\")
+	}
+	writePen(&b, st.cursor.Pen, st.cursor.Link)
+	b.Write(pending)
 	return b.Bytes()
+}
+
+// writePen sets the SGR attributes and hyperlink of a pen from a reset state.
+func writePen(b *bytes.Buffer, pen uv.Style, link uv.Link) {
+	if !pen.IsZero() {
+		b.WriteString(pen.String())
+	}
+	if link.URL != "" {
+		b.WriteString(ansi.SetHyperlink(link.URL, link.Params))
+	}
 }
 
 func writeCUP(b *bytes.Buffer, y, x int) {

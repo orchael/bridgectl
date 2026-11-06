@@ -3,6 +3,7 @@ package bridge
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,7 +51,159 @@ func assertSameScreen(t *testing.T, want, got *vt.Emulator) {
 func dirtyViewer(cols, rows int) *vt.Emulator {
 	v := vt.NewEmulator(cols, rows)
 	_, _ = v.WriteString("$ bridgectl session attach --take-over 4dbc0cb4\r\n\x1b[31mleftover shell text")
+	// Leave state that a checkpoint must reset: margins, origin mode, a
+	// graphics charset, a saved cursor and a hyperlink.
+	_, _ = v.WriteString("\x1b[2;3r\x1b[?6h\x1b[4;4H\x1b7\x1b(0\x1b]8;;https://stale.test\x1b\\\x1b[1;44m")
 	return v
+}
+
+// assertCheckpointContinues compares an uninterrupted terminal fed a+b with a
+// dirty viewer fed checkpoint(a)+b, including pen, margins and wrap state.
+func assertCheckpointContinues(t *testing.T, cols, rows int, a []string, b string) {
+	t.Helper()
+	s, ms := newScreenSession(1<<20, uint32(cols), uint32(rows))
+	ref := vt.NewEmulator(cols, rows)
+	for _, chunk := range a {
+		feedScreen(s, ms, chunk)
+		_, _ = ref.WriteString(chunk)
+	}
+	ms.mu.Lock()
+	cp := ms.screen.checkpoint(ms.buf.LastSeq())
+	ms.mu.Unlock()
+	if len(cp) == 0 {
+		t.Fatal("no checkpoint")
+	}
+	viewer := dirtyViewer(cols, rows)
+	_, _ = viewer.Write(cp)
+	_, _ = viewer.WriteString(b)
+	_, _ = ref.WriteString(b)
+	assertSameScreen(t, ref, viewer)
+	want, ok1 := readVTState(ref)
+	got, ok2 := readVTState(viewer)
+	if !ok1 || !ok2 {
+		t.Fatal("vt internals unreadable")
+	}
+	if !want.cursor.Pen.Equal(&got.cursor.Pen) || want.cursor.Link != got.cursor.Link {
+		t.Fatalf("pen=%+v link=%+v want %+v %+v", got.cursor.Pen, got.cursor.Link, want.cursor.Pen, want.cursor.Link)
+	}
+	if want.scroll != got.scroll || want.phantom != got.phantom || want.charset != got.charset {
+		t.Fatalf("state=%+v want %+v", got, want)
+	}
+	if want.saved.Position != got.saved.Position || !want.saved.Pen.Equal(&got.saved.Pen) {
+		t.Fatalf("saved cursor=%+v want %+v", got.saved, want.saved)
+	}
+}
+
+func TestCheckpointContinuesLikeUninterruptedTerminal(t *testing.T) {
+	full := strings.Repeat("a", 40)
+	tests := []struct {
+		name string
+		a    []string
+		b    string
+	}{
+		{"pending wrap at last column", []string{"\x1b[1;1H" + full}, "bc"},
+		{"pending wrap in styled cell", []string{"\x1b[3;1H\x1b[35m" + full}, "\x1b[0mnext"},
+		{"active colour then unstyled text", []string{"\x1b[2;2H\x1b[1;31;48;5;22mred"}, " still red"},
+		{"active hyperlink", []string{"\x1b]8;;https://example.test\x1b\\li"}, "nk\x1b]8;;\x1b\\ plain"},
+		{"scroll region then scrolling output", []string{"\x1b[1;1Htop\x1b[8;1Hbottom\x1b[2;5r\x1b[5;1Hregion"}, "\n1\n2\n3\n4\r\nX"},
+		{"origin mode inside region", []string{"\x1b[3;6r\x1b[?6h\x1b[2;3H"}, "Z\x1b[1;1HQ\x1b[9;9HB"},
+		{"saved cursor and pen", []string{"\x1b[5;5H\x1b[32m\x1b7\x1b[0m\x1b[1;1Hx"}, "\x1b8saved"},
+		{"split CSI", []string{"hello\x1b["}, "2Jdone"},
+		{"split CSI parameters", []string{"\x1b[4;", "1"}, "0Hmoved"},
+		{"split UTF-8", []string{"caf\xc3"}, "\xa9 ok"},
+		{"split 3-byte UTF-8", []string{"\x1b[2;1H\xe7", "\x95"}, "\x8c!"},
+		{"split OSC title", []string{"before\x1b]0;tit"}, "le\x07after"},
+		{"split ST", []string{"\x1b]8;;https://example.test\x1b"}, "\\link\x1b]8;;\x1b\\"},
+		{"alt screen with modes", []string{"\x1b[?1049h\x1b[?2004h\x1b[?1h\x1b[?25l\x1b[H\x1b[2Jfull screen"}, "\x1b[2;1Hrow two"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assertCheckpointContinues(t, 40, 10, tc.a, tc.b)
+		})
+	}
+}
+
+func TestCheckpointDeclinesStateItCannotReproduce(t *testing.T) {
+	tests := []struct {
+		name   string
+		chunks []string
+		resume string // completes the state; a checkpoint is available again
+	}{
+		{"overlong unterminated OSC", []string{"\x1b]52;c;" + strings.Repeat("A", maxPendingInput+10)}, "\x07"},
+		{"graphics character set", []string{"\x1b(0qqq"}, "\x1b(B"},
+		{"left and right margins", []string{"\x1b[?69h\x1b[2;10s"}, "\x1b[1;40s\x1b[?69l"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, ms := newScreenSession(1<<20, 40, 10)
+			for _, chunk := range tc.chunks {
+				feedScreen(s, ms, chunk)
+			}
+			ms.mu.Lock()
+			cp := ms.screen.checkpoint(ms.buf.LastSeq())
+			ms.mu.Unlock()
+			if cp != nil {
+				t.Fatalf("checkpoint emitted for unsupported state: %q", cp)
+			}
+			feedScreen(s, ms, tc.resume)
+			ms.mu.Lock()
+			cp = ms.screen.checkpoint(ms.buf.LastSeq())
+			ms.mu.Unlock()
+			if cp == nil {
+				t.Fatal("checkpoint not restored once the state ended")
+			}
+		})
+	}
+}
+
+func TestReadVTStateMatchesPinnedLibrary(t *testing.T) {
+	e := vt.NewEmulator(10, 4)
+	_, _ = e.WriteString("\x1b[2;3r\x1b[31m")
+	st, ok := readVTState(e)
+	if !ok {
+		t.Fatal("charmbracelet/x/vt internals changed; update screen_vtstate.go")
+	}
+	if st.scroll.Min.Y != 1 || st.scroll.Max.Y != 3 || st.cursor.Pen.IsZero() {
+		t.Fatalf("unexpected state %+v", st)
+	}
+	if _, ok := readVTState(nil); ok {
+		t.Fatal("nil emulator accepted")
+	}
+}
+
+func TestPendingInputTracker(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"plain", ""},
+		{"x\x1b", "\x1b"},
+		{"x\x1b[1;2", "\x1b[1;2"},
+		{"\x1b[1;2m", ""},
+		{"\x1b(", "\x1b("},
+		{"\x1b(B", ""},
+		{"\x1b]0;t\x07", ""},
+		{"\x1b]0;t\x1b", "\x1b]0;t\x1b"},
+		{"\x1b]0;t\x1b\\", ""},
+		{"\x1bPq#0\x1b", "\x1bPq#0\x1b"},
+		{"\x1b]0;t\x1b[1", "\x1b[1"},
+		{"\x1b[1\x18", ""},
+		{"\xe7\x95", "\xe7\x95"},
+		{"\xe7\x95\x8c", ""},
+		{"\xf0\x9f\x98", "\xf0\x9f\x98"},
+		{"\xc3x", ""},
+		{"\xc3\x1b[", "\x1b["},
+	}
+	for _, tc := range tests {
+		var p pendingInput
+		for i := range len(tc.in) {
+			p.feed([]byte{tc.in[i]}) // byte-at-a-time chunking
+		}
+		got, ok := p.prefix()
+		if !ok || string(got) != tc.want {
+			t.Errorf("feed(%q) prefix=%q ok=%v want %q", tc.in, got, ok, tc.want)
+		}
+	}
 }
 
 func TestTerminalGapCarriesScreenCheckpoint(t *testing.T) {
