@@ -51,7 +51,7 @@ returns `NOT_FOUND` for an unknown session.
 | --- | --- |
 | `ATTACHED` | Confirms the client is attached to the session. |
 | `OUTPUT` | Raw PTY bytes in `payload`. |
-| `REPLAY_GAP` | Requested replay range is no longer fully buffered. |
+| `REPLAY_GAP` | Requested replay range is no longer fully buffered. For a live PTY session it is followed by an `OUTPUT` event at `last_seq` carrying a full-screen redraw (checkpoint) instead of the unusable retained suffix. |
 | `SESSION_EXIT` | Provider process exited. |
 | `ERROR` | Session or stream error text. |
 | `THINKING` | A thinking block emitted by the provider. |

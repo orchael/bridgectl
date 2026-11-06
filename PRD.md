@@ -175,6 +175,13 @@ Takeover acceptance criteria:
 - Failed observer attachments also return a command error.
 - A stream that ends before acknowledging attachment returns a command error, including server-originated cancellation; local user cancellation remains a clean exit. Writer exit discards queued terminal input before restoring the terminal, so keystrokes cannot be interpreted by the parent shell.
 
+Terminal gap acceptance criteria (#306):
+- Each live PTY session keeps its current screen (VT emulator at the session size, fed under the same lock that assigns output sequences, not redacted, no scrollback, nothing persisted, released when output ends).
+- When a viewer's cursor falls outside retained output, the Bridge terminal window reports `gap: true` with `data` set to a self-contained checkpoint of the current screen and `next_sequence` equal to the sequence it represents; later output continues in order. No wire-format change.
+- `AttachSession` sends the same checkpoint as one `OUTPUT` event at the gap's `last_seq` instead of the retained suffix.
+- With an idle full-screen app (Codex at a prompt), a viewer forced into a gap shows the current screen with no keystroke or repaint.
+- Checkpoints over 64 KiB, terminals larger than 500x300, recovered sessions and history sessions fall back to a gap without data.
+
 ---
 
 ### 6.3 Deliverables

@@ -121,6 +121,7 @@ Implements `bridge.v1.BridgeService`:
   - `Replay []OutputChunk` — buffered chunks from `afterSeq` onwards
   - `Live <-chan OutputChunk` — live channel for new PTY output
   - `ReplayGap bool` — true if `afterSeq` was evicted; replay restarts from oldest retained chunk
+  - `Checkpoint []byte` — ANSI redraw of the current screen as of `LastSeq` (see "Screen checkpoints")
   - `OldestSeq`, `LastSeq` — buffer extent at attach time
 - Client-side cursor tracking is the SDK's responsibility (`CursorStore` in `pkg/bridgeclient`)
 
@@ -351,12 +352,27 @@ ByteBuffer: [..., seq:40, seq:41, seq:42, seq:43, seq:44]
 
 Server stream:
 1. Send ATTACHED event (OldestSeq, LastSeq, cols, rows)
-2. If ReplayGap: send REPLAY_GAP event (seq:42 was evicted; replay
-   restarts from OldestSeq — client should re-render from scratch)
+2. If ReplayGap: send REPLAY_GAP event (seq:42 was evicted). When the
+   session has a screen checkpoint, send it as one OUTPUT event at LastSeq
+   and skip retained chunks up to LastSeq; otherwise replay restarts from
+   OldestSeq and the client should re-render from scratch.
 3. Replay: send seq:43, seq:44 as OUTPUT events (replay=true)
 4. Switch to live: stream new PTY chunks as they arrive (replay=false)
 5. On session exit: send SESSION_EXIT event
 6. On client disconnect: supervisor.Detach() clears attached client
+
+Screen checkpoints (`internal/bridge/screen.go`):
+  Each live PTY session keeps a VT emulator (charmbracelet/x/vt) fed with
+  every output chunk under the session lock that assigns its sequence, and
+  resized with the PTY. Its state therefore always matches the newest
+  sequence. It is not redacted (unlike the telemetry capture) and has no
+  scrollback; memory is bounded by the grid. Device-query replies are
+  discarded. On a gap, TerminalWindow (Bridge web) and AttachSession (gRPC)
+  send a self-contained redraw (reset, alt screen, styled rows, input modes,
+  cursor) instead of the retained suffix, capped at 64 KiB. When output
+  ends the final screen is rendered once and the emulator is released.
+  Nothing is persisted; sessions recovered after a daemon restart and
+  history sessions have no checkpoint.
 
 Cursor tracking is client-side:
   SDK saves last received seq via CursorStore (MemoryCursorStore or

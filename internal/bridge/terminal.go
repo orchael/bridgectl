@@ -71,18 +71,34 @@ func (s *Supervisor) TerminalWindow(sessionID, clientID string, after uint64) (T
 			}
 		}
 	}
+	// checkpointGap serves the current screen when the bytes after the
+	// cursor cannot be sent (evicted, or a single chunk over the wire limit).
+	checkpointGap := func() (TerminalWindow, bool) {
+		data := ms.screen.checkpoint(last)
+		if data == nil {
+			return TerminalWindow{}, false
+		}
+		return TerminalWindow{Gap: true, Data: data, FirstSequence: oldest, NextSequence: last, Ended: ms.liveClosed, Writer: w.Writer, Cols: ms.info.Cols, Rows: ms.info.Rows}, true
+	}
 	if len(chunks) == 0 && after < last {
+		if gap, ok := checkpointGap(); ok {
+			return gap, nil
+		}
 		return TerminalWindow{}, ErrSessionRecoveryUnavailable
 	}
 	w.Gap = oldest > after+1 || after > last
 	if w.Gap {
 		// A retained suffix is not a terminal checkpoint. It can start inside
-		// UTF-8 or an escape sequence and depends on lost cursor/mode state.
-		// Report the gap without feeding corrupt bytes to the viewer. It may
-		// rebuild from sequence zero using the durable journal, or use history
-		// when the beginning of that journal is no longer available.
+		// UTF-8 or an escape sequence and depends on lost cursor/mode state,
+		// so it is never sent. Instead, Data carries a self-contained redraw of
+		// the current screen as of last (reset, active buffer, grid, modes,
+		// cursor), and NextSequence continues from it. Viewers reset on a gap
+		// and then write Data. Data is empty when no live screen is available
+		// (history, recovered, too large); the viewer may then rebuild from
+		// sequence zero using the durable journal, or use history.
 		w.FirstSequence = oldest
 		w.NextSequence = last
+		w.Data = ms.screen.checkpoint(last)
 		w.Ended = ms.liveClosed
 		return w, nil
 	}
@@ -102,6 +118,9 @@ func (s *Supervisor) TerminalWindow(sessionID, clientID string, after uint64) (T
 		}
 		if len(w.Data)+len(chunk.Payload) > 65536 {
 			if first {
+				if gap, ok := checkpointGap(); ok {
+					return gap, nil
+				}
 				return TerminalWindow{}, ErrSessionRecoveryUnavailable
 			}
 			break
