@@ -145,6 +145,8 @@ func TestCheckpointDeclinesStateItCannotReproduce(t *testing.T) {
 		{"overlong unterminated OSC", []string{"\x1b]52;c;" + strings.Repeat("A", maxPendingInput+10)}, "\x07"},
 		{"pending single shift", []string{"\x1b*0\x8e"}, "q"},
 		{"left and right margins", []string{"\x1b[?69h\x1b[2;10s"}, "\x1b[1;40s\x1b[?69l"},
+		{"control executed inside a split CSI", []string{"top\x1b[\n"}, "1m"},
+		{"control executed after ESC", []string{"\x1b\r"}, "7"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

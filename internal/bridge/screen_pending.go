@@ -27,18 +27,24 @@ type pendingInput struct {
 	utf8Left int
 	buf      []byte
 	overflow bool
+	// executed is set when the parser already executed a C0 control inside
+	// the unfinished ESC/CSI sequence (for example ESC [ LF). Replaying the
+	// prefix would execute it a second time, so checkpoints decline.
+	executed bool
 }
 
 func (p *pendingInput) start(c byte, state pendingState) {
 	p.state = state
 	p.buf = append(p.buf[:0], c)
 	p.overflow = false
+	p.executed = false
 }
 
 func (p *pendingInput) ground() {
 	p.state = pendGround
 	p.buf = p.buf[:0]
 	p.overflow = false
+	p.executed = false
 }
 
 // feed advances the tracker over one output chunk.
@@ -51,6 +57,10 @@ func (p *pendingInput) feed(data []byte) {
 			} else {
 				p.overflow = true
 			}
+		}
+		if c < 0x20 && c != 0x1b && c != 0x18 && c != 0x1a &&
+			(p.state == pendEsc || p.state == pendEscInter || p.state == pendCSI) {
+			p.executed = true
 		}
 		switch p.state {
 		case pendGround:
@@ -135,12 +145,12 @@ func (p *pendingInput) feed(data []byte) {
 }
 
 // prefix returns the incomplete trailing input, and false when it was too
-// long to keep.
+// long to keep or contains a control the parser already executed.
 func (p *pendingInput) prefix() ([]byte, bool) {
 	if p.state == pendGround {
 		return nil, true
 	}
-	if p.overflow {
+	if p.overflow || p.executed {
 		return nil, false
 	}
 	return p.buf, true
