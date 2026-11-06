@@ -375,9 +375,9 @@ Screen checkpoints (`internal/bridge/screen.go`):
   of the retained suffix, capped at 64 KiB. Pen, margins, saved cursor and
   wrap state are unexported in x/vt and are read by a type-checked
   reflection accessor (screen_vtstate.go) pinned to the go.mod version; if
-  it cannot read them, or the state cannot be reproduced (left/right
-  margins, unknown charset or pending single shift, prefix over 4 KiB),
-  no checkpoint is sent. When output
+  it cannot read them, or the state cannot be reproduced (custom tab stops,
+  left/right margins, unknown charset or pending single shift, a prefix
+  over 4 KiB or one that already executed a control), no checkpoint is sent. When output
   ends the final screen is rendered once and the emulator is released.
   Nothing is persisted; sessions recovered after a daemon restart and
   history sessions have no checkpoint.

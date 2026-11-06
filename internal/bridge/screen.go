@@ -157,13 +157,14 @@ func (l *liveScreen) checkpoint(seq uint64) []byte {
 // its pending-wrap flag, the active pen, and finally any escape sequence or
 // UTF-8 character the last chunk left incomplete. It returns nil (no
 // checkpoint) for state it cannot reproduce faithfully: unreadable emulator
-// internals, left/right margins, an unknown character set or pending single
-// shift, or an overlong incomplete sequence.
+// internals, custom tab stops, left/right margins, an unknown character set
+// or pending single shift, or an incomplete sequence that is overlong or
+// already executed a control.
 func (l *liveScreen) render() []byte {
 	e := l.emu
 	width, height := e.Width(), e.Height()
 	st, ok := readVTState(e)
-	if !ok || l.modes[ansi.ModeLeftRightMargin] || st.scroll.Min.X != 0 || st.scroll.Max.X != width {
+	if !ok || !st.defaultTabs || l.modes[ansi.ModeLeftRightMargin] || st.scroll.Min.X != 0 || st.scroll.Max.X != width {
 		return nil
 	}
 	charsets, ok := st.charsetSequence()

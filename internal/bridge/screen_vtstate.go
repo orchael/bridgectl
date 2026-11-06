@@ -30,6 +30,9 @@ type vtState struct {
 	charsets [4]vt.CharSet
 	gl       int
 	gsingle  int
+	// defaultTabs is true when the tab stops are the default every 8
+	// columns. Custom stops (HTS/TBC) are not serialized; checkpoints decline.
+	defaultTabs bool
 }
 
 var (
@@ -40,6 +43,7 @@ var (
 	vtBoolType      = reflect.TypeFor[bool]()
 	vtIntType       = reflect.TypeFor[int]()
 	vtCharsetsType  = reflect.TypeFor[[4]vt.CharSet]()
+	vtTabStopsType  = reflect.TypeFor[*uv.TabStops]()
 )
 
 // vtField returns an unexported field of an addressable struct value, only if
@@ -87,9 +91,11 @@ func readVTState(e *vt.Emulator) (st vtState, ok bool) {
 	gl, ok3 := vtField(ev, "gl", vtIntType)
 	gsingle, ok4 := vtField(ev, "gsingle", vtIntType)
 	charsets, ok5 := vtField(ev, "charsets", vtCharsetsType)
-	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 {
+	tabs, ok6 := vtField(ev, "tabstops", vtTabStopsType)
+	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 || tabs.IsNil() {
 		return st, false
 	}
+	st.defaultTabs = defaultTabStops(tabs.Interface().(*uv.TabStops), e.Width())
 	active, okA := readVTScreen(scr.Interface().(*vt.Screen))
 	main, okM := readVTScreen(scrs.Index(0).Addr().Interface().(*vt.Screen))
 	if !okA || !okM {
@@ -130,4 +136,14 @@ func (st *vtState) charsetSequence() (string, bool) {
 	}
 	b.WriteString([]string{"", "\x0e", "\x1bn", "\x1bo"}[st.gl])
 	return b.String(), true
+}
+
+// defaultTabStops reports whether ts holds exactly a stop every 8 columns.
+func defaultTabStops(ts *uv.TabStops, width int) bool {
+	for x := range width {
+		if ts.IsStop(x) != (x%uv.DefaultTabInterval == 0) {
+			return false
+		}
+	}
+	return true
 }

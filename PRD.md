@@ -181,7 +181,7 @@ Terminal gap acceptance criteria (#306):
 - `AttachSession` sends the same checkpoint as one `OUTPUT` event at the gap's `last_seq` instead of the retained suffix.
 - With an idle full-screen app (Codex at a prompt), a viewer forced into a gap shows the current screen with no keystroke or repaint.
 - Output after a checkpoint continues exactly as on an uninterrupted terminal: the checkpoint restores the main buffer underneath an active alternate screen, character-set designations and shifts, the active pen and link, saved cursor, scroll margins and origin mode, pending wrap, and any escape sequence or UTF-8 character split across the chunk boundary.
-- Checkpoints over 64 KiB, terminals larger than 500x300, state that cannot be reproduced (left/right margins, an unknown character set or pending single shift, an unterminated sequence over 4 KiB), recovered sessions and history sessions fall back to a gap without data.
+- Checkpoints over 64 KiB, terminals larger than 500x300, state that cannot be reproduced (custom tab stops, left/right margins, an unknown character set or pending single shift, an unterminated sequence over 4 KiB or one that already executed a control), recovered sessions and history sessions fall back to a gap without data.
 
 Local attach redraw acceptance criteria (#307):
 - On a terminal, `bridgectl session attach`/`watch` clear the local screen (soft reset, clear, home) after `ATTACHED`, so attaching from a shell leaves no shell characters in the redrawn app.

@@ -57,8 +57,9 @@ an approval prompt) therefore shows the current screen immediately. `data` is
 empty on a gap when no live screen exists (session history, sessions recovered
 after a daemon restart, terminals larger than 500x300, a checkpoint over
 64 KiB (both buffers count), or terminal state a checkpoint cannot reproduce
-faithfully: left/right margins, an unknown character set or pending single
-shift, or an unterminated sequence over 4 KiB);
+faithfully: custom tab stops, left/right margins, an unknown character set or
+pending single shift, or an unterminated sequence that is over 4 KiB or has
+already executed a control character);
 display the available history in that case.
 The window contains up to 64 KiB; input is limited to 16 KiB per request.
 Resize accepts 2–500 columns and 1–300 rows. Stream-JSON providers do not have a
