@@ -44,19 +44,31 @@ func TestAttachSessionGapSendsScreenCheckpoint(t *testing.T) {
 			t.Fatalf("write %d: %v", i, err)
 		}
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	// The ~4.9 KB of echoed output always exceeds the 1 KiB ring, but PTY
+	// reads decide the chunking: the ring may keep a suffix (OldestSeq > 1)
+	// or nothing at all (a chunk larger than the ring leaves OldestSeq == 0).
+	// Either way sequence 1 is gone and there is no store, so attach after 0
+	// is a gap. Wait on output notifications, not a polling sleep; the
+	// deadline only bounds a broken test.
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelWait()
 	for {
 		info, err := supervisor.Get(sessionID)
-		if err == nil && info.OldestSeq > 1 && info.LastSeq > 0 {
-			break
+		if err != nil {
+			t.Fatal(err)
 		}
-		if time.Now().After(deadline) {
+		if info.LastSeq > 0 && info.OldestSeq != 1 {
+			w, werr := supervisor.TerminalWindow(sessionID, "probe", 0)
+			if werr == nil && w.Gap && bytes.Contains(w.Data, []byte("xxxxxxxx")) {
+				break
+			}
+		}
+		if _, err := supervisor.WaitTerminalWindow(waitCtx, sessionID, "probe", info.LastSeq); err != nil {
 			t.Fatalf("output never left the replay window: %+v %v", info, err)
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 
-	stream := newAttachStream(ctx)
+	stream := &signalStream{attachStream: newAttachStream(ctx), sent: make(chan *bridgev1.AttachSessionEvent, 1024)}
 	done := make(chan error, 1)
 	go func() {
 		done <- s.AttachSession(&bridgev1.AttachSessionRequest{
@@ -65,8 +77,24 @@ func TestAttachSessionGapSendsScreenCheckpoint(t *testing.T) {
 			Role:      bridgev1.AttachRole_ATTACH_ROLE_OBSERVER,
 		}, stream)
 	}()
-	waitForAttachEvent(t, stream, bridgev1.AttachEventType_ATTACH_EVENT_TYPE_REPLAY_GAP)
-	time.Sleep(50 * time.Millisecond)
+	// The checkpoint is sent synchronously right after REPLAY_GAP, so the
+	// event following the gap decides the test.
+	sawGap := false
+	for !sawGap {
+		select {
+		case ev := <-stream.sent:
+			sawGap = ev.GetType() == bridgev1.AttachEventType_ATTACH_EVENT_TYPE_REPLAY_GAP
+		case err := <-done:
+			t.Fatalf("attach ended before a gap: %v", err)
+		case <-waitCtx.Done():
+			t.Fatal("no REPLAY_GAP event")
+		}
+	}
+	select {
+	case <-stream.sent:
+	case <-waitCtx.Done():
+		t.Fatal("no event after REPLAY_GAP")
+	}
 	stream.cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -99,4 +127,20 @@ func TestAttachSessionGapSendsScreenCheckpoint(t *testing.T) {
 			last = ev.GetSeq()
 		}
 	}
+}
+
+// signalStream reports each sent event, so tests wait for events instead of
+// sleeping.
+type signalStream struct {
+	*attachStream
+	sent chan *bridgev1.AttachSessionEvent
+}
+
+func (s *signalStream) Send(ev *bridgev1.AttachSessionEvent) error {
+	_ = s.attachStream.Send(ev)
+	select {
+	case s.sent <- ev:
+	default:
+	}
+	return nil
 }
