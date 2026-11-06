@@ -84,6 +84,16 @@ bridgectl session diagnose <session-id>
 bridgectl session diagnose <session-id> --json
 ```
 
+When stdout is a terminal, `session attach` and `session watch` clear the
+local screen once the server confirms the attachment, so text left by the shell
+cannot mix with the redrawn session. If earlier output is no longer available
+(a replay gap), the client clears the screen again and draws the server's
+current-screen checkpoint, followed by live output. The notice
+`[bridgectl] Earlier session output was no longer available, so the current
+screen was redrawn.` is printed on stderr after the terminal is restored, not
+inside the application's screen. When stdout is not a terminal, no control
+bytes are written and the notice is printed immediately on stderr.
+
 Remote session commands accept:
 
 | Flag | Description |

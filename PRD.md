@@ -182,6 +182,11 @@ Terminal gap acceptance criteria (#306):
 - With an idle full-screen app (Codex at a prompt), a viewer forced into a gap shows the current screen with no keystroke or repaint.
 - Checkpoints over 64 KiB, terminals larger than 500x300, recovered sessions and history sessions fall back to a gap without data.
 
+Local attach redraw acceptance criteria (#307):
+- On a terminal, `bridgectl session attach`/`watch` clear the local screen (soft reset, clear, home) after `ATTACHED`, so attaching from a shell leaves no shell characters in the redrawn app.
+- On `REPLAY_GAP`, `session attach`, `run` and remote `session start` clear the screen and then draw the server's checkpoint (or live output when none exists); a gap shows a clean, possibly blank, screen followed by live output.
+- The gap notice is printed on stderr after the terminal is restored (immediately when stdout is not a terminal), never inside the app's screen, and carries no sequence numbers (those are logged at debug level).
+
 ---
 
 ### 6.3 Deliverables

@@ -378,10 +378,16 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 		}()
 	}
 
+	display := newAttachDisplay(os.Stdout, os.Stderr, term.IsTerminal(int(os.Stdout.Fd())))
 	err = stream.RecvAll(ctx, func(ev *bridgev1.AttachSessionEvent) error {
 		switch ev.Type {
 		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_ATTACHED:
 			attachmentReady = true
+			// Clear shell leftovers before replay or a gap checkpoint draws
+			// the session screen.
+			if err := display.reset(); err != nil {
+				return err
+			}
 			// AttachSession only prepares the SDK wrapper; RecvAll opens the
 			// stream. The server must confirm attachment before we claim or write.
 			if isWriter && !writerReady.Load() {
@@ -405,8 +411,7 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 			_, writeErr := os.Stdout.Write(ev.Payload)
 			return writeErr
 		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_REPLAY_GAP:
-			_, writeErr := fmt.Fprintf(os.Stderr, "\r\n[bridgectl] replay gap: oldest=%d last=%d\r\n", ev.OldestSeq, ev.LastSeq)
-			return writeErr
+			return display.replayGap(ev)
 		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_ERROR:
 			return errors.New(ev.Error)
 		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_SESSION_EXIT:
@@ -423,6 +428,7 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 		}
 	})
 	restore()
+	display.printDeferredNotices()
 	if claimErr != nil {
 		return claimErr
 	}
