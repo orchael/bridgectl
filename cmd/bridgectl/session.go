@@ -379,6 +379,7 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 	}
 
 	display := newAttachDisplay(os.Stdout, os.Stderr, term.IsTerminal(int(os.Stdout.Fd())))
+	writers := &writerTracker{self: clientID, controlling: isWriter && !takeOver}
 	err = stream.RecvAll(ctx, func(ev *bridgev1.AttachSessionEvent) error {
 		switch ev.Type {
 		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_ATTACHED:
@@ -392,6 +393,7 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 			// stream. The server must confirm attachment before we claim or write.
 			if isWriter && !writerReady.Load() {
 				if takeOver {
+					writers.claiming = true
 					_, claimErr = client.ClaimWriter(ctx, &bridgev1.ClaimWriterRequest{
 						SessionId: sessionID,
 						ClientId:  clientID,
@@ -417,12 +419,13 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_SESSION_EXIT:
 			sessionExit = sessionExitMessage(ev)
 			return errSessionExit
-		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_WRITER_CLAIMED:
-			_, writeErr := fmt.Fprintf(os.Stderr, "\r\n[bridgectl] writer claimed by %s\r\n", ev.WriterClientId)
-			return writeErr
-		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_WRITER_RELEASED:
-			_, writeErr := fmt.Fprintf(os.Stderr, "\r\n[bridgectl] writer released by %s\r\n", ev.WriterClientId)
-			return writeErr
+		case bridgev1.AttachEventType_ATTACH_EVENT_TYPE_WRITER_CLAIMED,
+			bridgev1.AttachEventType_ATTACH_EVENT_TYPE_WRITER_RELEASED:
+			if msg := writers.message(ev); msg != "" {
+				_, writeErr := fmt.Fprintf(os.Stderr, "\r\n[bridgectl] %s\r\n", msg)
+				return writeErr
+			}
+			return nil
 		default:
 			return nil
 		}
@@ -446,7 +449,7 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 		if err == nil {
 			return fmt.Errorf("attach: stream ended before attachment was acknowledged")
 		}
-		return fmt.Errorf("attach: %w", err)
+		return attachStreamError(err, sessionID, remote)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\r\nsession ended: %v\r\n", err)

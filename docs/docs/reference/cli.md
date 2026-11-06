@@ -84,6 +84,24 @@ bridgectl session diagnose <session-id>
 bridgectl session diagnose <session-id> --json
 ```
 
+Only one client controls (writes to) a session at a time. If another client,
+such as a Bridge web tab or another terminal, already controls it,
+`session attach` exits with:
+
+```text
+Another client is controlling this session.
+Watch instead:   bridgectl session attach --observe <session-id>
+Take control:    bridgectl session attach --take-over <session-id>
+```
+
+(`--remote <host>` is included in both commands when you used it.) While
+attached, control changes are reported in plain words:
+`You now control this session.` after a successful `--take-over`,
+`Another client took control. You are watching.` in the client that lost
+control, `Another client now controls this session.` for watchers, and
+`No client controls this session now.` when the controlling client releases it.
+Client IDs are logged only at debug level.
+
 When stdout is a terminal, `session attach` and `session watch` clear the
 local screen once the server confirms the attachment, so text left by the shell
 cannot mix with the redrawn session. If earlier output is no longer available

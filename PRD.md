@@ -187,6 +187,11 @@ Local attach redraw acceptance criteria (#307):
 - On `REPLAY_GAP`, `session attach`, `run` and remote `session start` clear the screen and then draw the server's checkpoint (or live output when none exists); a gap shows a clean, possibly blank, screen followed by live output.
 - The gap notice is printed on stderr after the terminal is restored (immediately when stdout is not a terminal), never inside the app's screen, and carries no sequence numbers (those are logged at debug level).
 
+Writer message acceptance criteria (#308):
+- An attach rejected because another client holds the writer slot (`ErrWriterConflict` / gRPC `AlreadyExists`) prints `Another client is controlling this session.` followed by the `--observe` and `--take-over` commands for that session (with `--remote` when used). The holder's kind is not reported because the server does not track it.
+- Writer events print `You now control this session.` for the claimer, `Another client took control. You are watching.` for the client that lost control, and plain wording for watchers. No gRPC codes or client IDs appear in user-facing text; IDs are logged at debug level.
+- Unit tests cover the error mapping and the event wording.
+
 ---
 
 ### 6.3 Deliverables
