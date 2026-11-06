@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.2">
 <title data-rh="true">Terminal Watch and Attach | Bridgectl</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orchael.github.io/bridgectl/guides/terminal-control"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Terminal Watch and Attach | Bridgectl"><meta data-rh="true" name="description" content="Native PTY sessions, including Claude and Codex, can be watched without sending"><meta data-rh="true" property="og:description" content="Native PTY sessions, including Claude and Codex, can be watched without sending"><link data-rh="true" rel="canonical" href="https://orchael.github.io/bridgectl/guides/terminal-control"><link data-rh="true" rel="alternate" href="https://orchael.github.io/bridgectl/guides/terminal-control" hreflang="en"><link data-rh="true" rel="alternate" href="https://orchael.github.io/bridgectl/guides/terminal-control" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Terminal Watch and Attach","item":"https://orchael.github.io/bridgectl/guides/terminal-control"}]}</script><link rel="stylesheet" href="/bridgectl/assets/css/styles.4c9ca108.css">
-<script src="/bridgectl/assets/js/runtime~main.936ffd7a.js" defer="defer"></script>
+<script src="/bridgectl/assets/js/runtime~main.60de53c0.js" defer="defer"></script>
 <script src="/bridgectl/assets/js/main.aa597c7e.js" defer="defer"></script>
 </head>
 <body>
@@ -38,7 +38,25 @@ the binary so the capability is advertised.</p>
 <code>gap</code>, <code>ended</code>, <code>writer</code>, <code>cols</code> and <code>rows</code>. Feed decoded bytes directly to the
 terminal emulator, then advance the cursor. Serialize requests to preserve input
 and output order. Do not automatically retry uncertain input. A <code>gap</code> means
-retained output expired: reset the emulator and display the available history.
+retained output expired: reset the emulator, then write <code>data</code>. On a gap,
+<code>data</code> is not a suffix of the stream but a self-contained checkpoint of the
+current screen (soft reset; the main buffer and, when the app is in the
+alternate screen, the alternate buffer entered the same way, so leaving it
+later reveals the right main screen; every row with its colors and
+attributes, character sets, saved cursor, scroll margins, keyboard/mouse/paste
+modes, cursor position, visibility and pending wrap, the active colors and
+link, and any escape sequence or UTF-8 character still incomplete at that
+point), and <code>next_sequence</code> is the sequence that screen corresponds to.
+Keep reading from <code>next_sequence</code>; later output continues in order. A viewer
+that falls behind while the application is idle (for example Codex waiting at
+an approval prompt) therefore shows the current screen immediately. <code>data</code> is
+empty on a gap when no live screen exists (session history, sessions recovered
+after a daemon restart, terminals larger than 500x300, a checkpoint over
+64 KiB (both buffers count), or terminal state a checkpoint cannot reproduce
+faithfully: custom tab stops, left/right margins, an unknown character set or
+pending single shift, or an unterminated sequence that is over 4 KiB or has
+already executed a control character);
+display the available history in that case.
 The window contains up to 64 KiB; input is limited to 16 KiB per request.
 Resize accepts 2–500 columns and 1–300 rows. Stream-JSON providers do not have a
 native PTY and are unavailable through this terminal path.</p>
