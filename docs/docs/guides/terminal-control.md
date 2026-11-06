@@ -45,14 +45,18 @@ and output order. Do not automatically retry uncertain input. A `gap` means
 retained output expired: reset the emulator, then write `data`. On a gap,
 `data` is not a suffix of the stream but a self-contained checkpoint of the
 current screen (soft reset, alternate screen when active, every row with its
-colors and attributes, keyboard/mouse/paste modes, cursor position and
-visibility), and `next_sequence` is the sequence that screen corresponds to.
+colors and attributes, saved cursor, scroll margins, keyboard/mouse/paste
+modes, cursor position, visibility and pending wrap, the active colors and
+link, and any escape sequence or UTF-8 character still incomplete at that
+point), and `next_sequence` is the sequence that screen corresponds to.
 Keep reading from `next_sequence`; later output continues in order. A viewer
 that falls behind while the application is idle (for example Codex waiting at
 an approval prompt) therefore shows the current screen immediately. `data` is
 empty on a gap when no live screen exists (session history, sessions recovered
-after a daemon restart, terminals larger than 500x300, or a checkpoint over
-64 KiB); display the available history in that case.
+after a daemon restart, terminals larger than 500x300, a checkpoint over
+64 KiB, or terminal state a checkpoint cannot reproduce faithfully: left/right
+margins, a shifted character set, or an unterminated sequence over 4 KiB);
+display the available history in that case.
 The window contains up to 64 KiB; input is limited to 16 KiB per request.
 Resize accepts 2–500 columns and 1–300 rows. Stream-JSON providers do not have a
 native PTY and are unavailable through this terminal path.
