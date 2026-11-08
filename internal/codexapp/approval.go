@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/orchael/bridgectl/internal/bridge"
 )
@@ -23,6 +25,62 @@ type commandApprovalParams struct {
 func approvalSummary(p commandApprovalParams) string {
 	return "Run once in " + p.Cwd + ": " + p.Command
 }
+
+// informationalSummary names a command approval Bridge cannot answer
+// remotely, so the person knows what they are attaching to approve. It never
+// uses the actionable "Run once in" wording, flattens control characters, and
+// is truncated on a rune boundary to fit summaryCap (Bridge's column limit).
+func informationalSummary(p commandApprovalParams) string {
+	reason := "Approve in Codex"
+	switch {
+	case len(p.Network) > 0 && string(p.Network) != "null":
+		reason = "Needs network access"
+	case len(p.Permissions) > 0 && string(p.Permissions) != "null":
+		reason = "Needs extra permissions"
+	}
+	prefix := reason + " · "
+	if cwd := displayText(p.Cwd); cwd != "" {
+		prefix += "in " + cwd + ": "
+	}
+	return capRunes(prefix+displayText(p.Command), summaryCap)
+}
+
+// displayText collapses whitespace (including newlines) to single spaces and
+// drops every other control character, so terminal escapes never reach a summary.
+func displayText(s string) string {
+	var b strings.Builder
+	space := false
+	for _, r := range s {
+		switch {
+		case unicode.IsSpace(r):
+			space = b.Len() > 0
+			continue
+		case unicode.IsControl(r) || r == utf8.RuneError:
+			continue
+		}
+		if space {
+			b.WriteByte(' ')
+			space = false
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// capRunes truncates to at most limit bytes on a rune boundary, ending with
+// an ellipsis when anything was cut.
+func capRunes(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	const ellipsis = "…"
+	cut := limit - len(ellipsis)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + ellipsis
+}
+
 func approvalPending(env envelope, p commandApprovalParams) *bridge.PendingRequest {
 	if len(env.ID) == 0 || p.ItemID == "" || p.TurnID == "" {
 		return nil
@@ -33,6 +91,8 @@ func approvalPending(env envelope, p commandApprovalParams) *bridge.PendingReque
 	summary := "Approval required in Codex"
 	if approvalSupported(env, p) {
 		summary = approvalSummary(p)
+	} else if env.Method == methodItemCommandExecApproval && strings.TrimSpace(p.Command) != "" {
+		summary = informationalSummary(p)
 	}
 	return &bridge.PendingRequest{ID: "approval:" + hex.EncodeToString(sum[:]), Type: bridge.PendingRequestApproval, Summary: summary, Kind: approvalKind(env.Method)}
 }

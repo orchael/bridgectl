@@ -3,8 +3,10 @@ package codexapp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 	"github.com/orchael/bridgectl/internal/bridge"
@@ -136,5 +138,51 @@ func TestPendingKinds(t *testing.T) {
 		if tc.got == nil || tc.got.Kind != tc.want {
 			t.Errorf("%s: %+v, want kind %q", name, tc.got, tc.want)
 		}
+	}
+}
+
+// Usability review: a command approval that Bridge cannot answer remotely
+// (network/permission escalation, long command, restricted decisions) must
+// still say what is being approved, so the person knows what to attach for.
+// It must never use the actionable "Run once in" wording, and it must stay
+// within summaryCap without control characters.
+func TestApprovalSummaryAlwaysNamesTheCommand(t *testing.T) {
+	env := envelope{ID: json.RawMessage(`7`), Method: methodItemCommandExecApproval}
+	base := commandApprovalParams{ThreadID: "t", TurnID: "u", ItemID: "i", Cwd: "/Users/mark/src/bilge-pump", Command: "git push origin feat/cache-cleaner-meta-tool"}
+	long := strings.Repeat("x", 600)
+	for name, tc := range map[string]struct {
+		mutate     func(*commandApprovalParams)
+		wantPrefix string
+		wantText   string
+	}{
+		"actionable":  {func(p *commandApprovalParams) {}, "Run once in /Users/mark/src/bilge-pump: ", "git push origin feat/cache-cleaner-meta-tool"},
+		"network":     {func(p *commandApprovalParams) { p.Network = json.RawMessage(`{"host":"github.com"}`) }, "Needs network access · in /Users/mark/src/bilge-pump: ", "git push origin feat/cache-cleaner-meta-tool"},
+		"permissions": {func(p *commandApprovalParams) { p.Permissions = json.RawMessage(`{"network":{"enabled":true}}`) }, "Needs extra permissions · in /Users/mark/src/bilge-pump: ", "git push origin"},
+		"restricted":  {func(p *commandApprovalParams) { p.AvailableDecisions = []json.RawMessage{json.RawMessage(`"cancel"`)} }, "Approve in Codex · in /Users/mark/src/bilge-pump: ", "git push origin"},
+		"long":        {func(p *commandApprovalParams) { p.Command = "echo " + long }, "Approve in Codex · in /Users/mark/src/bilge-pump: echo xxx", "…"},
+		"multiline":   {func(p *commandApprovalParams) { p.Command = "git add .\ngit push\x1b[31m" }, "Approve in Codex · in /Users/mark/src/bilge-pump: ", "git add . git push"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := base
+			tc.mutate(&p)
+			got := approvalPending(env, p)
+			if got == nil {
+				t.Fatal("no pending request")
+			}
+			if !strings.HasPrefix(got.Summary, tc.wantPrefix) || !strings.Contains(got.Summary, tc.wantText) {
+				t.Fatalf("summary %q, want prefix %q containing %q", got.Summary, tc.wantPrefix, tc.wantText)
+			}
+			if name != "actionable" && strings.HasPrefix(got.Summary, "Run once") {
+				t.Fatalf("non-actionable request uses actionable wording: %q", got.Summary)
+			}
+			if len(got.Summary) > summaryCap || !utf8.ValidString(got.Summary) || bridge.ValidateResponse(got.Summary) != nil || strings.ContainsAny(got.Summary, "\n\x1b") {
+				t.Fatalf("summary not safe for display: %q (%d bytes)", got.Summary, len(got.Summary))
+			}
+		})
+	}
+	// Approvals without a command (file changes, permission grants) keep the generic label.
+	other := approvalPending(envelope{ID: json.RawMessage(`8`), Method: methodItemFileChangeApproval}, commandApprovalParams{ThreadID: "t", TurnID: "u", ItemID: "i"})
+	if other == nil || other.Summary != "Approval required in Codex" {
+		t.Fatalf("file change summary: %+v", other)
 	}
 }
