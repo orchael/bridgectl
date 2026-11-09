@@ -43,10 +43,12 @@ type ResponseClient struct {
 	questionID         string
 	approval           bool
 	submitted          bool
-	// remoteAnswered marks that Bridge (not the attached TUI) answered the
-	// current requestID, so a late TUI answer to the same request is dropped
-	// instead of reaching Codex as a second response.
-	remoteAnswered bool
+	// remoteAnswered records the RPC ids Bridge (not the attached TUI)
+	// answered on answeredConn, so a delayed TUI answer to any of them is
+	// dropped instead of reaching Codex as a second response, even after the
+	// request was resolved or replaced. Reset when the connection changes.
+	remoteAnswered map[string]struct{}
+	answeredConn   *websocket.Conn
 	closed         bool
 	Updates        <-chan bridge.Interaction
 }
@@ -60,9 +62,18 @@ func (c *ResponseClient) Respond(ctx context.Context, pendingID, text string) er
 	// Burn the request before I/O: an ambiguous network failure is not safe
 	// to retry. Provider evidence, never this write, clears attention.
 	c.submitted = true
-	c.remoteAnswered = true
+	c.markRemoteAnswered()
 	b := mustJSON(envelope{JSONRPC: "2.0", ID: c.requestID, Result: mustJSON(map[string]any{"answers": map[string]any{c.questionID: map[string]any{"answers": []string{text}}}})})
 	return c.conn.Write(ctx, websocket.MessageText, b)
+}
+
+// markRemoteAnswered must be called with c.mu held, before the answer is written.
+func (c *ResponseClient) markRemoteAnswered() {
+	if c.answeredConn != c.conn || c.remoteAnswered == nil || len(c.remoteAnswered) >= 1024 {
+		c.remoteAnswered = map[string]struct{}{}
+		c.answeredConn = c.conn
+	}
+	c.remoteAnswered[string(c.requestID)] = struct{}{}
 }
 
 // Decide answers only an explicitly supported command approval, once.
@@ -76,7 +87,7 @@ func (c *ResponseClient) Decide(ctx context.Context, pendingID, decision string)
 		return bridge.ErrPendingRequestMismatch
 	}
 	c.submitted = true
-	c.remoteAnswered = true
+	c.markRemoteAnswered()
 	return c.conn.Write(ctx, websocket.MessageText, mustJSON(envelope{JSONRPC: "2.0", ID: c.requestID, Result: mustJSON(map[string]string{"decision": decision})}))
 }
 

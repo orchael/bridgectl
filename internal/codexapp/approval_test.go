@@ -15,7 +15,7 @@ import (
 // MAR-66: decisions are bound to a specific RPC, never PTY input or an item
 // that may have more than one approval request during its lifetime.
 func TestProxyStructuredApproval(t *testing.T) {
-	for _, kind := range []string{"accept", "cancel", "foreign", "resolved", "network", "network-extra", "network-badhost", "permissions", "long", "restricted", "local", "racing"} {
+	for _, kind := range []string{"accept", "cancel", "foreign", "resolved", "network", "network-extra", "network-badhost", "permissions", "long", "restricted", "local", "racing", "racing-after-resolve", "racing-after-next"} {
 		t.Run(kind, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -66,7 +66,7 @@ func TestProxyStructuredApproval(t *testing.T) {
 				return
 			}
 			update := <-client.Updates
-			capable := kind == "accept" || kind == "cancel" || kind == "resolved" || kind == "local" || kind == "racing" || kind == "network"
+			capable := kind == "accept" || kind == "cancel" || kind == "resolved" || kind == "local" || kind == "racing" || kind == "racing-after-resolve" || kind == "racing-after-next" || kind == "network"
 			if update.Pending == nil || update.Evidence.Capability.StructuredApprovalSupported != capable {
 				t.Fatalf("bad capability: %+v", update)
 			}
@@ -105,7 +105,18 @@ func TestProxyStructuredApproval(t *testing.T) {
 			if err := client.Decide(ctx, id, decision); err == nil {
 				t.Fatal("duplicate accepted")
 			}
-			if kind == "racing" {
+			if kind == "racing-after-resolve" {
+				// Codex resolves the request (clearing the current pending one)
+				// before the terminal's delayed answer arrives.
+				forward(notif("serverRequest/resolved", map[string]any{"threadId": "owner", "requestId": 42}))
+			}
+			if kind == "racing-after-next" {
+				// A new approval replaces the current request before the
+				// terminal's delayed answer to the first one arrives.
+				next := map[string]any{"threadId": "owner", "turnId": "turn", "itemId": "item2", "command": "printf GREEN", "cwd": "/tmp"}
+				forward(envelope{ID: json.RawMessage(`43`), Method: methodItemCommandExecApproval, Params: mustJSON(next)})
+			}
+			if kind == "racing" || kind == "racing-after-resolve" || kind == "racing-after-next" {
 				// The person at the attached terminal answers after the browser
 				// already did: the late local answer must not reach Codex.
 				serverSend(t, tui, envelope{ID: json.RawMessage(`42`), Result: mustJSON(map[string]string{"decision": "cancel"})})

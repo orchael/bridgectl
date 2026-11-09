@@ -97,10 +97,15 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 				}
 				client.mu.Lock()
 				drop := false
-				if client.conn == conn && request.Method == "" && len(request.ID) > 0 && string(request.ID) == string(client.requestID) {
-					// First answer wins: Bridge already answered this request.
-					drop = client.remoteAnswered
-					client.submitted = true
+				if client.conn == conn && request.Method == "" && len(request.ID) > 0 {
+					// First answer wins: Bridge already answered this request,
+					// whether or not it is still the current pending one.
+					if client.answeredConn == conn {
+						_, drop = client.remoteAnswered[string(request.ID)]
+					}
+					if string(request.ID) == string(client.requestID) {
+						client.submitted = true
+					}
 				}
 				client.mu.Unlock()
 				if drop {
@@ -157,7 +162,6 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 							client.questionID = ""
 							client.approval = false
 							client.submitted = false
-							client.remoteAnswered = false
 						}
 						client.conn = conn
 						client.closed = false
@@ -211,12 +215,10 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 						client.approval = false
 						client.requestID = nil
 						client.submitted = false
-						client.remoteAnswered = false
 					}
 					if json.Unmarshal(env.Params, &p) == nil && p.ThreadID == client.state.threadID && len(p.Questions) == 1 && p.Questions[0].ID != "" && !p.Questions[0].IsSecret && len(env.ID) > 0 {
 						if string(client.requestID) != string(env.ID) {
 							client.submitted = false
-							client.remoteAnswered = false
 						}
 						client.requestID = append(json.RawMessage(nil), env.ID...)
 						client.questionID = p.Questions[0].ID
@@ -227,7 +229,6 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 					if json.Unmarshal(env.Params, &p) == nil && p.ThreadID == client.state.threadID {
 						if string(client.requestID) != string(env.ID) {
 							client.submitted = false
-							client.remoteAnswered = false
 						}
 						client.requestID = append(json.RawMessage(nil), env.ID...)
 						client.questionID = ""
