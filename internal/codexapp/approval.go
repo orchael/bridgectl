@@ -23,7 +23,52 @@ type commandApprovalParams struct {
 }
 
 func approvalSummary(p commandApprovalParams) string {
+	if network, ok := parseNetworkContext(p.Network); ok && network != nil {
+		return "Run once with " + network.Protocol + " access to " + network.Host + " in " + p.Cwd + ": " + p.Command
+	}
 	return "Run once in " + p.Cwd + ": " + p.Command
+}
+
+type networkContext struct {
+	Host     string `json:"host"`
+	Protocol string `json:"protocol"`
+}
+
+// parseNetworkContext accepts only Codex's exact managed-network approval
+// shape, {host, protocol}, with a plain host name or IP literal and a known
+// protocol. Anything else (extra fields, odd characters, unknown protocols)
+// stays non-actionable, so the browser can never approve a scope it doesn't
+// display. A missing or null context returns (nil, true).
+func parseNetworkContext(raw json.RawMessage) (*networkContext, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, true
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || len(fields) != 2 || fields["host"] == nil || fields["protocol"] == nil {
+		return nil, false
+	}
+	var n networkContext
+	if json.Unmarshal(raw, &n) != nil || !validNetworkHost(n.Host) {
+		return nil, false
+	}
+	switch n.Protocol {
+	case "http", "https", "socks5Tcp", "socks5Udp":
+		return &n, true
+	}
+	return nil, false
+}
+
+func validNetworkHost(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	for _, r := range host {
+		ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune(".-:[]", r)
+		if !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // informationalSummary names a command approval Bridge cannot answer
@@ -135,10 +180,14 @@ func approvalSupported(env envelope, p commandApprovalParams) bool {
 	if len(summary) > summaryCap || bridge.ValidateResponse(summary) != nil {
 		return false
 	}
-	for _, field := range []json.RawMessage{p.Network, p.Permissions} {
-		if len(field) > 0 && string(field) != "null" {
-			return false
-		}
+	// A managed-network request is actionable only in its exact, displayed
+	// shape (the host and protocol are in the summary). Additional permission
+	// profiles are never actionable remotely.
+	if _, ok := parseNetworkContext(p.Network); !ok {
+		return false
+	}
+	if len(p.Permissions) > 0 && string(p.Permissions) != "null" {
+		return false
 	}
 	if p.AvailableDecisions != nil {
 		accept, cancelled := false, false

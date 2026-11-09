@@ -95,8 +95,16 @@ and the Supervisor required provider acknowledgement, idle and one dispatch.
 
 ## Second slice: structured command approvals
 
-`Supervisor.DecideApproval` borrows the same unowned writer slot as input
-responses and rejects a local writer conflict. The command adapter accepts only
+`Supervisor.DecideApproval` takes the session lock like input responses, but
+since 2026-11 it no longer requires the writer slot to be free. A structured
+decision answers Codex's original approval request rather than writing to the
+PTY, so it is allowed while the person's own terminal is attached. First answer
+wins: whichever of the browser or the attached terminal answers first resolves
+the request. A later local answer to the same RPC is dropped by the relay
+instead of reaching Codex as a second response, and a later remote decision is
+refused with `pending_request_mismatch`. Free-text input responses still
+require the writer slot (`writer_conflict`), because they would compete with
+keystrokes. The command adapter accepts only
 `action: "approve"` with empty text and `decision: "accept" | "cancel"`. These
 mean approve once or reject and stop the turn; persistent grants are unsupported.
 The durable ledger binds the decision along with all existing command identities.
@@ -106,8 +114,15 @@ clear pending state.
 The Codex relay supports only complete, bounded command-execution approval
 previews with a working directory. It validates owning thread, turn, item and
 original JSON-RPC request identity; the public pending ID hashes all four.
-Network-specific approvals, additional permission profiles, file changes and
-legacy schemas remain non-actionable. `availableDecisions`, when provided, must
+Managed-network approvals are actionable only when `networkApprovalContext`
+is exactly `{host, protocol}`, with a plain host name or IP literal and a
+protocol of `http`, `https`, `socks5Tcp` or `socks5Udp`. The approval summary
+then names both (`Run once with https access to github.com in /path: git push`)
+and must fit the 200-byte cap. A context with extra fields or unexpected
+characters stays non-actionable, so the browser never approves a scope it
+doesn't display. `accept` approves once, and proposed network policy amendments
+are never applied. Additional permission profiles, file changes and legacy
+schemas remain non-actionable. `availableDecisions`, when provided, must
 include both `accept` and `cancel`. The exact original RPC receives a structured
 `{decision}` result; no terminal bytes or new turns are created. A local TUI
 response makes remote submission ineligible before it is forwarded, while local
