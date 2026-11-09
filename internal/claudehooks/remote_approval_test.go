@@ -265,3 +265,35 @@ func TestRemoteApprovalRefusesAmbiguousRegistration(t *testing.T) {
 		t.Fatalf("first helper lost its decision: err=%v out=%q", err, first.String())
 	}
 }
+
+// "Approve once": after a decision, the request stays pending until Claude
+// reports the tool result. A second correlated request in that window must not
+// register under the consumed ID, so retrying the decision can't approve it.
+func TestRemoteApprovalIDIsSingleUse(t *testing.T) {
+	o, cancel := remoteObserver(t)
+	defer cancel()
+	var first bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		done <- ReportTo(context.Background(), o.ConfigPath, strings.NewReader(permissionInput("git push")), &first)
+	}()
+	u := nextUpdate(t, o)
+	if err := o.Decide(u.Pending.ID, "accept"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	var second bytes.Buffer
+	ctx, stop := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stop()
+	if err := ReportTo(ctx, o.ConfigPath, strings.NewReader(permissionInput("git push")), &second); err != nil {
+		t.Fatal(err)
+	}
+	if ctx.Err() != nil || second.Len() != 0 {
+		t.Fatalf("second request registered on a consumed ID: out=%q ctx=%v", second.String(), ctx.Err())
+	}
+	if err := o.Decide(u.Pending.ID, "accept"); !errors.Is(err, bridge.ErrPendingRequestMismatch) {
+		t.Fatalf("retried decision approved again: %v", err)
+	}
+}

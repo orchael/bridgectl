@@ -229,11 +229,13 @@ func NewWithOptions(ctx context.Context, executable string, opts Options) (*Obse
 			id := ""
 			// Register only for an event apply accepted: a stale session or
 			// prompt must never take over the current request's waiter.
-			// Identical concurrent calls can correlate to the same request; a
-			// second registration is ambiguous, so it never replaces the
-			// existing waiter and its helper falls back to the local dialog.
-			if p, ok := s.pending[s.keyFor(req.Event)]; emit && ok && p.request.Type == bridge.PendingRequestApproval && s.waiters[p.request.ID] == nil {
+			// Identical concurrent calls can correlate to the same request, and
+			// a decided request stays pending until the tool finishes. Each
+			// pending ID is therefore registered at most once; any later
+			// helper falls back to the local dialog.
+			if p, ok := s.pending[s.keyFor(req.Event)]; emit && ok && p.request.Type == bridge.PendingRequestApproval && !p.registered {
 				id = p.request.ID
+				p.registered = true
 				p.request.Summary = req.Summary
 				s.pending[s.keyFor(req.Event)] = p
 				s.waiters[id] = decision
@@ -460,6 +462,9 @@ func pendingKindForTool(tool string) bridge.PendingRequestKind {
 type pending struct {
 	request bridge.PendingRequest
 	agent   string
+	// registered is set once any hook helper has waited on this request, so
+	// its ID is single-use: a later correlated request can never reuse it.
+	registered bool
 }
 type state struct {
 	session string

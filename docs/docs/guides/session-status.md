@@ -79,8 +79,10 @@ tools, and anything longer, stay terminal-only.
    This is the only case where the helper sends a command to the observer.
 2. Claude Code shows its own dialog at the same time, so the hook never delays
    the local prompt (verified with Claude Code 2.1.319).
-3. Two identical concurrent Bash requests are ambiguous; only the first is
-   remotely answerable and the second uses its local dialog.
+3. Each request can be answered remotely at most once. Two identical
+   concurrent Bash requests, or a repeat arriving before the first finishes,
+   are ambiguous: only the first is remotely answerable, and the others use
+   their local dialog.
 4. **First answer wins.** If you answer in the terminal, Claude Code kills the
    hook, the capability disappears, and a late Bridge decision is refused with
    `pending_request_mismatch`.
