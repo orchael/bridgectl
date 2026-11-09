@@ -9,7 +9,7 @@ export default function DirectorVideo({id, revision}: {id: string; revision: str
   const [error, setError] = useState(false);
 
   useEffect(() => {
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(id) || !/^[a-f0-9]{40}$/.test(revision)) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(id) || !(revision === "latest" || /^[a-f0-9]{40}$/.test(revision))) {
       setError(true);
       return;
     }
