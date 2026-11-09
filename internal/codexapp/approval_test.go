@@ -156,11 +156,17 @@ func TestApprovalSummaryAlwaysNamesTheCommand(t *testing.T) {
 		wantText   string
 	}{
 		"actionable":  {func(p *commandApprovalParams) {}, "Run once in /Users/mark/src/bilge-pump: ", "git push origin feat/cache-cleaner-meta-tool"},
-		"network":     {func(p *commandApprovalParams) { p.Network = json.RawMessage(`{"host":"github.com"}`) }, "Needs network access · in /Users/mark/src/bilge-pump: ", "git push origin feat/cache-cleaner-meta-tool"},
-		"permissions": {func(p *commandApprovalParams) { p.Permissions = json.RawMessage(`{"network":{"enabled":true}}`) }, "Needs extra permissions · in /Users/mark/src/bilge-pump: ", "git push origin"},
-		"restricted":  {func(p *commandApprovalParams) { p.AvailableDecisions = []json.RawMessage{json.RawMessage(`"cancel"`)} }, "Approve in Codex · in /Users/mark/src/bilge-pump: ", "git push origin"},
-		"long":        {func(p *commandApprovalParams) { p.Command = "echo " + long }, "Approve in Codex · in /Users/mark/src/bilge-pump: echo xxx", "…"},
-		"multiline":   {func(p *commandApprovalParams) { p.Command = "git add .\ngit push\x1b[31m" }, "Approve in Codex · in /Users/mark/src/bilge-pump: ", "git add . git push"},
+		"network":     {func(p *commandApprovalParams) { p.Network = json.RawMessage(`{"host":"github.com"}`) }, "Needs network access: git push origin feat/cache-cleaner-meta-tool", " · in /Users/mark/src/bilge-pump"},
+		"permissions": {func(p *commandApprovalParams) { p.Permissions = json.RawMessage(`{"network":{"enabled":true}}`) }, "Needs extra permissions: git push origin", " · in /Users/mark/src/bilge-pump"},
+		"restricted":  {func(p *commandApprovalParams) { p.AvailableDecisions = []json.RawMessage{json.RawMessage(`"cancel"`)} }, "Approve in Codex: git push origin", " · in /Users/mark/src/bilge-pump"},
+		"long":        {func(p *commandApprovalParams) { p.Command = "echo " + long }, "Approve in Codex: echo xxx", "…"},
+		"multiline":   {func(p *commandApprovalParams) { p.Command = "git add .\ngit push\x1b[31m" }, "Approve in Codex: git add . git push", ""},
+		// The command must survive a working directory longer than the whole cap;
+		// the directory is shortened from the left instead.
+		"long cwd": {func(p *commandApprovalParams) {
+			p.Network = json.RawMessage(`{"host":"github.com"}`)
+			p.Cwd = "/" + strings.Repeat("deep/", 60) + "bilge-pump"
+		}, "Needs network access: git push origin feat/cache-cleaner-meta-tool · in …", "bilge-pump"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := base

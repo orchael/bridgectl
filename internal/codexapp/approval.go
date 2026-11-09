@@ -29,7 +29,9 @@ func approvalSummary(p commandApprovalParams) string {
 // informationalSummary names a command approval Bridge cannot answer
 // remotely, so the person knows what they are attaching to approve. It never
 // uses the actionable "Run once in" wording, flattens control characters, and
-// is truncated on a rune boundary to fit summaryCap (Bridge's column limit).
+// fits summaryCap (Bridge's column limit). The command comes first so it
+// survives truncation; the working directory gets whatever space is left and
+// is shortened from the left, keeping the most specific path segments.
 func informationalSummary(p commandApprovalParams) string {
 	reason := "Approve in Codex"
 	switch {
@@ -38,11 +40,25 @@ func informationalSummary(p commandApprovalParams) string {
 	case len(p.Permissions) > 0 && string(p.Permissions) != "null":
 		reason = "Needs extra permissions"
 	}
-	prefix := reason + " · "
-	if cwd := displayText(p.Cwd); cwd != "" {
-		prefix += "in " + cwd + ": "
+	head := capRunes(reason+": "+displayText(p.Command), summaryCap)
+	cwd := displayText(p.Cwd)
+	const sep = " · in "
+	if cwd == "" || strings.HasSuffix(head, "…") {
+		return head
 	}
-	return capRunes(prefix+displayText(p.Command), summaryCap)
+	room := summaryCap - len(head) - len(sep)
+	if room >= len(cwd) {
+		return head + sep + cwd
+	}
+	const ellipsis = "…"
+	if room <= len(ellipsis)+1 {
+		return head
+	}
+	start := len(cwd) - (room - len(ellipsis))
+	for start < len(cwd) && !utf8.RuneStart(cwd[start]) {
+		start++
+	}
+	return head + sep + ellipsis + cwd[start:]
 }
 
 // displayText collapses whitespace (including newlines) to single spaces and
