@@ -53,6 +53,7 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 		defer func() {
 			client.mu.Lock()
 			defer client.mu.Unlock()
+			delete(client.answered, conn)
 			if client.conn != conn {
 				return
 			}
@@ -97,13 +98,12 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 				}
 				client.mu.Lock()
 				drop := false
-				if client.conn == conn && request.Method == "" && len(request.ID) > 0 {
-					// First answer wins: Bridge already answered this request,
-					// whether or not it is still the current pending one.
-					if client.answeredConn == conn {
-						_, drop = client.remoteAnswered[string(request.ID)]
-					}
-					if string(request.ID) == string(client.requestID) {
+				if request.Method == "" && len(request.ID) > 0 {
+					// First answer wins: Bridge already answered this request on
+					// this relay, whether or not it is still the current pending
+					// one and whether or not this relay still owns the session.
+					_, drop = client.answered[conn][string(request.ID)]
+					if client.conn == conn && string(request.ID) == string(client.requestID) {
 						client.submitted = true
 					}
 				}

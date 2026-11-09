@@ -43,14 +43,14 @@ type ResponseClient struct {
 	questionID         string
 	approval           bool
 	submitted          bool
-	// remoteAnswered records the RPC ids Bridge (not the attached TUI)
-	// answered on answeredConn, so a delayed TUI answer to any of them is
+	// answered records, per live relay connection, the RPC ids Bridge (not
+	// the attached TUI) answered, so a delayed TUI answer to any of them is
 	// dropped instead of reaching Codex as a second response, even after the
-	// request was resolved or replaced. Reset when the connection changes.
-	remoteAnswered map[string]struct{}
-	answeredConn   *websocket.Conn
-	closed         bool
-	Updates        <-chan bridge.Interaction
+	// request was resolved or replaced, or ownership moved to another relay.
+	// An entry is removed only when that relay connection closes.
+	answered map[*websocket.Conn]map[string]struct{}
+	closed   bool
+	Updates  <-chan bridge.Interaction
 }
 
 func (c *ResponseClient) Respond(ctx context.Context, pendingID, text string) error {
@@ -61,19 +61,35 @@ func (c *ResponseClient) Respond(ctx context.Context, pendingID, text string) er
 	}
 	// Burn the request before I/O: an ambiguous network failure is not safe
 	// to retry. Provider evidence, never this write, clears attention.
+	if !c.markRemoteAnswered() {
+		return bridge.ErrPendingRequestMismatch
+	}
 	c.submitted = true
-	c.markRemoteAnswered()
 	b := mustJSON(envelope{JSONRPC: "2.0", ID: c.requestID, Result: mustJSON(map[string]any{"answers": map[string]any{c.questionID: map[string]any{"answers": []string{text}}}})})
 	return c.conn.Write(ctx, websocket.MessageText, b)
 }
 
-// markRemoteAnswered must be called with c.mu held, before the answer is written.
-func (c *ResponseClient) markRemoteAnswered() {
-	if c.answeredConn != c.conn || c.remoteAnswered == nil || len(c.remoteAnswered) >= 1024 {
-		c.remoteAnswered = map[string]struct{}{}
-		c.answeredConn = c.conn
+// remoteAnswerCap bounds remembered answers per relay connection. At the cap
+// further remote decisions are refused rather than forgetting history.
+const remoteAnswerCap = 1024
+
+// markRemoteAnswered records the current request as answered remotely. It must
+// be called with c.mu held, before the answer is written; false means the
+// connection's history is full and the remote answer must not be sent.
+func (c *ResponseClient) markRemoteAnswered() bool {
+	if c.answered == nil {
+		c.answered = map[*websocket.Conn]map[string]struct{}{}
 	}
-	c.remoteAnswered[string(c.requestID)] = struct{}{}
+	set := c.answered[c.conn]
+	if set == nil {
+		set = map[string]struct{}{}
+		c.answered[c.conn] = set
+	}
+	if len(set) >= remoteAnswerCap {
+		return false
+	}
+	set[string(c.requestID)] = struct{}{}
+	return true
 }
 
 // Decide answers only an explicitly supported command approval, once.
@@ -86,8 +102,10 @@ func (c *ResponseClient) Decide(ctx context.Context, pendingID, decision string)
 	if c.closed || !c.approval || c.state.pending == nil || c.state.pending.ID != pendingID || c.submitted || len(c.requestID) == 0 {
 		return bridge.ErrPendingRequestMismatch
 	}
+	if !c.markRemoteAnswered() {
+		return bridge.ErrPendingRequestMismatch
+	}
 	c.submitted = true
-	c.markRemoteAnswered()
 	return c.conn.Write(ctx, websocket.MessageText, mustJSON(envelope{JSONRPC: "2.0", ID: c.requestID, Result: mustJSON(map[string]string{"decision": decision})}))
 }
 

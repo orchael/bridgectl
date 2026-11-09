@@ -3,6 +3,7 @@ package codexapp
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -221,4 +222,70 @@ func TestApprovalSummaryAlwaysNamesTheCommand(t *testing.T) {
 	if other == nil || other.Summary != "Approval required in Codex" {
 		t.Fatalf("file change summary: %+v", other)
 	}
+}
+
+// Bosun review: remote-answer memory must survive ownership moving to another
+// relay connection (the old TUI's late answer is still dropped), and at the
+// storage cap new remote decisions are refused instead of forgetting history.
+func TestRemoteAnswerMemory(t *testing.T) {
+	t.Run("ownership transfer", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		server := newFakeAppServer(t)
+		endpoint, client, err := Proxy(ctx, server.wsURL())
+		if err != nil {
+			t.Fatal(err)
+		}
+		own := func(rpc string) (*websocket.Conn, *websocket.Conn) {
+			tui, _, err := websocket.Dial(ctx, endpoint, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			upstream := server.acceptConn(t)
+			serverSend(t, tui, envelope{ID: json.RawMessage(rpc), Method: "thread/start"})
+			serverReadEnvelope(t, upstream)
+			serverSend(t, upstream, envelope{ID: json.RawMessage(rpc), Result: mustJSON(map[string]any{"thread": map[string]any{"id": "owner", "status": map[string]any{"type": "idle"}}})})
+			serverReadEnvelope(t, tui)
+			<-client.Updates
+			return tui, upstream
+		}
+		tui1, up1 := own(`1`)
+		defer func() { _ = tui1.CloseNow(); _ = up1.CloseNow() }()
+		forward := func(env envelope) { t.Helper(); serverSend(t, up1, env); serverReadEnvelope(t, tui1) }
+		forward(notif(methodThreadStatusChanged, map[string]any{"threadId": "owner", "status": map[string]any{"type": "active", "activeFlags": []string{"waitingOnApproval"}}}))
+		<-client.Updates
+		forward(envelope{ID: json.RawMessage(`42`), Method: methodItemCommandExecApproval, Params: mustJSON(map[string]any{"threadId": "owner", "turnId": "turn", "itemId": "item", "command": "printf BLUE", "cwd": "/tmp"})})
+		update := <-client.Updates
+		if err := client.Decide(ctx, update.Pending.ID, "accept"); err != nil {
+			t.Fatal(err)
+		}
+		serverReadEnvelope(t, up1)
+		tui2, up2 := own(`2`) // ownership moves to a new relay connection
+		defer func() { _ = tui2.CloseNow(); _ = up2.CloseNow() }()
+		serverSend(t, tui1, envelope{ID: json.RawMessage(`42`), Result: mustJSON(map[string]string{"decision": "cancel"})})
+		quiet, stop := context.WithTimeout(ctx, 300*time.Millisecond)
+		_, late, err := up1.Read(quiet)
+		stop()
+		if err == nil {
+			t.Fatalf("old connection's late answer forwarded after ownership moved: %s", late)
+		}
+	})
+	t.Run("capacity", func(t *testing.T) {
+		c := &ResponseClient{}
+		conn := &websocket.Conn{}
+		c.conn = conn
+		for i := 0; i < remoteAnswerCap; i++ {
+			c.requestID = json.RawMessage(strconv.Itoa(i))
+			if !c.markRemoteAnswered() {
+				t.Fatalf("refused below the cap at %d", i)
+			}
+		}
+		c.requestID = json.RawMessage(`99999`)
+		if c.markRemoteAnswered() {
+			t.Fatal("accepted beyond the cap")
+		}
+		if _, kept := c.answered[conn]["0"]; !kept {
+			t.Fatal("history discarded at the cap")
+		}
+	})
 }
