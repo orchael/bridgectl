@@ -15,8 +15,9 @@ spec:
           serviceAccountName: bridgectl-monitor
           restartPolicy: Never
           securityContext:
-            runAsUser: 1000
-            runAsGroup: 1000
+            runAsUser: 1001
+            runAsGroup: 1001
+            fsGroup: 1001
           containers:
             - name: monitor
               image: YOUR_REGISTRY/bridgectl-monitor:PINNED_TAG

@@ -34,6 +34,7 @@ deployments. The runner's workspace is an ephemeral `emptyDir` because this
 check does not inspect a repository. Mount it under `/home/bridge` because
 bridgectl restricts sessions to the agent's home by default. The agent process shares the pod's
 service account token, so keep the RBAC read-only and use a trusted provider.
+The pinned runtime image's `bridge` user is UID/GID 1001.
 
 ## Behavior
 
