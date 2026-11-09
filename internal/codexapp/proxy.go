@@ -53,6 +53,7 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 		defer func() {
 			client.mu.Lock()
 			defer client.mu.Unlock()
+			delete(client.answered, conn)
 			if client.conn != conn {
 				return
 			}
@@ -96,10 +97,21 @@ func Proxy(ctx context.Context, upstream string) (string, *ResponseClient, error
 					client.mu.Unlock()
 				}
 				client.mu.Lock()
-				if client.conn == conn && request.Method == "" && len(request.ID) > 0 && string(request.ID) == string(client.requestID) {
-					client.submitted = true
+				drop := false
+				if request.Method == "" && len(request.ID) > 0 {
+					// First answer wins: Bridge already answered this request on
+					// this relay, whether or not it is still the current pending
+					// one and whether or not this relay still owns the session.
+					_, drop = client.answered[conn][string(request.ID)]
+					if client.conn == conn && string(request.ID) == string(client.requestID) {
+						client.submitted = true
+					}
 				}
 				client.mu.Unlock()
+				if drop {
+					slog.Debug("codexapp dropped local answer after remote decision", "rpc_id", string(request.ID))
+					continue
+				}
 				err = conn.Write(relayCtx, typ, b)
 				if err != nil {
 					if relayCtx.Err() == nil {

@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/orchael/bridgectl/internal/bridge"
 )
@@ -21,8 +23,125 @@ type commandApprovalParams struct {
 }
 
 func approvalSummary(p commandApprovalParams) string {
+	if network, ok := parseNetworkContext(p.Network); ok && network != nil {
+		return "Run once with " + network.Protocol + " access to " + network.Host + " in " + p.Cwd + ": " + p.Command
+	}
 	return "Run once in " + p.Cwd + ": " + p.Command
 }
+
+type networkContext struct {
+	Host     string `json:"host"`
+	Protocol string `json:"protocol"`
+}
+
+// parseNetworkContext accepts only Codex's exact managed-network approval
+// shape, {host, protocol}, with a plain host name or IP literal and a known
+// protocol. Anything else (extra fields, odd characters, unknown protocols)
+// stays non-actionable, so the browser can never approve a scope it doesn't
+// display. A missing or null context returns (nil, true).
+func parseNetworkContext(raw json.RawMessage) (*networkContext, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, true
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || len(fields) != 2 || fields["host"] == nil || fields["protocol"] == nil {
+		return nil, false
+	}
+	var n networkContext
+	if json.Unmarshal(raw, &n) != nil || !validNetworkHost(n.Host) {
+		return nil, false
+	}
+	switch n.Protocol {
+	case "http", "https", "socks5Tcp", "socks5Udp":
+		return &n, true
+	}
+	return nil, false
+}
+
+func validNetworkHost(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	for _, r := range host {
+		ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune(".-:[]", r)
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// informationalSummary names a command approval Bridge cannot answer
+// remotely, so the person knows what they are attaching to approve. It never
+// uses the actionable "Run once in" wording, flattens control characters, and
+// fits summaryCap (Bridge's column limit). The command comes first so it
+// survives truncation; the working directory gets whatever space is left and
+// is shortened from the left, keeping the most specific path segments.
+func informationalSummary(p commandApprovalParams) string {
+	reason := "Approve in Codex"
+	switch {
+	case len(p.Network) > 0 && string(p.Network) != "null":
+		reason = "Needs network access"
+	case len(p.Permissions) > 0 && string(p.Permissions) != "null":
+		reason = "Needs extra permissions"
+	}
+	head := capRunes(reason+": "+displayText(p.Command), summaryCap)
+	cwd := displayText(p.Cwd)
+	const sep = " · in "
+	if cwd == "" || strings.HasSuffix(head, "…") {
+		return head
+	}
+	room := summaryCap - len(head) - len(sep)
+	if room >= len(cwd) {
+		return head + sep + cwd
+	}
+	const ellipsis = "…"
+	if room <= len(ellipsis)+1 {
+		return head
+	}
+	start := len(cwd) - (room - len(ellipsis))
+	for start < len(cwd) && !utf8.RuneStart(cwd[start]) {
+		start++
+	}
+	return head + sep + ellipsis + cwd[start:]
+}
+
+// displayText collapses whitespace (including newlines) to single spaces and
+// drops every other control character, so terminal escapes never reach a summary.
+func displayText(s string) string {
+	var b strings.Builder
+	space := false
+	for _, r := range s {
+		switch {
+		case unicode.IsSpace(r):
+			space = b.Len() > 0
+			continue
+		case unicode.IsControl(r) || r == utf8.RuneError:
+			continue
+		}
+		if space {
+			b.WriteByte(' ')
+			space = false
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// capRunes truncates to at most limit bytes on a rune boundary, ending with
+// an ellipsis when anything was cut.
+func capRunes(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	const ellipsis = "…"
+	cut := limit - len(ellipsis)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + ellipsis
+}
+
 func approvalPending(env envelope, p commandApprovalParams) *bridge.PendingRequest {
 	if len(env.ID) == 0 || p.ItemID == "" || p.TurnID == "" {
 		return nil
@@ -33,6 +152,8 @@ func approvalPending(env envelope, p commandApprovalParams) *bridge.PendingReque
 	summary := "Approval required in Codex"
 	if approvalSupported(env, p) {
 		summary = approvalSummary(p)
+	} else if env.Method == methodItemCommandExecApproval && strings.TrimSpace(p.Command) != "" {
+		summary = informationalSummary(p)
 	}
 	return &bridge.PendingRequest{ID: "approval:" + hex.EncodeToString(sum[:]), Type: bridge.PendingRequestApproval, Summary: summary, Kind: approvalKind(env.Method)}
 }
@@ -59,10 +180,14 @@ func approvalSupported(env envelope, p commandApprovalParams) bool {
 	if len(summary) > summaryCap || bridge.ValidateResponse(summary) != nil {
 		return false
 	}
-	for _, field := range []json.RawMessage{p.Network, p.Permissions} {
-		if len(field) > 0 && string(field) != "null" {
-			return false
-		}
+	// A managed-network request is actionable only in its exact, displayed
+	// shape (the host and protocol are in the summary). Additional permission
+	// profiles are never actionable remotely.
+	if _, ok := parseNetworkContext(p.Network); !ok {
+		return false
+	}
+	if len(p.Permissions) > 0 && string(p.Permissions) != "null" {
+		return false
 	}
 	if p.AvailableDecisions != nil {
 		accept, cancelled := false, false

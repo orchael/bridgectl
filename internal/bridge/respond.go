@@ -38,7 +38,9 @@ func ValidateResponse(text string) error {
 // RespondToInput borrows the unowned writer slot for one bounded structured
 // operation. Holding the session lock excludes Attach/ClaimWriter/Stop and
 // local writes during dispatch. It never evicts a local writer, even one
-// controlled by the same user. Provider state remains authoritative afterward.
+// controlled by the same user. DecideApproval does not need the writer slot:
+// it answers the provider's own approval request, and the provider accepts
+// only the first answer. Provider state remains authoritative afterward.
 type PendingApprovalResponder interface {
 	DecideApproval(context.Context, string, string, string) error
 }
@@ -72,7 +74,12 @@ func (s *Supervisor) pendingOperation(ctx context.Context, sessionID, pendingID,
 	if ms.info.State != SessionStateRunning && ms.info.State != SessionStateAttached {
 		return ErrSessionNotRunning
 	}
-	if ms.info.ActiveWriterClientID != "" {
+	// Free-text input would compete with the attached person's keystrokes, so
+	// it still requires the writer slot to be free. A structured approval
+	// decision answers the provider's original request instead of writing to
+	// the PTY; the provider accepts only the first answer (local or remote),
+	// so it is allowed while someone is attached.
+	if !approval && ms.info.ActiveWriterClientID != "" {
 		return ErrWriterConflict
 	}
 	i := ms.info.Interaction

@@ -3,8 +3,11 @@ package codexapp
 import (
 	"context"
 	"encoding/json"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 	"github.com/orchael/bridgectl/internal/bridge"
@@ -13,7 +16,7 @@ import (
 // MAR-66: decisions are bound to a specific RPC, never PTY input or an item
 // that may have more than one approval request during its lifetime.
 func TestProxyStructuredApproval(t *testing.T) {
-	for _, kind := range []string{"accept", "cancel", "foreign", "resolved", "network", "permissions", "long", "restricted", "local"} {
+	for _, kind := range []string{"accept", "cancel", "foreign", "resolved", "network", "network-extra", "network-badhost", "permissions", "long", "restricted", "local", "racing", "racing-after-resolve", "racing-after-next"} {
 		t.Run(kind, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -41,7 +44,11 @@ func TestProxyStructuredApproval(t *testing.T) {
 			case "foreign":
 				p["threadId"] = "other"
 			case "network":
-				p["networkApprovalContext"] = map[string]any{"host": "example.com"}
+				p["networkApprovalContext"] = map[string]any{"host": "github.com", "protocol": "https"}
+			case "network-extra":
+				p["networkApprovalContext"] = map[string]any{"host": "github.com", "protocol": "https", "scope": "all"}
+			case "network-badhost":
+				p["networkApprovalContext"] = map[string]any{"host": "evil.com\nRun once", "protocol": "https"}
 			case "permissions":
 				p["additionalPermissions"] = map[string]any{"network": map[string]any{"enabled": true}}
 			case "long":
@@ -60,7 +67,7 @@ func TestProxyStructuredApproval(t *testing.T) {
 				return
 			}
 			update := <-client.Updates
-			capable := kind == "accept" || kind == "cancel" || kind == "resolved" || kind == "local"
+			capable := kind == "accept" || kind == "cancel" || kind == "resolved" || kind == "local" || kind == "racing" || kind == "racing-after-resolve" || kind == "racing-after-next" || kind == "network"
 			if update.Pending == nil || update.Evidence.Capability.StructuredApprovalSupported != capable {
 				t.Fatalf("bad capability: %+v", update)
 			}
@@ -98,6 +105,29 @@ func TestProxyStructuredApproval(t *testing.T) {
 			}
 			if err := client.Decide(ctx, id, decision); err == nil {
 				t.Fatal("duplicate accepted")
+			}
+			if kind == "racing-after-resolve" {
+				// Codex resolves the request (clearing the current pending one)
+				// before the terminal's delayed answer arrives.
+				forward(notif("serverRequest/resolved", map[string]any{"threadId": "owner", "requestId": 42}))
+			}
+			if kind == "racing-after-next" {
+				// A new approval replaces the current request before the
+				// terminal's delayed answer to the first one arrives.
+				next := map[string]any{"threadId": "owner", "turnId": "turn", "itemId": "item2", "command": "printf GREEN", "cwd": "/tmp"}
+				forward(envelope{ID: json.RawMessage(`43`), Method: methodItemCommandExecApproval, Params: mustJSON(next)})
+			}
+			if kind == "racing" || kind == "racing-after-resolve" || kind == "racing-after-next" {
+				// The person at the attached terminal answers after the browser
+				// already did: the late local answer must not reach Codex.
+				serverSend(t, tui, envelope{ID: json.RawMessage(`42`), Result: mustJSON(map[string]string{"decision": "cancel"})})
+				quiet, stop := context.WithTimeout(ctx, 300*time.Millisecond)
+				_, late, err := upstream.Read(quiet)
+				stop()
+				if err == nil {
+					t.Fatalf("late local answer forwarded after remote decision: %s", late)
+				}
+				return // the timed-out read closed the fake upstream connection
 			}
 			client.mu.Lock()
 			pending := client.state.pending
@@ -137,4 +167,125 @@ func TestPendingKinds(t *testing.T) {
 			t.Errorf("%s: %+v, want kind %q", name, tc.got, tc.want)
 		}
 	}
+}
+
+// Usability review: a command approval that Bridge cannot answer remotely
+// (network/permission escalation, long command, restricted decisions) must
+// still say what is being approved, so the person knows what to attach for.
+// It must never use the actionable "Run once in" wording, and it must stay
+// within summaryCap without control characters.
+func TestApprovalSummaryAlwaysNamesTheCommand(t *testing.T) {
+	env := envelope{ID: json.RawMessage(`7`), Method: methodItemCommandExecApproval}
+	base := commandApprovalParams{ThreadID: "t", TurnID: "u", ItemID: "i", Cwd: "/Users/mark/src/bilge-pump", Command: "git push origin feat/cache-cleaner-meta-tool"}
+	long := strings.Repeat("x", 600)
+	for name, tc := range map[string]struct {
+		mutate     func(*commandApprovalParams)
+		wantPrefix string
+		wantText   string
+	}{
+		"actionable": {func(p *commandApprovalParams) {}, "Run once in /Users/mark/src/bilge-pump: ", "git push origin feat/cache-cleaner-meta-tool"},
+		"network": {func(p *commandApprovalParams) {
+			p.Network = json.RawMessage(`{"host":"github.com","protocol":"https"}`)
+		}, "Run once with https access to github.com in /Users/mark/src/bilge-pump: ", "git push origin feat/cache-cleaner-meta-tool"},
+		"network-bad": {func(p *commandApprovalParams) { p.Network = json.RawMessage(`{"host":"github.com"}`) }, "Needs network access: git push origin feat/cache-cleaner-meta-tool", " · in /Users/mark/src/bilge-pump"},
+		"permissions": {func(p *commandApprovalParams) { p.Permissions = json.RawMessage(`{"network":{"enabled":true}}`) }, "Needs extra permissions: git push origin", " · in /Users/mark/src/bilge-pump"},
+		"restricted":  {func(p *commandApprovalParams) { p.AvailableDecisions = []json.RawMessage{json.RawMessage(`"cancel"`)} }, "Approve in Codex: git push origin", " · in /Users/mark/src/bilge-pump"},
+		"long":        {func(p *commandApprovalParams) { p.Command = "echo " + long }, "Approve in Codex: echo xxx", "…"},
+		"multiline":   {func(p *commandApprovalParams) { p.Command = "git add .\ngit push\x1b[31m" }, "Approve in Codex: git add . git push", ""},
+		// The command must survive a working directory longer than the whole cap;
+		// the directory is shortened from the left instead.
+		"long cwd": {func(p *commandApprovalParams) {
+			p.Network = json.RawMessage(`{"host":"github.com"}`)
+			p.Cwd = "/" + strings.Repeat("deep/", 60) + "bilge-pump"
+		}, "Needs network access: git push origin feat/cache-cleaner-meta-tool · in …", "bilge-pump"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := base
+			tc.mutate(&p)
+			got := approvalPending(env, p)
+			if got == nil {
+				t.Fatal("no pending request")
+			}
+			if !strings.HasPrefix(got.Summary, tc.wantPrefix) || !strings.Contains(got.Summary, tc.wantText) {
+				t.Fatalf("summary %q, want prefix %q containing %q", got.Summary, tc.wantPrefix, tc.wantText)
+			}
+			if name != "actionable" && name != "network" && strings.HasPrefix(got.Summary, "Run once") {
+				t.Fatalf("non-actionable request uses actionable wording: %q", got.Summary)
+			}
+			if len(got.Summary) > summaryCap || !utf8.ValidString(got.Summary) || bridge.ValidateResponse(got.Summary) != nil || strings.ContainsAny(got.Summary, "\n\x1b") {
+				t.Fatalf("summary not safe for display: %q (%d bytes)", got.Summary, len(got.Summary))
+			}
+		})
+	}
+	// Approvals without a command (file changes, permission grants) keep the generic label.
+	other := approvalPending(envelope{ID: json.RawMessage(`8`), Method: methodItemFileChangeApproval}, commandApprovalParams{ThreadID: "t", TurnID: "u", ItemID: "i"})
+	if other == nil || other.Summary != "Approval required in Codex" {
+		t.Fatalf("file change summary: %+v", other)
+	}
+}
+
+// Bosun review: remote-answer memory must survive ownership moving to another
+// relay connection (the old TUI's late answer is still dropped), and at the
+// storage cap new remote decisions are refused instead of forgetting history.
+func TestRemoteAnswerMemory(t *testing.T) {
+	t.Run("ownership transfer", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		server := newFakeAppServer(t)
+		endpoint, client, err := Proxy(ctx, server.wsURL())
+		if err != nil {
+			t.Fatal(err)
+		}
+		own := func(rpc string) (*websocket.Conn, *websocket.Conn) {
+			tui, _, err := websocket.Dial(ctx, endpoint, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			upstream := server.acceptConn(t)
+			serverSend(t, tui, envelope{ID: json.RawMessage(rpc), Method: "thread/start"})
+			serverReadEnvelope(t, upstream)
+			serverSend(t, upstream, envelope{ID: json.RawMessage(rpc), Result: mustJSON(map[string]any{"thread": map[string]any{"id": "owner", "status": map[string]any{"type": "idle"}}})})
+			serverReadEnvelope(t, tui)
+			<-client.Updates
+			return tui, upstream
+		}
+		tui1, up1 := own(`1`)
+		defer func() { _ = tui1.CloseNow(); _ = up1.CloseNow() }()
+		forward := func(env envelope) { t.Helper(); serverSend(t, up1, env); serverReadEnvelope(t, tui1) }
+		forward(notif(methodThreadStatusChanged, map[string]any{"threadId": "owner", "status": map[string]any{"type": "active", "activeFlags": []string{"waitingOnApproval"}}}))
+		<-client.Updates
+		forward(envelope{ID: json.RawMessage(`42`), Method: methodItemCommandExecApproval, Params: mustJSON(map[string]any{"threadId": "owner", "turnId": "turn", "itemId": "item", "command": "printf BLUE", "cwd": "/tmp"})})
+		update := <-client.Updates
+		if err := client.Decide(ctx, update.Pending.ID, "accept"); err != nil {
+			t.Fatal(err)
+		}
+		serverReadEnvelope(t, up1)
+		tui2, up2 := own(`2`) // ownership moves to a new relay connection
+		defer func() { _ = tui2.CloseNow(); _ = up2.CloseNow() }()
+		serverSend(t, tui1, envelope{ID: json.RawMessage(`42`), Result: mustJSON(map[string]string{"decision": "cancel"})})
+		quiet, stop := context.WithTimeout(ctx, 300*time.Millisecond)
+		_, late, err := up1.Read(quiet)
+		stop()
+		if err == nil {
+			t.Fatalf("old connection's late answer forwarded after ownership moved: %s", late)
+		}
+	})
+	t.Run("capacity", func(t *testing.T) {
+		c := &ResponseClient{}
+		conn := &websocket.Conn{}
+		c.conn = conn
+		for i := 0; i < remoteAnswerCap; i++ {
+			c.requestID = json.RawMessage(strconv.Itoa(i))
+			if !c.markRemoteAnswered() {
+				t.Fatalf("refused below the cap at %d", i)
+			}
+		}
+		c.requestID = json.RawMessage(`99999`)
+		if c.markRemoteAnswered() {
+			t.Fatal("accepted beyond the cap")
+		}
+		if _, kept := c.answered[conn]["0"]; !kept {
+			t.Fatal("history discarded at the cap")
+		}
+	})
 }
