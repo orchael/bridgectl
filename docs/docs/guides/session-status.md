@@ -71,7 +71,7 @@ remote response and structured approval capabilities stay false.
 
 Set `BRIDGECTL_CLAUDE_REMOTE_APPROVAL=1` in the daemon's environment, then start
 new Claude sessions. Only Bash permission requests are eligible, and only when
-`Run once in <cwd>: <command>` fits 200 bytes with no control characters. Other
+`Run once in <cwd>: <command>` fits 200 bytes with no control characters (including newlines and tabs). Other
 tools, and anything longer, stay terminal-only.
 
 1. The `PermissionRequest` hook (timeout 300 s) asks the local observer to wait.

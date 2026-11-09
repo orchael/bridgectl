@@ -22,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/orchael/bridgectl/internal/bridge"
@@ -225,7 +227,9 @@ func NewWithOptions(ctx context.Context, executable string, opts Options) (*Obse
 			mu.Lock()
 			next, emit := s.apply(req.Event)
 			id := ""
-			if p, ok := s.pending[s.keyFor(req.Event)]; ok && p.request.Type == bridge.PendingRequestApproval {
+			// Register only for an event apply accepted: a stale session or
+			// prompt must never take over the current request's waiter.
+			if p, ok := s.pending[s.keyFor(req.Event)]; emit && ok && p.request.Type == bridge.PendingRequestApproval {
 				id = p.request.ID
 				p.request.Summary = req.Summary
 				s.pending[s.keyFor(req.Event)] = p
@@ -620,8 +624,19 @@ func remoteSummary(cwd, command string) (string, bool) {
 	return summary, validRemoteSummary(summary)
 }
 
+// validRemoteSummary admits no control characters at all (not even the
+// newline and tab bridge.ValidateResponse allows): a multi-line command could
+// hide what is really being approved.
 func validRemoteSummary(summary string) bool {
-	return summary != "" && len(summary) <= remoteSummaryCap && bridge.ValidateResponse(summary) == nil
+	if summary == "" || len(summary) > remoteSummaryCap || !utf8.ValidString(summary) {
+		return false
+	}
+	for _, r := range summary {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // remoteSummaryCap matches Bridge's pending_request_summary column limit.

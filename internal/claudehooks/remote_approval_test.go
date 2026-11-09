@@ -155,11 +155,15 @@ func TestRemoteApprovalLocalAnswerWins(t *testing.T) {
 
 func TestRemoteApprovalNotActionable(t *testing.T) {
 	for name, input := range map[string]string{
-		"long":       permissionInput(strings.Repeat("x", 300)),
-		"control":    permissionInput("echo \x1b[31m"),
-		"not bash":   `{"session_id":"s","hook_event_name":"PermissionRequest","tool_name":"Write","cwd":"/repo","tool_input":{"file_path":"/repo/a"}}`,
-		"no cwd":     `{"session_id":"s","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}`,
-		"no command": `{"session_id":"s","hook_event_name":"PermissionRequest","tool_name":"Bash","cwd":"/repo","tool_input":{}}`,
+		"long":        permissionInput(strings.Repeat("x", 300)),
+		"control":     permissionInput("echo \x1b[31m"),
+		"newline":     permissionInput("git add .\ngit push"),
+		"tab":         permissionInput("echo\tpush"),
+		"cwd newline": `{"session_id":"s","hook_event_name":"PermissionRequest","tool_name":"Bash","cwd":"/repo\nRun once in /x","tool_input":{"command":"ls"}}`,
+		"cwd tab":     `{"session_id":"s","hook_event_name":"PermissionRequest","tool_name":"Bash","cwd":"/re\tpo","tool_input":{"command":"ls"}}`,
+		"not bash":    `{"session_id":"s","hook_event_name":"PermissionRequest","tool_name":"Write","cwd":"/repo","tool_input":{"file_path":"/repo/a"}}`,
+		"no cwd":      `{"session_id":"s","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}`,
+		"no command":  `{"session_id":"s","hook_event_name":"PermissionRequest","tool_name":"Bash","cwd":"/repo","tool_input":{}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			o, cancel := remoteObserver(t)
@@ -199,5 +203,35 @@ func TestRemoteApprovalOffByDefault(t *testing.T) {
 	}
 	if err := o.Decide(u.Pending.ID, "accept"); !errors.Is(err, bridge.ErrPendingRequestMismatch) {
 		t.Fatalf("default mode accepted a decision: %v", err)
+	}
+}
+
+// A stale event (another Claude session, or an older prompt) that apply
+// rejects must not register a waiter, so it can never take over the current
+// request's remote decision channel.
+func TestRemoteApprovalIgnoresStaleEvents(t *testing.T) {
+	o, cancel := remoteObserver(t)
+	defer cancel()
+	var current bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		done <- ReportTo(context.Background(), o.ConfigPath, strings.NewReader(permissionInput("git push")), &current)
+	}()
+	u := nextUpdate(t, o)
+	stale := strings.Replace(permissionInput("git push"), `"session_id":"s"`, `"session_id":"other"`, 1)
+	var staleOut bytes.Buffer
+	ctx, stop := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stop()
+	if err := ReportTo(ctx, o.ConfigPath, strings.NewReader(stale), &staleOut); err != nil {
+		t.Fatal(err)
+	}
+	if staleOut.Len() != 0 {
+		t.Fatalf("stale helper got a decision: %q", staleOut.String())
+	}
+	if err := o.Decide(u.Pending.ID, "accept"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil || !strings.Contains(current.String(), `"behavior":"allow"`) {
+		t.Fatalf("current helper lost its decision: err=%v out=%q", err, current.String())
 	}
 }
