@@ -23,7 +23,7 @@ export default function DirectorVideo({id, revision}: {id: string; revision: str
         if (!active) return;
         setResult(data);
         setError(false);
-        if (data.status === 'building') timer = setTimeout(check, 5000);
+        timer = setTimeout(check, data.status === 'building' ? 5000 : 30000);
       } catch {
         if (active) {
           setError(true);
