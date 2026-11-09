@@ -324,3 +324,18 @@ func TestRemoteApprovalInvalidatedRequest(t *testing.T) {
 		t.Fatal("helper not released after its request was invalidated")
 	}
 }
+
+// Rejection cleanup runs after the handler reacquires the lock. If a new
+// prompt already cleared the request and started a turn, the cleanup must not
+// mark that newer turn idle.
+func TestRejectCleanupDoesNotOverwriteNewTurn(t *testing.T) {
+	s := &state{pending: map[string]pending{}, tools: map[string]string{}, waiters: map[string]chan string{}}
+	s.pending["/tool/Bash"] = pending{request: bridge.PendingRequest{ID: "old", Type: bridge.PendingRequestApproval}}
+	if !s.resolveRejected("old") || s.base != bridge.InteractionIdle {
+		t.Fatalf("reject of a live request must resolve it: base=%s", s.base)
+	}
+	s.base = bridge.InteractionWorking // a new prompt cleared the request first
+	if s.resolveRejected("old") || s.base != bridge.InteractionWorking {
+		t.Fatalf("stale cleanup changed the new turn: base=%s", s.base)
+	}
+}

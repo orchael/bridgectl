@@ -260,16 +260,7 @@ func NewWithOptions(ctx context.Context, executable string, opts Options) (*Obse
 					delete(s.waiters, id)
 				}
 				if result == "cancel" {
-					// Our deny interrupts the turn, and Claude fires no Stop or
-					// PostToolUse hook for that, so resolve the request here.
-					for key, p := range s.pending {
-						if p.request.ID == id {
-							delete(s.pending, key)
-						}
-					}
-					if len(s.pending) == 0 {
-						s.base = bridge.InteractionIdle
-					}
+					s.resolveRejected(id)
 				}
 				publish(s.current())
 				mu.Unlock()
@@ -588,6 +579,24 @@ func (s *state) apply(e Event) (bridge.Interaction, bool) {
 	}
 	s.releaseStaleWaiters()
 	return s.current(), true
+}
+
+// resolveRejected clears a request we denied with interrupt: Claude fires no
+// Stop or PostToolUse hook for an interrupted turn. It changes state only if
+// the request is still pending, so a cleanup that runs after a newer prompt
+// already cleared it never marks that newer turn idle.
+func (s *state) resolveRejected(id string) bool {
+	removed := false
+	for key, p := range s.pending {
+		if p.request.ID == id {
+			delete(s.pending, key)
+			removed = true
+		}
+	}
+	if removed && len(s.pending) == 0 {
+		s.base = bridge.InteractionIdle
+	}
+	return removed
 }
 
 func (s *state) hasPending(id string) bool {
