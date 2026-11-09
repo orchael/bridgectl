@@ -376,3 +376,36 @@ func TestDecisionAfterCancellationIsNotAcknowledged(t *testing.T) {
 	}
 	<-done
 }
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("stdout closed") }
+
+// The decision only counts as delivered once the helper has written it to
+// stdout (where Claude reads it). If that write fails, Decide must not report
+// success and a reject must not clear the request.
+func TestDecisionNotDeliveredWhenStdoutFails(t *testing.T) {
+	for _, decision := range []string{"accept", "cancel"} {
+		t.Run(decision, func(t *testing.T) {
+			o, cancel := remoteObserver(t)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				done <- ReportTo(context.Background(), o.ConfigPath, strings.NewReader(permissionInput("git push")), failingWriter{})
+			}()
+			u := nextUpdate(t, o)
+			if err := o.Decide(u.Pending.ID, decision); err == nil {
+				t.Fatal("decision reported delivered although the helper could not write it")
+			}
+			if err := <-done; err == nil {
+				t.Fatal("helper hid its stdout failure")
+			}
+			o.mu.Lock()
+			still := o.state.hasPending(u.Pending.ID)
+			o.mu.Unlock()
+			if !still {
+				t.Fatal("request cleared although Claude never received the decision")
+			}
+		})
+	}
+}

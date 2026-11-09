@@ -121,6 +121,9 @@ var errDecisionUnconfirmed = errors.New("remote decision delivery not confirmed"
 type waiter struct {
 	decision chan string
 	ack      chan bool
+	// confirmed receives the helper's report, after the HTTP reply, of whether
+	// it wrote the decision to stdout (where Claude reads it).
+	confirmed chan bool
 }
 
 // takeWaiter removes and returns the waiter for a still-pending request, or
@@ -196,7 +199,7 @@ func NewWithOptions(ctx context.Context, executable string, opts Options) (*Obse
 	}
 	updates := make(chan bridge.Interaction, 32)
 	done := make(chan struct{})
-	s := &state{pending: make(map[string]pending), tools: make(map[string]string), waiters: make(map[string]*waiter)}
+	s := &state{pending: make(map[string]pending), tools: make(map[string]string), waiters: make(map[string]*waiter), confirms: make(map[string]*waiter)}
 	var mu sync.Mutex
 	// publish never stalls the CLI behind a slow consumer; it keeps the latest state.
 	publish := func(next bridge.Interaction) {
@@ -254,7 +257,7 @@ func NewWithOptions(ctx context.Context, executable string, opts Options) (*Obse
 			rc := http.NewResponseController(w)
 			_ = rc.SetReadDeadline(time.Time{})
 			_ = rc.SetWriteDeadline(time.Now().Add(remoteWaitLimit + 5*time.Second))
-			wt := &waiter{decision: make(chan string, 1), ack: make(chan bool, 1)}
+			wt := &waiter{decision: make(chan string, 1), ack: make(chan bool, 1), confirmed: make(chan bool, 1)}
 			mu.Lock()
 			next, emit := s.apply(req.Event)
 			id := ""
@@ -309,19 +312,63 @@ func NewWithOptions(ctx context.Context, executable string, opts Options) (*Obse
 				_ = json.NewEncoder(w).Encode(map[string]string{"decision": ""})
 				return
 			}
+			token := make([]byte, 16)
+			_, _ = rand.Read(token)
+			confirmToken := hex.EncodeToString(token)
+			mu.Lock()
+			s.confirms[confirmToken] = wt
+			mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
-			err := json.NewEncoder(w).Encode(map[string]string{"decision": result})
+			err := json.NewEncoder(w).Encode(map[string]string{"decision": result, "confirm": confirmToken})
 			if err == nil {
 				err = rc.Flush()
 			}
-			delivered := err == nil && r.Context().Err() == nil
+			// Delivered only once the helper confirms it wrote the decision to
+			// Claude's stdout; an HTTP flush alone proves nothing.
+			delivered := false
+			if err == nil {
+				select {
+				case delivered = <-wt.confirmed:
+				case <-time.After(3 * time.Second):
+				}
+			}
+			mu.Lock()
+			delete(s.confirms, confirmToken)
 			if delivered && result == "cancel" {
-				mu.Lock()
 				s.resolveRejected(id)
 				publish(s.current())
-				mu.Unlock()
 			}
+			mu.Unlock()
 			wt.ack <- delivered
+		})
+	}
+	if opts.RemoteApproval {
+		mux.HandleFunc("POST /confirm", func(w http.ResponseWriter, r *http.Request) {
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(2 * time.Second))
+			if !authorized(w, r) {
+				return
+			}
+			var c struct {
+				Token     string `json:"token"`
+				Delivered bool   `json:"delivered"`
+			}
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&c); err != nil || c.Token == "" {
+				http.Error(w, "invalid confirmation", http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			wt := s.confirms[c.Token]
+			delete(s.confirms, c.Token)
+			mu.Unlock()
+			if wt == nil {
+				http.NotFound(w, r)
+				return
+			}
+			select {
+			case wt.confirmed <- c.Delivered:
+			default:
+			}
+			w.WriteHeader(http.StatusNoContent)
 		})
 	}
 	handler := http.Handler(mux)
@@ -470,6 +517,7 @@ func waitForRemoteDecision(ctx context.Context, cfg clientConfig, req permission
 	}
 	var reply struct {
 		Decision string `json:"decision"`
+		Confirm  string `json:"confirm"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<10)).Decode(&reply); err != nil {
 		return errors.New("invalid observer reply")
@@ -485,7 +533,32 @@ func waitForRemoteDecision(ctx context.Context, cfg clientConfig, req permission
 	default:
 		return nil
 	}
-	return json.NewEncoder(out).Encode(map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PermissionRequest", "decision": decision}})
+	writeErr := json.NewEncoder(out).Encode(map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PermissionRequest", "decision": decision}})
+	confirmRemoteDecision(cfg, client, reply.Confirm, writeErr == nil)
+	return writeErr
+}
+
+// confirmRemoteDecision tells the observer whether the decision reached
+// stdout, so Bridge reports a decision as delivered only when Claude can read it.
+func confirmRemoteDecision(cfg clientConfig, client *http.Client, token string, delivered bool) {
+	if token == "" {
+		return
+	}
+	body, err := json.Marshal(map[string]any{"token": token, "delivered": delivered})
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSuffix(cfg.PermissionURL, "/permission")+"/confirm", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	req.Header.Set("Content-Type", "application/json")
+	if resp, err := client.Do(req); err == nil {
+		_ = resp.Body.Close()
+	}
 }
 
 // pendingKindForTool classifies a permission request from the structured tool
@@ -521,6 +594,9 @@ type state struct {
 	// waiters holds the hook helpers currently waiting for a remote decision,
 	// by pending request ID (remote-approval mode only).
 	waiters map[string]*waiter
+	// confirms maps a one-time token, sent with a decision, to the waiter the
+	// helper must confirm delivery for.
+	confirms map[string]*waiter
 }
 
 // keyFor returns the pending-map key apply uses for a tool event.
