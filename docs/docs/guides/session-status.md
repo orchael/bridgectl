@@ -63,15 +63,46 @@ Claude's `PermissionRequest` hook. A per-session keyed fingerprint of structured
 tool arguments distinguishes concurrent calls of the same tool; argument values
 never leave the helper. Pending IDs exposed to clients are opaque.
 
-The helper never reads transcripts or returns a permission decision. Questions
-and approvals are answered in the attached Claude terminal. Remote response and
-structured approval capabilities remain false for this observer.
+By default the helper never reads transcripts or returns a permission decision.
+Questions and approvals are answered in the attached Claude terminal, and the
+remote response and structured approval capabilities stay false.
+
+### Experimental: approve Bash commands from Bridge
+
+Set `BRIDGECTL_CLAUDE_REMOTE_APPROVAL=1` in the daemon's environment, then start
+new Claude sessions. Only Bash permission requests are eligible, and only when
+`Run once in <cwd>: <command>` fits 200 bytes with no control characters (including newlines and tabs). Other
+tools, and anything longer, stay terminal-only.
+
+1. The `PermissionRequest` hook (timeout 300 s) asks the local observer to wait.
+   The observer advertises `structured_approval_supported` with that summary.
+   This is the only case where the helper sends a command to the observer.
+2. Claude Code shows its own dialog at the same time, so the hook never delays
+   the local prompt (verified with Claude Code 2.1.319).
+3. Each request can be answered remotely at most once. Two identical
+   concurrent Bash requests, or a repeat arriving before the first finishes,
+   are ambiguous: only the first is remotely answerable, and the others use
+   their local dialog.
+4. **First answer wins.** If you answer in the terminal, Claude Code kills the
+   hook, the capability disappears, and a late Bridge decision is refused with
+   `pending_request_mismatch`.
+5. Bridge **Approve once** returns `allow` with no `updatedPermissions`.
+   **Reject and stop turn** returns `deny` with `interrupt: true`. Claude fires
+   no hook for an interrupted turn, so the observer clears the request and marks
+   the session idle itself.
+6. After about 285 s without a decision, the hook returns nothing and the local
+   dialog stays in charge.
+
+Acceptance: `BRIDGECTL_HOOK_TEST_BINARY=<built bridgectl> go test
+./internal/claudehooks -run TestClaudeRealTUIRemoteApproval` drives the real
+TUI through an accept and a reject. Bridge must also accept `attached` sessions
+for approvals (orchael/bridge#57).
 
 User/project hooks remain in place. An existing CLI `--settings` file or JSON
 object is merged into the temporary file, including its hooks. The source file
 is never modified. Temporary files use private permissions and are removed when
-the session ends. The helper uses a one-second HTTP timeout and no HTTP proxy or
-redirects; observation cannot wait indefinitely on a remote service.
+the session ends. The helper uses a one-second HTTP timeout (or the bounded remote-approval wait
+above) and no HTTP proxy or redirects; observation cannot wait indefinitely.
 
 Use the repository-pinned Claude Code version (see `package.json`) or a compatible
 version supporting these [hook events](https://code.claude.com/docs/en/hooks).

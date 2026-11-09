@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,4 +81,77 @@ func TestClaudeRealTUIQuestion(t *testing.T) {
 			t.Fatal("Claude did not complete input-wait, answer, working, idle cycle")
 		}
 	}
+}
+
+// Opt-in acceptance for remote approval through the real Claude terminal: a
+// harmless Bash command waits for permission, the observer advertises
+// structured approval, and a remote accept runs it (cancel must not) with
+// nobody answering the local dialog.
+func TestClaudeRealTUIRemoteApproval(t *testing.T) {
+	helper := os.Getenv("BRIDGECTL_HOOK_TEST_BINARY")
+	if helper == "" {
+		t.Skip("set BRIDGECTL_HOOK_TEST_BINARY to a freshly built bridgectl for authenticated acceptance")
+	}
+	for _, decision := range []string{"accept", "cancel"} {
+		t.Run(decision, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+			defer cancel()
+			o, err := NewWithOptions(ctx, helper, Options{RemoteApproval: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			cmd := exec.CommandContext(ctx, "claude", "--settings", o.SettingsPath, "--permission-mode", "default", "--model", "haiku",
+				"Use the Bash tool to run exactly: touch remote-approval.txt")
+			cmd.Dir = dir
+			for _, e := range os.Environ() {
+				if !strings.HasPrefix(e, "CLAUDECODE=") && !strings.HasPrefix(e, "CLAUDE_CODE_CHILD") && !strings.HasPrefix(e, "CLAUDE_CODE_ENTRYPOINT=") {
+					cmd.Env = append(cmd.Env, e)
+				}
+			}
+			terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 40, Cols: 120})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { cancel(); _ = terminal.Close(); _ = cmd.Wait() }()
+			go func() { _, _ = io.Copy(io.Discard, terminal) }()
+			trust := time.AfterFunc(5*time.Second, func() { _, _ = terminal.Write([]byte("\x1b[B\r")) })
+			defer trust.Stop()
+			target := dir + "/remote-approval.txt"
+			decided := false
+			deadline := time.After(90 * time.Second)
+			for {
+				select {
+				case next := <-o.Updates:
+					t.Logf("state=%s structured=%t summary=%q", next.State, next.Evidence.Capability.StructuredApprovalSupported, summaryOf(next))
+					if !decided && next.State == bridge.InteractionWaitingForApproval && next.Evidence.Capability.StructuredApprovalSupported {
+						if !strings.Contains(next.Pending.Summary, "touch remote-approval.txt") {
+							t.Fatalf("summary %q", next.Pending.Summary)
+						}
+						if err := o.Decide(next.Pending.ID, decision); err != nil {
+							t.Fatal(err)
+						}
+						decided = true
+					}
+					if decided && (next.State == bridge.InteractionIdle || (decision == "accept" && next.State == bridge.InteractionWorking)) {
+						time.Sleep(2 * time.Second)
+						_, statErr := os.Stat(target)
+						if created := statErr == nil; created != (decision == "accept") {
+							t.Fatalf("decision %s: command ran=%v", decision, created)
+						}
+						return
+					}
+				case <-deadline:
+					t.Fatalf("no completed remote %s cycle (decided=%v)", decision, decided)
+				}
+			}
+		})
+	}
+}
+
+func summaryOf(i bridge.Interaction) string {
+	if i.Pending == nil {
+		return ""
+	}
+	return i.Pending.Summary
 }
