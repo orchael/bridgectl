@@ -95,7 +95,7 @@ func (o *Observer) Decide(pendingID, decision string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	ch := o.state.waiters[pendingID]
-	if ch == nil {
+	if ch == nil || !o.state.hasPending(pendingID) {
 		return bridge.ErrPendingRequestMismatch
 	}
 	delete(o.state.waiters, pendingID)
@@ -586,7 +586,29 @@ func (s *state) apply(e Event) (bridge.Interaction, bool) {
 			return bridge.Interaction{}, false
 		}
 	}
+	s.releaseStaleWaiters()
 	return s.current(), true
+}
+
+func (s *state) hasPending(id string) bool {
+	for _, p := range s.pending {
+		if p.request.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// releaseStaleWaiters wakes, with no decision, every helper whose request
+// Claude has invalidated (completed, stopped, new prompt, session reset), so
+// a late remote decision can never apply to it.
+func (s *state) releaseStaleWaiters() {
+	for id, ch := range s.waiters {
+		if !s.hasPending(id) {
+			delete(s.waiters, id)
+			ch <- ""
+		}
+	}
 }
 
 // current projects the state into an Interaction. Structured approval is

@@ -297,3 +297,30 @@ func TestRemoteApprovalIDIsSingleUse(t *testing.T) {
 		t.Fatalf("retried decision approved again: %v", err)
 	}
 }
+
+// A waiting request that Claude invalidates (here: the turn stops) must stop
+// being remotely decidable, and its helper must be released with no decision.
+func TestRemoteApprovalInvalidatedRequest(t *testing.T) {
+	o, cancel := remoteObserver(t)
+	defer cancel()
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		done <- ReportTo(context.Background(), o.ConfigPath, strings.NewReader(permissionInput("git push")), &out)
+	}()
+	u := nextUpdate(t, o)
+	if err := ReportTo(context.Background(), o.ConfigPath, strings.NewReader(`{"session_id":"s","hook_event_name":"Stop"}`), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.Decide(u.Pending.ID, "accept"); !errors.Is(err, bridge.ErrPendingRequestMismatch) {
+		t.Fatalf("invalidated request still decidable: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil || out.Len() != 0 {
+			t.Fatalf("released helper: err=%v out=%q", err, out.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("helper not released after its request was invalidated")
+	}
+}
