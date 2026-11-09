@@ -31,7 +31,8 @@ For another cluster, either use that GitOps layout or:
 
 The service account needs only cluster-wide `list` on nodes, pods, and
 deployments. The runner's workspace is an ephemeral `emptyDir` because this
-check does not inspect a repository. The agent process shares the pod's
+check does not inspect a repository. Mount it under `/home/bridge` because
+bridgectl restricts sessions to the agent's home by default. The agent process shares the pod's
 service account token, so keep the RBAC read-only and use a trusted provider.
 
 ## Behavior

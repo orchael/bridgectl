@@ -25,7 +25,7 @@ spec:
                 - name: PROVIDER
                   value: codex
                 - name: PROJECT_DIR
-                  value: /workspace
+                  value: /home/bridge/workspace
                 - name: MONITOR_SERVICE
                   value: kubernetes-cluster
                 - name: ALERTMANAGER_URL
@@ -40,7 +40,7 @@ spec:
                   mountPath: /config
                   readOnly: true
                 - name: workspace
-                  mountPath: /workspace
+                  mountPath: /home/bridge/workspace
               resources:
                 requests: {cpu: 250m, memory: 512Mi}
                 limits: {cpu: "2", memory: 2Gi}

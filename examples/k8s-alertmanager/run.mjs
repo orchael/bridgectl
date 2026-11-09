@@ -82,7 +82,7 @@ const prompt = await readFile("/config/prompt.md", "utf8");
 const evidence = await clusterSnapshot();
 const alertmanager = required("ALERTMANAGER_URL").replace(/\/$/, "");
 const child = spawn("bridgectl", ["session", "start", "--no-tty", "--provider", provider,
-  "--project", "scheduled-monitor", process.env.PROJECT_DIR || "/workspace"], {
+  "--project", "scheduled-monitor", process.env.PROJECT_DIR || "/home/bridge/workspace"], {
   stdio: ["pipe", "pipe", "pipe"],
   env: process.env,
 });
