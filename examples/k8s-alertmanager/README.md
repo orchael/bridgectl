@@ -1,23 +1,50 @@
-# Kubernetes scheduled agent findings to Alertmanager
+# Scheduled Kubernetes health check to Alertmanager
 
-This example runs a non-TTY bridgectl agent from a Kubernetes CronJob, validates a structured JSON response, and POSTs confirmed findings to Alertmanager's v2 API. Alertmanager routes them to Slack using your existing receiver configuration.
+This example runs a read-only cluster health check every 30 minutes with a
+non-TTY bridgectl Codex session. The runner lists nodes, pods, and deployments
+through the Kubernetes API, gives a bounded snapshot to the agent, validates
+its JSON findings, and posts alerts to Alertmanager v2. It never reads Secrets,
+ConfigMaps, or event contents.
 
-## Setup
+## Installation
 
-1. Build a pinned image from the repository root: `docker build -f examples/k8s-alertmanager/Dockerfile -t YOUR_REGISTRY/bridgectl-monitor:PINNED_TAG .` and push it.
-2. Create the `bridgectl-monitor-provider` Kubernetes Secret containing `OPENAI_API_KEY` (or adapt the manifest for Claude).
-3. Supply an application checkout through a read-only PVC at `/workspace`. Adapt the prompt to your application and make sure the agent can access the required diagnostics.
-4. Replace the image and PVC placeholders in `cronjob.yaml`, then `kubectl apply -f examples/k8s-alertmanager/cronjob.yaml`.
-5. Configure Alertmanager to route alerts with `source=bridgectl-cron` to an existing Slack receiver. Keep Slack credentials in Alertmanager, not in the CronJob.
+The MCA demo lives in `markcallen/mca-gitops` at
+`apps/bridgectl-monitor` and uses the pinned v1.4.10 bridgectl image. Argo CD
+creates the namespace, read-only service account and ClusterRole, CronJob,
+ConfigMap, and ExternalSecret. That ExternalSecret reads the existing MCA Bosun
+Codex credential from AWS Secrets Manager; it contains no credential value in
+Git. Alertmanager is at
+`alertmanager-operated.observability.svc:9093` and already routes alerts to
+`#feed-k8s-alerts`.
 
-## Behavior and caveats
+For another cluster, either use that GitOps layout or:
 
-- The agent runs as an ephemeral local bridgectl non-TTY session, not as an attachment to an existing desktop session.
-- The runner requires exactly one fenced JSON block and validates issue IDs, severity, and annotation lengths.
-- Alert fingerprints use stable `service`, `issue_id`, `severity`, `source`, and `alertname` labels.
-- Alerts use an expiry time (90 minutes by default). A healthy run does **not** immediately resolve a previous alert; it expires if not refreshed. Keep TTL greater than the schedule interval plus expected delays.
-- An agent failure, malformed JSON or Alertmanager HTTP failure fails the Job. Configure Kubernetes Job-failure monitoring separately so a failed monitor does not look like a healthy application.
-- This example is not production-hardened. Review outbound network access, workload identity, agent permissions, token costs, image pinning, alert quality, and provider CLI output compatibility before deployment.
-- Do not expose raw model output or secrets as alert labels. Alertmanager's routing and Slack receiver must already exist.
+1. Build and push the derived image from the repository root with
+   `docker build -f examples/k8s-alertmanager/Dockerfile -t YOUR_REGISTRY/bridgectl-monitor:PINNED_TAG .`.
+2. Create a namespace and a Secret named `bridgectl-monitor-provider` with a
+   `CODEX_AUTH` key, or adapt the manifest to an approved credential source.
+3. Create a ConfigMap named `bridgectl-monitor` with `prompt.md` from this
+   directory, replace the image, namespace, and Alertmanager URL placeholders
+   in `cronjob.yaml`, then apply it.
+4. Run a one-off Job from the CronJob and inspect its completion, logs, and
+   Alertmanager's active alerts before relying on the schedule.
 
-To test locally, use `kubectl create job --from=cronjob/bridgectl-monitor bridgectl-monitor-manual`, then inspect its logs and Alertmanager's active alerts.
+The service account needs only cluster-wide `list` on nodes, pods, and
+deployments. The runner's workspace is an ephemeral `emptyDir` because this
+check does not inspect a repository. The agent process shares the pod's
+service account token, so keep the RBAC read-only and use a trusted provider.
+
+## Behavior
+
+- A complete fenced JSON response is required before the runner closes
+  bridgectl stdin. Closing stdin earlier stops an unfinished agent turn.
+- The snapshot is limited to 500 objects per kind and 32 KiB after filtering.
+  Exceeding a limit fails the Job rather than silently omitting resources.
+- Alerts have stable `service`, `issue_id`, `severity`, `source`, and
+  `alertname` labels. They expire after 90 minutes if not refreshed; a
+  healthy run does not immediately resolve a previous alert.
+- Agent, API, parsing, and Alertmanager failures exit nonzero. Monitor failed
+  Jobs separately so a failed health check is visible.
+- The snapshot covers node readiness, abnormal pods, and unavailable
+  deployments. It does not cover every Kubernetes resource or prove that
+  workloads are healthy beyond those signals.

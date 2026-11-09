@@ -1,17 +1,3 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: bridgectl-monitor
-data:
-  prompt.md: |
-    Inspect the application in /workspace without modifying files.
-    Report confirmed operational or correctness issues only.
-    Return exactly one fenced JSON block:
-    ```json
-    {"issues":[{"id":"stable-id","severity":"warning","summary":"Short finding","evidence":"Concrete evidence and remediation"}]}
-    ```
-    Return {"issues":[]} when healthy.
----
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -22,17 +8,17 @@ spec:
   startingDeadlineSeconds: 300
   jobTemplate:
     spec:
-      backoffLimit: 1
+      backoffLimit: 0
       activeDeadlineSeconds: 900
       template:
         spec:
+          serviceAccountName: bridgectl-monitor
           restartPolicy: Never
           securityContext:
             runAsUser: 1000
             runAsGroup: 1000
           containers:
             - name: monitor
-              # Build a derived image that copies run.mjs to /app/run.mjs.
               image: YOUR_REGISTRY/bridgectl-monitor:PINNED_TAG
               command: ["node", "/app/run.mjs"]
               env:
@@ -41,21 +27,20 @@ spec:
                 - name: PROJECT_DIR
                   value: /workspace
                 - name: MONITOR_SERVICE
-                  value: example-app
+                  value: kubernetes-cluster
                 - name: ALERTMANAGER_URL
-                  value: http://alertmanager-operated.monitoring.svc:9093
-                - name: OPENAI_API_KEY
+                  value: http://alertmanager-operated.observability.svc:9093
+                - name: CODEX_AUTH
                   valueFrom:
                     secretKeyRef:
                       name: bridgectl-monitor-provider
-                      key: OPENAI_API_KEY
+                      key: CODEX_AUTH
               volumeMounts:
                 - name: prompt
                   mountPath: /config
                   readOnly: true
                 - name: workspace
                   mountPath: /workspace
-                  readOnly: true
               resources:
                 requests: {cpu: 250m, memory: 512Mi}
                 limits: {cpu: "2", memory: 2Gi}
@@ -64,5 +49,4 @@ spec:
               configMap:
                 name: bridgectl-monitor
             - name: workspace
-              persistentVolumeClaim:
-                claimName: YOUR_READ_ONLY_WORKSPACE_PVC
+              emptyDir: {}

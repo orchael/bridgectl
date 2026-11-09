@@ -1,0 +1,12 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: bridgectl-monitor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: bridgectl-monitor
+subjects:
+  - kind: ServiceAccount
+    name: bridgectl-monitor
+    namespace: YOUR_NAMESPACE
