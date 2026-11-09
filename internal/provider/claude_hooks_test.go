@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/orchael/bridgectl/internal/bridge"
+	"github.com/orchael/bridgectl/internal/claudehooks"
 )
 
 func TestClaudeProviderPreservesSettingsAndCleansUp(t *testing.T) {
@@ -114,5 +115,49 @@ func TestClaudeRemoteApprovalOptIn(t *testing.T) {
 			t.Fatalf("decision for unknown session: %v", err)
 		}
 		cancel()
+	}
+}
+
+// Bosun review: exercise the provider's DecideApproval path end to end with a
+// waiting hook helper, not just Observer.Decide. The Supervisor gate that lets
+// approvals through while a terminal writer is attached is covered by
+// bridge.TestMAR66ApprovalOwnership/writer.
+func TestClaudeRemoteApprovalThroughProvider(t *testing.T) {
+	t.Setenv(ClaudeRemoteApprovalEnv, "1")
+	p := NewClaudeHooksProvider(StdioConfig{ProviderID: "claude", Binary: "/bin/cat"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := p.BuildCommand(ctx, bridge.SessionConfig{SessionID: "s", RepoPath: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	updates, err := p.WatchInteraction(ctx, "s", bridge.SessionConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.mu.Lock()
+	configPath := p.sessions["s"].ConfigPath
+	p.mu.Unlock()
+	input := `{"session_id":"n","hook_event_name":"PermissionRequest","tool_name":"Bash","cwd":"/repo","tool_input":{"command":"git push"}}`
+	var out strings.Builder
+	done := make(chan error, 1)
+	go func() { done <- claudehooks.ReportTo(ctx, configPath, strings.NewReader(input), &out) }()
+	var pendingID string
+	select {
+	case u := <-updates:
+		if !u.Evidence.Capability.StructuredApprovalSupported || u.Pending == nil {
+			t.Fatalf("not actionable: %+v", u)
+		}
+		pendingID = u.Pending.ID
+	case <-time.After(2 * time.Second):
+		t.Fatal("no update")
+	}
+	if err := p.DecideApproval(ctx, "s", pendingID, "accept"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"behavior":"allow"`) {
+		t.Fatalf("hook output %q", out.String())
 	}
 }
