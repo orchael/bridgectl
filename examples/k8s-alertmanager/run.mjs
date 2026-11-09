@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { request } from "node:https";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 const required = (name) => {
   if (!process.env[name]) throw new Error(`Missing ${name}`);
@@ -9,8 +11,9 @@ const required = (name) => {
 const provider = process.env.PROVIDER || "codex";
 const timeoutMs = Number(process.env.AGENT_TIMEOUT_MS || 600000);
 const ttlMinutes = Number(process.env.ALERT_TTL_MINUTES || 90);
+const monitorNamespace = required("MONITOR_NAMESPACE");
 const maxOutput = 1024 * 1024;
-if (!["codex", "claude"].includes(provider)) throw new Error("Unsupported provider");
+if (provider !== "codex") throw new Error("This batch example requires codex");
 if (!Number.isFinite(timeoutMs) || timeoutMs < 1000) throw new Error("Invalid agent timeout");
 if (!Number.isFinite(ttlMinutes) || ttlMinutes < 1) throw new Error("Invalid alert TTL");
 
@@ -58,8 +61,10 @@ async function clusterSnapshot() {
         conditions: n.status.conditions?.filter((c) => c.status !== "False" || c.type === "Ready")
           .map((c) => ({ type: c.type, status: c.status, reason: c.reason })),
       })),
-      pods: pods.filter((p) => p.status.phase !== "Running" && p.status.phase !== "Succeeded" ||
+      pods: pods.filter((p) => p.metadata.namespace !== monitorNamespace &&
+        (p.status.phase !== "Running" && p.status.phase !== "Succeeded" ||
         p.status.containerStatuses?.some((c) => c.state?.waiting || c.state?.terminated && c.state.terminated.exitCode !== 0))
+        )
         .map((p) => ({
           namespace: p.metadata.namespace, name: p.metadata.name, phase: p.status.phase,
           containers: p.status.containerStatuses?.map((c) => ({
@@ -80,44 +85,38 @@ async function clusterSnapshot() {
 
 const prompt = await readFile("/config/prompt.md", "utf8");
 const evidence = await clusterSnapshot();
+const projectDir = process.env.PROJECT_DIR || "/home/bridge/workspace";
 const alertmanager = required("ALERTMANAGER_URL").replace(/\/$/, "");
-const child = spawn("bridgectl", ["session", "start", "--no-tty", "--provider", provider,
-  "--project", "scheduled-monitor", process.env.PROJECT_DIR || "/home/bridge/workspace"], {
-  stdio: ["pipe", "pipe", "pipe"],
-  env: process.env,
+const codexHome = await mkdtemp(join(tmpdir(), "monitor-codex-"));
+await writeFile(join(codexHome, "auth.json"), required("CODEX_AUTH"), { mode: 0o600 });
+const reportPath = join(codexHome, "last-message.txt");
+const childEnv = { ...process.env, CODEX_HOME: codexHome };
+delete childEnv.CODEX_AUTH;
+const child = spawn("codex", ["exec", "--sandbox", "read-only", "--skip-git-repo-check",
+  "--ephemeral", "--output-last-message", reportPath, "-C", projectDir,
+  `${prompt}\nKubernetes snapshot JSON:\n${evidence}`], {
+  stdio: ["ignore", "pipe", "pipe"],
+  env: childEnv,
 });
-let stdout = "", stderr = "", responseReady = false, exceeded = false, timedOut = false;
-const completeResponse = () => {
-  const matches = [...stdout.matchAll(/```json\s*([\s\S]*?)\s*```/g)];
-  if (matches.length === 1 && !responseReady) {
-    responseReady = true;
-    // The non-TTY CLI stops its session on stdin EOF. Wait for the complete
-    // assistant response before sending EOF, or it cancels the running turn.
-    child.stdin.end();
-  }
-};
+let stdout = "", stderr = "", exceeded = false, timedOut = false;
 child.stdout.on("data", (chunk) => {
   stdout += chunk.toString();
   if (stdout.length + stderr.length > maxOutput) { exceeded = true; child.kill("SIGKILL"); }
-  else completeResponse();
 });
 child.stderr.on("data", (chunk) => {
   stderr += chunk.toString();
   if (stdout.length + stderr.length > maxOutput) { exceeded = true; child.kill("SIGKILL"); }
 });
-child.stdin.write(`${prompt}\nCluster snapshot (read-only Kubernetes API):\n${evidence}\n`);
 const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, timeoutMs);
 const exit = await new Promise((resolve, reject) => {
   child.on("error", reject);
   child.on("close", resolve);
 });
 clearTimeout(timer);
-if (timedOut || exceeded || exit !== 0 || !responseReady) {
-  throw new Error(`Agent failed (exit=${exit}, timeout=${timedOut}, outputLimit=${exceeded}, response=${responseReady}): ${stderr.slice(-500)}`);
+if (timedOut || exceeded || exit !== 0) {
+  throw new Error(`Agent failed (exit=${exit}, timeout=${timedOut}, outputLimit=${exceeded}): ${stderr.slice(-500)}`);
 }
-const matches = [...stdout.matchAll(/```json\s*([\s\S]*?)\s*```/g)];
-if (matches.length !== 1) throw new Error("Expected one fenced JSON response");
-const report = JSON.parse(matches[0][1]);
+const report = JSON.parse((await readFile(reportPath, "utf8")).trim());
 if (!Array.isArray(report.issues) || report.issues.length > 20) throw new Error("Invalid issues array");
 const now = new Date();
 const endsAt = new Date(now.getTime() + ttlMinutes * 60000).toISOString();
@@ -126,8 +125,9 @@ const clean = (s, max) => {
   return s.trim();
 };
 const alerts = report.issues.map((issue) => {
-  const id = clean(issue.id, 100);
-  if (!/^[a-zA-Z0-9_.:-]+$/.test(id)) throw new Error("Invalid issue id");
+  const id = clean(issue.id, 100).toLowerCase()
+    .replace(/[^a-z0-9_.:-]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!id) throw new Error("Invalid issue id");
   if (!["warning", "critical"].includes(issue.severity)) throw new Error("Invalid severity");
   return {
     labels: {

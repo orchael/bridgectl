@@ -1,8 +1,8 @@
 # Scheduled Kubernetes health check to Alertmanager
 
-This example runs a read-only cluster health check every 30 minutes with a
-non-TTY bridgectl Codex session. The runner lists nodes, pods, and deployments
-through the Kubernetes API, gives a bounded snapshot to the agent, validates
+This example runs a read-only cluster health check every 30 minutes with
+`codex exec` in a pinned bridgectl runtime image. The runner lists nodes, pods, and deployments
+through the Kubernetes API, sends a bounded snapshot to the agent, validates
 its JSON findings, and posts alerts to Alertmanager v2. It never reads Secrets,
 ConfigMaps, or event contents.
 
@@ -38,10 +38,17 @@ The pinned runtime image's `bridge` user is UID/GID 1001.
 
 ## Behavior
 
-- A complete fenced JSON response is required before the runner closes
-  bridgectl stdin. Closing stdin earlier stops an unfinished agent turn.
+- Codex runs in noninteractive read-only mode without tool calls and writes its final JSON
+  response to a file. The interactive `bridgectl session start --no-tty`
+  path stopped on stdin EOF and stayed idle with TUI input in live Jobs;
+  do not use it as a one-shot Codex runner.
+- The in-container read-only shell sandbox could not start `bwrap` on MCA,
+  so the agent assesses the supplied snapshot directly instead of reading a
+  file through a shell tool.
 - The snapshot is limited to 500 objects per kind and 32 KiB after filtering.
   Exceeding a limit fails the Job rather than silently omitting resources.
+  Pods in the monitor's own namespace are excluded to avoid alerting on its
+  prior failed runs; monitor failed Jobs separately.
 - Alerts have stable `service`, `issue_id`, `severity`, `source`, and
   `alertname` labels. They expire after 90 minutes if not refreshed; a
   healthy run does not immediately resolve a previous alert.
