@@ -77,7 +77,11 @@ func TestMAR66ApprovalOwnership(t *testing.T) {
 			}
 			s := &Supervisor{sessions: map[string]*managedSession{"s": m}}
 			err := s.DecideApproval(context.Background(), "s", id, decision)
-			if kind == "accepted" {
+			// A local writer (the person's own attached terminal) no longer blocks
+			// a structured decision: it answers the provider's original approval
+			// request, not the PTY, and the provider enforces first-answer-wins.
+			// Free-text input responses still conflict (see the "local writer" case above).
+			if kind == "accepted" || kind == "writer" {
 				if err != nil || p.calls != 1 || m.info.Interaction.Pending == nil {
 					t.Fatal("approval must preserve pending", err)
 				}

@@ -43,8 +43,12 @@ type ResponseClient struct {
 	questionID         string
 	approval           bool
 	submitted          bool
-	closed             bool
-	Updates            <-chan bridge.Interaction
+	// remoteAnswered marks that Bridge (not the attached TUI) answered the
+	// current requestID, so a late TUI answer to the same request is dropped
+	// instead of reaching Codex as a second response.
+	remoteAnswered bool
+	closed         bool
+	Updates        <-chan bridge.Interaction
 }
 
 func (c *ResponseClient) Respond(ctx context.Context, pendingID, text string) error {
@@ -56,6 +60,7 @@ func (c *ResponseClient) Respond(ctx context.Context, pendingID, text string) er
 	// Burn the request before I/O: an ambiguous network failure is not safe
 	// to retry. Provider evidence, never this write, clears attention.
 	c.submitted = true
+	c.remoteAnswered = true
 	b := mustJSON(envelope{JSONRPC: "2.0", ID: c.requestID, Result: mustJSON(map[string]any{"answers": map[string]any{c.questionID: map[string]any{"answers": []string{text}}}})})
 	return c.conn.Write(ctx, websocket.MessageText, b)
 }
@@ -71,6 +76,7 @@ func (c *ResponseClient) Decide(ctx context.Context, pendingID, decision string)
 		return bridge.ErrPendingRequestMismatch
 	}
 	c.submitted = true
+	c.remoteAnswered = true
 	return c.conn.Write(ctx, websocket.MessageText, mustJSON(envelope{JSONRPC: "2.0", ID: c.requestID, Result: mustJSON(map[string]string{"decision": decision})}))
 }
 

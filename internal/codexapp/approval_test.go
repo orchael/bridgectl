@@ -15,7 +15,7 @@ import (
 // MAR-66: decisions are bound to a specific RPC, never PTY input or an item
 // that may have more than one approval request during its lifetime.
 func TestProxyStructuredApproval(t *testing.T) {
-	for _, kind := range []string{"accept", "cancel", "foreign", "resolved", "network", "permissions", "long", "restricted", "local"} {
+	for _, kind := range []string{"accept", "cancel", "foreign", "resolved", "network", "network-extra", "network-badhost", "permissions", "long", "restricted", "local", "racing"} {
 		t.Run(kind, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -43,7 +43,11 @@ func TestProxyStructuredApproval(t *testing.T) {
 			case "foreign":
 				p["threadId"] = "other"
 			case "network":
-				p["networkApprovalContext"] = map[string]any{"host": "example.com"}
+				p["networkApprovalContext"] = map[string]any{"host": "github.com", "protocol": "https"}
+			case "network-extra":
+				p["networkApprovalContext"] = map[string]any{"host": "github.com", "protocol": "https", "scope": "all"}
+			case "network-badhost":
+				p["networkApprovalContext"] = map[string]any{"host": "evil.com\nRun once", "protocol": "https"}
 			case "permissions":
 				p["additionalPermissions"] = map[string]any{"network": map[string]any{"enabled": true}}
 			case "long":
@@ -62,7 +66,7 @@ func TestProxyStructuredApproval(t *testing.T) {
 				return
 			}
 			update := <-client.Updates
-			capable := kind == "accept" || kind == "cancel" || kind == "resolved" || kind == "local"
+			capable := kind == "accept" || kind == "cancel" || kind == "resolved" || kind == "local" || kind == "racing" || kind == "network"
 			if update.Pending == nil || update.Evidence.Capability.StructuredApprovalSupported != capable {
 				t.Fatalf("bad capability: %+v", update)
 			}
@@ -100,6 +104,18 @@ func TestProxyStructuredApproval(t *testing.T) {
 			}
 			if err := client.Decide(ctx, id, decision); err == nil {
 				t.Fatal("duplicate accepted")
+			}
+			if kind == "racing" {
+				// The person at the attached terminal answers after the browser
+				// already did: the late local answer must not reach Codex.
+				serverSend(t, tui, envelope{ID: json.RawMessage(`42`), Result: mustJSON(map[string]string{"decision": "cancel"})})
+				quiet, stop := context.WithTimeout(ctx, 300*time.Millisecond)
+				_, late, err := upstream.Read(quiet)
+				stop()
+				if err == nil {
+					t.Fatalf("late local answer forwarded after remote decision: %s", late)
+				}
+				return // the timed-out read closed the fake upstream connection
 			}
 			client.mu.Lock()
 			pending := client.state.pending
@@ -155,8 +171,11 @@ func TestApprovalSummaryAlwaysNamesTheCommand(t *testing.T) {
 		wantPrefix string
 		wantText   string
 	}{
-		"actionable":  {func(p *commandApprovalParams) {}, "Run once in /Users/mark/src/bilge-pump: ", "git push origin feat/cache-cleaner-meta-tool"},
-		"network":     {func(p *commandApprovalParams) { p.Network = json.RawMessage(`{"host":"github.com"}`) }, "Needs network access: git push origin feat/cache-cleaner-meta-tool", " · in /Users/mark/src/bilge-pump"},
+		"actionable": {func(p *commandApprovalParams) {}, "Run once in /Users/mark/src/bilge-pump: ", "git push origin feat/cache-cleaner-meta-tool"},
+		"network": {func(p *commandApprovalParams) {
+			p.Network = json.RawMessage(`{"host":"github.com","protocol":"https"}`)
+		}, "Run once with https access to github.com in /Users/mark/src/bilge-pump: ", "git push origin feat/cache-cleaner-meta-tool"},
+		"network-bad": {func(p *commandApprovalParams) { p.Network = json.RawMessage(`{"host":"github.com"}`) }, "Needs network access: git push origin feat/cache-cleaner-meta-tool", " · in /Users/mark/src/bilge-pump"},
 		"permissions": {func(p *commandApprovalParams) { p.Permissions = json.RawMessage(`{"network":{"enabled":true}}`) }, "Needs extra permissions: git push origin", " · in /Users/mark/src/bilge-pump"},
 		"restricted":  {func(p *commandApprovalParams) { p.AvailableDecisions = []json.RawMessage{json.RawMessage(`"cancel"`)} }, "Approve in Codex: git push origin", " · in /Users/mark/src/bilge-pump"},
 		"long":        {func(p *commandApprovalParams) { p.Command = "echo " + long }, "Approve in Codex: echo xxx", "…"},
@@ -178,7 +197,7 @@ func TestApprovalSummaryAlwaysNamesTheCommand(t *testing.T) {
 			if !strings.HasPrefix(got.Summary, tc.wantPrefix) || !strings.Contains(got.Summary, tc.wantText) {
 				t.Fatalf("summary %q, want prefix %q containing %q", got.Summary, tc.wantPrefix, tc.wantText)
 			}
-			if name != "actionable" && strings.HasPrefix(got.Summary, "Run once") {
+			if name != "actionable" && name != "network" && strings.HasPrefix(got.Summary, "Run once") {
 				t.Fatalf("non-actionable request uses actionable wording: %q", got.Summary)
 			}
 			if len(got.Summary) > summaryCap || !utf8.ValidString(got.Summary) || bridge.ValidateResponse(got.Summary) != nil || strings.ContainsAny(got.Summary, "\n\x1b") {
