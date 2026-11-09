@@ -235,3 +235,33 @@ func TestRemoteApprovalIgnoresStaleEvents(t *testing.T) {
 		t.Fatalf("current helper lost its decision: err=%v out=%q", err, current.String())
 	}
 }
+
+// Two identical concurrent Bash permission requests can correlate to the same
+// pending request. The second registration is ambiguous: it must not replace
+// the first helper's waiter, and it returns no decision so its local dialog
+// handles it.
+func TestRemoteApprovalRefusesAmbiguousRegistration(t *testing.T) {
+	o, cancel := remoteObserver(t)
+	defer cancel()
+	var first bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		done <- ReportTo(context.Background(), o.ConfigPath, strings.NewReader(permissionInput("git push")), &first)
+	}()
+	u := nextUpdate(t, o)
+	var second bytes.Buffer
+	ctx, stop := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stop()
+	if err := ReportTo(ctx, o.ConfigPath, strings.NewReader(permissionInput("git push")), &second); err != nil {
+		t.Fatal(err)
+	}
+	if second.Len() != 0 || ctx.Err() != nil {
+		t.Fatalf("ambiguous helper must return promptly with no decision: out=%q ctx=%v", second.String(), ctx.Err())
+	}
+	if err := o.Decide(u.Pending.ID, "accept"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil || !strings.Contains(first.String(), `"behavior":"allow"`) {
+		t.Fatalf("first helper lost its decision: err=%v out=%q", err, first.String())
+	}
+}

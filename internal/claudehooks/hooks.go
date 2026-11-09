@@ -229,7 +229,10 @@ func NewWithOptions(ctx context.Context, executable string, opts Options) (*Obse
 			id := ""
 			// Register only for an event apply accepted: a stale session or
 			// prompt must never take over the current request's waiter.
-			if p, ok := s.pending[s.keyFor(req.Event)]; emit && ok && p.request.Type == bridge.PendingRequestApproval {
+			// Identical concurrent calls can correlate to the same request; a
+			// second registration is ambiguous, so it never replaces the
+			// existing waiter and its helper falls back to the local dialog.
+			if p, ok := s.pending[s.keyFor(req.Event)]; emit && ok && p.request.Type == bridge.PendingRequestApproval && s.waiters[p.request.ID] == nil {
 				id = p.request.ID
 				p.request.Summary = req.Summary
 				s.pending[s.keyFor(req.Event)] = p
