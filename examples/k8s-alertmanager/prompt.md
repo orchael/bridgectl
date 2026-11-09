@@ -1,6 +1,7 @@
 Perform a generic health check of this Kubernetes cluster using only the JSON
-snapshot appended below. Do not run shell commands or tools. Check node readiness, pods that are failing or stuck, and
-deployments with unavailable replicas. Distinguish an ongoing failure from a
+snapshot appended below. Do not run shell commands or tools. Check node readiness, pods that are failing, stuck, or unready, and
+deployments with unavailable replicas. A deployment intentionally scaled to zero
+is healthy. Distinguish an ongoing failure from a
 short-lived rollout or completed Job. Report only actionable findings supported
 by the snapshot. Do not infer health for resources absent from the snapshot.
 Do not disclose credentials or personal data.

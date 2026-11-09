@@ -3,6 +3,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { request } from "node:https";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { summarizeCluster } from "./snapshot.mjs";
 
 const required = (name) => {
   if (!process.env[name]) throw new Error(`Missing ${name}`);
@@ -54,30 +55,7 @@ async function clusterSnapshot() {
       get("/api/v1/pods"),
       get("/apis/apps/v1/deployments"),
     ]);
-    const snapshot = {
-      observedAt: new Date().toISOString(),
-      nodes: nodes.map((n) => ({
-        name: n.metadata.name,
-        conditions: n.status.conditions?.filter((c) => c.status !== "False" || c.type === "Ready")
-          .map((c) => ({ type: c.type, status: c.status, reason: c.reason })),
-      })),
-      pods: pods.filter((p) => p.metadata.namespace !== monitorNamespace &&
-        (p.status.phase !== "Running" && p.status.phase !== "Succeeded" ||
-        p.status.containerStatuses?.some((c) => c.state?.waiting || c.state?.terminated && c.state.terminated.exitCode !== 0))
-        )
-        .map((p) => ({
-          namespace: p.metadata.namespace, name: p.metadata.name, phase: p.status.phase,
-          containers: p.status.containerStatuses?.map((c) => ({
-            name: c.name, ready: c.ready, restarts: c.restartCount,
-            waiting: c.state?.waiting?.reason, terminated: c.state?.terminated?.reason,
-          })),
-        })),
-      deployments: deployments.filter((d) => (d.status.availableReplicas || 0) < (d.spec.replicas || 1))
-        .map((d) => ({
-          namespace: d.metadata.namespace, name: d.metadata.name,
-          desired: d.spec.replicas || 1, available: d.status.availableReplicas || 0,
-        })),
-    };
+    const snapshot = summarizeCluster(nodes, pods, deployments, monitorNamespace);
     const serialized = JSON.stringify(snapshot);
     if (serialized.length > 32768) throw new Error("Cluster snapshot exceeds 32 KiB");
     return serialized;

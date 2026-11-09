@@ -54,6 +54,7 @@ The pinned runtime image's `bridge` user is UID/GID 1001.
   healthy run does not immediately resolve a previous alert.
 - Agent, API, parsing, and Alertmanager failures exit nonzero. Monitor failed
   Jobs separately so a failed health check is visible.
-- The snapshot covers node readiness, abnormal pods, and unavailable
+- The snapshot covers node readiness, abnormal or unready pods (including
+  readiness transition times), and unavailable
   deployments. It does not cover every Kubernetes resource or prove that
   workloads are healthy beyond those signals.
