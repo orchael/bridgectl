@@ -40,7 +40,7 @@ func (p *ClaudeHooksProvider) BuildCommand(ctx context.Context, cfg bridge.Sessi
 		return nil, err
 	}
 	observerCtx, cancel := context.WithCancel(ctx)
-	o, err := claudehooks.New(observerCtx, executable)
+	o, err := claudehooks.NewWithOptions(observerCtx, executable, claudehooks.Options{RemoteApproval: claudeRemoteApprovalEnabled()})
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("claude session hooks: %w", err)
@@ -67,6 +67,25 @@ func (p *ClaudeHooksProvider) BuildCommand(ctx context.Context, cfg bridge.Sessi
 		p.mu.Unlock()
 	}()
 	return cmd, nil
+}
+
+// ClaudeRemoteApprovalEnv opts Claude sessions into remote (Bridge) approval
+// of Bash permission requests. Experimental; off unless set to "1".
+const ClaudeRemoteApprovalEnv = "BRIDGECTL_CLAUDE_REMOTE_APPROVAL"
+
+func claudeRemoteApprovalEnabled() bool { return os.Getenv(ClaudeRemoteApprovalEnv) == "1" }
+
+// DecideApproval delivers a remote decision to the session's waiting hook
+// helper. The observer refuses it unless a helper is waiting for exactly this
+// request, so a request already answered in the terminal is never re-answered.
+func (p *ClaudeHooksProvider) DecideApproval(_ context.Context, sessionID, pendingID, decision string) error {
+	p.mu.Lock()
+	o := p.sessions[sessionID]
+	p.mu.Unlock()
+	if o == nil {
+		return bridge.ErrPendingRequestMismatch
+	}
+	return o.Decide(pendingID, decision)
 }
 
 func (p *ClaudeHooksProvider) WatchInteraction(_ context.Context, id string, _ bridge.SessionConfig) (<-chan bridge.Interaction, error) {

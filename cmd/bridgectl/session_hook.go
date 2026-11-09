@@ -12,7 +12,8 @@ func newSessionHookCmd() *cobra.Command {
 		Short: "Forward structured Claude hook metadata to a local session observer",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return claudehooks.Report(cmd.Context(), configPath, cmd.InOrStdin())
+			// Stdout carries a PermissionRequest decision only in opt-in remote-approval mode.
+			return claudehooks.ReportTo(cmd.Context(), configPath, cmd.InOrStdin(), cmd.OutOrStdout())
 		},
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "private observer configuration (automatically supplied by the session provider)")

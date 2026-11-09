@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -74,5 +75,44 @@ func TestClaudeSettingsBeforePositionalDelimiter(t *testing.T) {
 	want := []string{"claude", "--verbose", "--settings", settings, "--", "--settings=this is prompt text"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args=%v, want %v", got, want)
+	}
+}
+
+var _ bridge.PendingApprovalResponder = (*ClaudeHooksProvider)(nil)
+
+// Remote approval is opt-in: the env flag switches the generated
+// PermissionRequest hook to a long timeout; without it nothing changes, and a
+// decision for an unknown session or request is a mismatch.
+func TestClaudeRemoteApprovalOptIn(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		if enabled {
+			t.Setenv(ClaudeRemoteApprovalEnv, "1")
+		}
+		p := NewClaudeHooksProvider(StdioConfig{ProviderID: "claude", Binary: "/bin/cat"})
+		ctx, cancel := context.WithCancel(context.Background())
+		cmd, err := p.BuildCommand(ctx, bridge.SessionConfig{SessionID: "s", RepoPath: t.TempDir()})
+		if err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(cmd.Args[len(cmd.Args)-1])
+		if err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		long := strings.Contains(string(data), `"timeout":300`)
+		if long != enabled {
+			cancel()
+			t.Fatalf("enabled=%v but long PermissionRequest timeout=%v", enabled, long)
+		}
+		if err := p.DecideApproval(ctx, "s", "nothing-waiting", "accept"); !errors.Is(err, bridge.ErrPendingRequestMismatch) {
+			cancel()
+			t.Fatalf("decision without a waiting request: %v", err)
+		}
+		if err := p.DecideApproval(ctx, "missing", "x", "accept"); !errors.Is(err, bridge.ErrPendingRequestMismatch) {
+			cancel()
+			t.Fatalf("decision for unknown session: %v", err)
+		}
+		cancel()
 	}
 }
