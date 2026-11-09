@@ -113,6 +113,21 @@ include both `accept` and `cancel`. The exact original RPC receives a structured
 response makes remote submission ineligible before it is forwarded, while local
 operation continues to use Codex's own resolution rules.
 
+Non-actionable command approvals still name the command. Until 2026-11 their
+summary was always the generic "Approval required in Codex", so Bridge users
+couldn't tell what they were attaching to approve. The summary is now an
+informational label with a reason prefix: "Needs network access", "Needs extra
+permissions" or "Approve in Codex". The command comes next, then the working
+directory (`Needs network access: git push origin x · in /path`). Whitespace is
+collapsed and control characters removed. Everything fits the 200-byte cap: the
+command is placed first so it survives truncation, and a long working directory
+is shortened from the left (`· in …/most/specific/dir`). It never uses the actionable
+"Run once in" wording, and `structured_approval_supported` stays false, so no
+remote decision is offered. File-change and permission-grant approvals, which
+carry no command, keep the generic label. This exposes no new data: actionable
+approval summaries and the legacy v1 path already include the full command.
+Covered by `TestApprovalSummaryAlwaysNamesTheCommand`.
+
 Run a real development approval cycle with `MAR66_BRIDGE_LIVE=1`,
 `MAR66_APPROVAL_LIVE=1` and the existing `MAR66_CREDENTIAL_FILE`, then use the Bridge
 approval Playwright test. Set `MAR66_APPROVAL_DECISION=cancel` for the rejection
