@@ -117,7 +117,11 @@ func TestRemoteApprovalDecisions(t *testing.T) {
 			}
 			// A remote reject interrupts the turn, and Claude fires no Stop or
 			// PostToolUse hook for it, so the observer must clear the request
-			// itself instead of showing "waiting for approval" forever.
+			// itself instead of showing "waiting for approval" forever. It does
+			// so only after the deny was delivered, as a follow-up update.
+			if tc.decision == "cancel" && after.State != bridge.InteractionIdle {
+				after = nextUpdate(t, o)
+			}
 			if tc.decision == "cancel" && (after.State != bridge.InteractionIdle || after.Pending != nil) {
 				t.Fatalf("after remote reject: %+v", after)
 			}
@@ -329,7 +333,7 @@ func TestRemoteApprovalInvalidatedRequest(t *testing.T) {
 // prompt already cleared the request and started a turn, the cleanup must not
 // mark that newer turn idle.
 func TestRejectCleanupDoesNotOverwriteNewTurn(t *testing.T) {
-	s := &state{pending: map[string]pending{}, tools: map[string]string{}, waiters: map[string]chan string{}}
+	s := &state{pending: map[string]pending{}, tools: map[string]string{}, waiters: map[string]*waiter{}}
 	s.pending["/tool/Bash"] = pending{request: bridge.PendingRequest{ID: "old", Type: bridge.PendingRequestApproval}}
 	if !s.resolveRejected("old") || s.base != bridge.InteractionIdle {
 		t.Fatalf("reject of a live request must resolve it: base=%s", s.base)
@@ -338,4 +342,37 @@ func TestRejectCleanupDoesNotOverwriteNewTurn(t *testing.T) {
 	if s.resolveRejected("old") || s.base != bridge.InteractionWorking {
 		t.Fatalf("stale cleanup changed the new turn: base=%s", s.base)
 	}
+}
+
+// A decision that lands after the handler already chose cancellation (Claude
+// killed the hook) but before it cleaned up must not be reported as
+// delivered: Decide succeeds only once the helper has actually written it.
+func TestDecisionAfterCancellationIsNotAcknowledged(t *testing.T) {
+	o, cancel := remoteObserver(t)
+	defer cancel()
+	hookCtx, killHook := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- ReportTo(hookCtx, o.ConfigPath, strings.NewReader(permissionInput("git push")), &bytes.Buffer{})
+	}()
+	u := nextUpdate(t, o)
+	o.mu.Lock()
+	killHook()
+	time.Sleep(300 * time.Millisecond) // handler has selected cancellation and now waits for the lock
+	w := o.state.takeWaiter(u.Pending.ID)
+	if w == nil {
+		o.mu.Unlock()
+		t.Fatal("waiter missing")
+	}
+	w.decision <- "cancel"
+	o.mu.Unlock()
+	select {
+	case delivered := <-w.ack:
+		if delivered {
+			t.Fatal("decision acknowledged although Claude never received it")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no acknowledgement")
+	}
+	<-done
 }

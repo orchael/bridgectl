@@ -93,14 +93,45 @@ func (o *Observer) Decide(pendingID, decision string) error {
 		return bridge.ErrInvalidResponse
 	}
 	o.mu.Lock()
-	defer o.mu.Unlock()
-	ch := o.state.waiters[pendingID]
-	if ch == nil || !o.state.hasPending(pendingID) {
+	w := o.state.takeWaiter(pendingID)
+	if w == nil {
+		o.mu.Unlock()
 		return bridge.ErrPendingRequestMismatch
 	}
-	delete(o.state.waiters, pendingID)
-	ch <- decision
-	return nil
+	w.decision <- decision
+	o.mu.Unlock()
+	// Success means the helper actually handed the decision to Claude, not
+	// merely that it was queued: the hook may have been killed or timed out
+	// in the meantime.
+	select {
+	case delivered := <-w.ack:
+		if !delivered {
+			return bridge.ErrPendingRequestMismatch
+		}
+		return nil
+	case <-time.After(5 * time.Second):
+		return errDecisionUnconfirmed
+	}
+}
+
+var errDecisionUnconfirmed = errors.New("remote decision delivery not confirmed")
+
+// waiter is one hook helper waiting for a remote decision. ack reports
+// whether a decision taken from decision was actually written to Claude.
+type waiter struct {
+	decision chan string
+	ack      chan bool
+}
+
+// takeWaiter removes and returns the waiter for a still-pending request, or
+// nil. Callers hold the observer mutex.
+func (s *state) takeWaiter(id string) *waiter {
+	w := s.waiters[id]
+	if w == nil || !s.hasPending(id) {
+		return nil
+	}
+	delete(s.waiters, id)
+	return w
 }
 
 // New creates an authenticated loopback receiver and private, session-local
@@ -165,7 +196,7 @@ func NewWithOptions(ctx context.Context, executable string, opts Options) (*Obse
 	}
 	updates := make(chan bridge.Interaction, 32)
 	done := make(chan struct{})
-	s := &state{pending: make(map[string]pending), tools: make(map[string]string), waiters: make(map[string]chan string)}
+	s := &state{pending: make(map[string]pending), tools: make(map[string]string), waiters: make(map[string]*waiter)}
 	var mu sync.Mutex
 	// publish never stalls the CLI behind a slow consumer; it keeps the latest state.
 	publish := func(next bridge.Interaction) {
@@ -223,7 +254,7 @@ func NewWithOptions(ctx context.Context, executable string, opts Options) (*Obse
 			rc := http.NewResponseController(w)
 			_ = rc.SetReadDeadline(time.Time{})
 			_ = rc.SetWriteDeadline(time.Now().Add(remoteWaitLimit + 5*time.Second))
-			decision := make(chan string, 1)
+			wt := &waiter{decision: make(chan string, 1), ack: make(chan bool, 1)}
 			mu.Lock()
 			next, emit := s.apply(req.Event)
 			id := ""
@@ -238,7 +269,7 @@ func NewWithOptions(ctx context.Context, executable string, opts Options) (*Obse
 				p.registered = true
 				p.request.Summary = req.Summary
 				s.pending[s.keyFor(req.Event)] = p
-				s.waiters[id] = decision
+				s.waiters[id] = wt
 				next, emit = s.current(), true
 			}
 			if emit {
@@ -249,24 +280,48 @@ func NewWithOptions(ctx context.Context, executable string, opts Options) (*Obse
 			if id != "" {
 				timer := time.NewTimer(remoteWaitLimit)
 				select {
-				case result = <-decision:
+				case result = <-wt.decision:
 				case <-r.Context().Done():
 				case <-timer.C:
 				case <-ctx.Done():
 				}
 				timer.Stop()
 				mu.Lock()
-				if s.waiters[id] == decision {
+				if s.waiters[id] == wt {
 					delete(s.waiters, id)
-				}
-				if result == "cancel" {
-					s.resolveRejected(id)
+				} else if result == "" {
+					// Decide (or invalidation) took the waiter after we stopped
+					// waiting: never let a decision we won't deliver be
+					// reported as delivered.
+					select {
+					case late := <-wt.decision:
+						if late != "" {
+							wt.ack <- false
+						}
+					default:
+					}
 				}
 				publish(s.current())
 				mu.Unlock()
 			}
+			if result == "" {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]string{"decision": ""})
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]string{"decision": result})
+			err := json.NewEncoder(w).Encode(map[string]string{"decision": result})
+			if err == nil {
+				err = rc.Flush()
+			}
+			delivered := err == nil && r.Context().Err() == nil
+			if delivered && result == "cancel" {
+				mu.Lock()
+				s.resolveRejected(id)
+				publish(s.current())
+				mu.Unlock()
+			}
+			wt.ack <- delivered
 		})
 	}
 	handler := http.Handler(mux)
@@ -465,7 +520,7 @@ type state struct {
 	tools   map[string]string
 	// waiters holds the hook helpers currently waiting for a remote decision,
 	// by pending request ID (remote-approval mode only).
-	waiters map[string]chan string
+	waiters map[string]*waiter
 }
 
 // keyFor returns the pending-map key apply uses for a tool event.
@@ -612,10 +667,10 @@ func (s *state) hasPending(id string) bool {
 // Claude has invalidated (completed, stopped, new prompt, session reset), so
 // a late remote decision can never apply to it.
 func (s *state) releaseStaleWaiters() {
-	for id, ch := range s.waiters {
+	for id, w := range s.waiters {
 		if !s.hasPending(id) {
 			delete(s.waiters, id)
-			ch <- ""
+			w.decision <- ""
 		}
 	}
 }
