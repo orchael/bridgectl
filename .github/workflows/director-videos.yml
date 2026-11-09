@@ -1,0 +1,52 @@
+name: Generate Director videos
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cmd/bridgectl/**'
+      - 'docs/tutorials/**'
+      - '.github/workflows/director-videos.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DIRECTOR_API_URL: ${{ secrets.DIRECTOR_API_URL }}
+      DIRECTOR_PUBLISH_TOKEN: ${{ secrets.DIRECTOR_PUBLISH_TOKEN }}
+      REVISION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout Director
+        uses: actions/checkout@v4
+        with:
+          repository: orchael/director
+          path: .director
+          token: ${{ secrets.DIRECTOR_REPO_READ_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install Director
+        run: pip install ./.director
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Build bridgectl
+        run: go build -o /usr/local/bin/bridgectl ./cmd/bridgectl
+      - name: Generate and publish videos
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$DIRECTOR_API_URL" && test -n "$DIRECTOR_PUBLISH_TOKEN"
+          for tutorial in docs/tutorials/*.yaml; do
+            id="$(basename "$tutorial" .yaml)"
+            url="$DIRECTOR_API_URL/api/videos/$id/$REVISION"
+            curl --fail --silent --show-error -X POST -H "Authorization: Bearer $DIRECTOR_PUBLISH_TOKEN" "$url/building"
+            director "$tutorial" --output "dist/$id" --render
+            curl --fail --silent --show-error -X POST -H "Authorization: Bearer $DIRECTOR_PUBLISH_TOKEN" \
+              -F "file=@dist/$id/tutorial.mp4;type=video/mp4" "$url/publish"
+          done
