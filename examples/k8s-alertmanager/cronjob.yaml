@@ -1,0 +1,57 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: bridgectl-monitor
+spec:
+  schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 900
+      template:
+        spec:
+          serviceAccountName: bridgectl-monitor
+          restartPolicy: Never
+          securityContext:
+            runAsUser: 1001
+            runAsGroup: 1001
+            fsGroup: 1001
+          containers:
+            - name: monitor
+              image: YOUR_REGISTRY/bridgectl-monitor:PINNED_TAG
+              command: ["node", "/app/run.mjs"]
+              env:
+                - name: PROVIDER
+                  value: codex
+                - name: PROJECT_DIR
+                  value: /home/bridge/workspace
+                - name: MONITOR_SERVICE
+                  value: kubernetes-cluster
+                - name: MONITOR_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: ALERTMANAGER_URL
+                  value: http://alertmanager-operated.observability.svc:9093
+                - name: CODEX_AUTH
+                  valueFrom:
+                    secretKeyRef:
+                      name: bridgectl-monitor-provider
+                      key: CODEX_AUTH
+              volumeMounts:
+                - name: prompt
+                  mountPath: /config
+                  readOnly: true
+                - name: workspace
+                  mountPath: /home/bridge/workspace
+              resources:
+                requests: {cpu: 250m, memory: 512Mi}
+                limits: {cpu: "2", memory: 2Gi}
+          volumes:
+            - name: prompt
+              configMap:
+                name: bridgectl-monitor
+            - name: workspace
+              emptyDir: {}
