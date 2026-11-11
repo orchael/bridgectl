@@ -202,6 +202,10 @@ func updateSelf(cmd *cobra.Command, requested string) error {
 	if err != nil {
 		return err
 	}
+	return updateSelfWithManager(cmd, manager, requested)
+}
+
+func updateSelfWithManager(cmd *cobra.Command, manager, requested string) error {
 	ctx := cmd.Context()
 	switch manager {
 	case "apt":
@@ -220,21 +224,30 @@ func updateSelf(cmd *cobra.Command, requested string) error {
 		if err := run("apt-get", "update"); err != nil {
 			return err
 		}
+		policy, err := updateOutput(ctx, "apt-cache", "policy", "bridgectl")
+		if err != nil {
+			return err
+		}
+		installed, available := aptPolicyVersions(policy)
 		candidate := strings.TrimPrefix(requested, "v")
 		if candidate == "" {
-			out, err := updateOutput(ctx, "apt-cache", "policy", "bridgectl")
+			candidate = available
+			if candidate == "" || candidate == "(none)" {
+				return errors.New("no bridgectl candidate in configured apt repositories")
+			}
+		}
+		if installed == candidate {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "bridgectl %s is already installed with apt.\n", installed)
+			return nil
+		}
+		if requested == "" && installed != "" && installed != "(none)" {
+			newer, err := aptVersionIsNewer(ctx, installed, candidate)
 			if err != nil {
 				return err
 			}
-			for _, line := range strings.Split(out, "\n") {
-				line = strings.TrimSpace(line)
-				if strings.HasPrefix(line, "Candidate:") {
-					candidate = strings.TrimSpace(strings.TrimPrefix(line, "Candidate:"))
-					break
-				}
-			}
-			if candidate == "" || candidate == "(none)" {
-				return errors.New("no bridgectl candidate in configured apt repositories")
+			if newer {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "bridgectl %s is newer than the apt repository candidate %s; leaving it installed.\n", installed, candidate)
+				return nil
 			}
 		}
 		if requested != "" {
@@ -266,8 +279,27 @@ func updateSelf(cmd *cobra.Command, requested string) error {
 		if _, err := runUpdateCommand(ctx, cmd, "brew", "update"); err != nil {
 			return err
 		}
+		info, err := updateOutput(ctx, "brew", "info", "--json=v2", "--cask", "orchael/bridgectl/bridgectl")
+		if err != nil {
+			return err
+		}
+		installed, available, err := brewCaskVersions(info)
+		if err != nil {
+			return err
+		}
+		target := strings.TrimPrefix(requested, "v")
+		if target == "" {
+			target = available
+		}
+		if installed == target {
+			if err := refreshLaunchAgentAfterBrew(cmd); err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "bridgectl %s is already installed with Homebrew.\n", installed)
+			return nil
+		}
 		if requested != "" {
-			if err := installVersionedBrewCask(cmd, strings.TrimPrefix(requested, "v")); err != nil {
+			if err := installVersionedBrewCask(cmd, target); err != nil {
 				return err
 			}
 			if err := refreshLaunchAgentAfterBrew(cmd); err != nil {
@@ -283,7 +315,7 @@ func updateSelf(cmd *cobra.Command, requested string) error {
 			if err := refreshLaunchAgentAfterBrew(cmd); err != nil {
 				return err
 			}
-			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "bridgectl is already at the latest Homebrew cask version.")
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Homebrew reports bridgectl %s is current (tap version %s).\n", installed, available)
 			return nil
 		}
 		if _, err := runUpdateCommand(ctx, cmd, "brew", "upgrade", "--cask", "orchael/bridgectl/bridgectl"); err != nil {
@@ -295,6 +327,47 @@ func updateSelf(cmd *cobra.Command, requested string) error {
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "bridgectl package updated with %s; restart the server after active sessions finish.\n", manager)
 	return nil
+}
+
+func aptPolicyVersions(policy string) (installed, candidate string) {
+	for _, line := range strings.Split(policy, "\n") {
+		line = strings.TrimSpace(line)
+		if value, ok := strings.CutPrefix(line, "Installed:"); ok {
+			installed = strings.TrimSpace(value)
+		}
+		if value, ok := strings.CutPrefix(line, "Candidate:"); ok {
+			candidate = strings.TrimSpace(value)
+		}
+	}
+	return installed, candidate
+}
+
+func aptVersionIsNewer(ctx context.Context, installed, candidate string) (bool, error) {
+	err := exec.CommandContext(ctx, "dpkg", "--compare-versions", installed, "gt", candidate).Run()
+	if err == nil {
+		return true, nil
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("compare installed and apt candidate versions: %w", err)
+}
+
+func brewCaskVersions(output string) (installed, available string, err error) {
+	var info struct {
+		Casks []struct {
+			Version   string `json:"version"`
+			Installed string `json:"installed"`
+		} `json:"casks"`
+	}
+	if err := json.Unmarshal([]byte(output), &info); err != nil {
+		return "", "", fmt.Errorf("parse Homebrew cask info: %w", err)
+	}
+	if len(info.Casks) != 1 || info.Casks[0].Version == "" || info.Casks[0].Installed == "" {
+		return "", "", errors.New("homebrew did not report installed and available bridgectl cask versions")
+	}
+	return info.Casks[0].Installed, info.Casks[0].Version, nil
 }
 
 var launchAgentProgramPattern = regexp.MustCompile(`(?s)(<key>ProgramArguments</key>\s*<array>\s*<string>)([^<]*)(</string>)`)
@@ -438,6 +511,8 @@ var agentBinaries = map[string]string{"@anthropic-ai/claude-code": "claude", "@o
 
 var npmRegistryURL = "https://registry.npmjs.org"
 
+const initialAgentRuntimeManifest = "{\n  \"name\": \"bridgectl-provider-runtime\",\n  \"private\": true,\n  \"version\": \"0.0.0\"\n}\n"
+
 func copyRuntimeFile(src, dst string) error {
 	info, err := os.Lstat(src)
 	if err != nil {
@@ -481,7 +556,20 @@ func installAgentPackagesLocked(cmd *cobra.Command, runtimeDir string, selected 
 	for _, name := range []string{"package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".nvmrc", ".npmrc", ".pnpmfile.cjs"} {
 		src := filepath.Join(runtimeDir, name)
 		if err := copyRuntimeFile(src, filepath.Join(stage, name)); err != nil {
-			if errors.Is(err, os.ErrNotExist) && name != "package.json" {
+			if errors.Is(err, os.ErrNotExist) {
+				if name != "package.json" {
+					continue
+				}
+				entries, readErr := os.ReadDir(runtimeDir)
+				if readErr != nil {
+					return fmt.Errorf("inspect provider runtime: %w", readErr)
+				}
+				if len(entries) != 0 {
+					return fmt.Errorf("provider runtime at %s has files but no package.json", runtimeDir)
+				}
+				if writeErr := os.WriteFile(filepath.Join(stage, name), []byte(initialAgentRuntimeManifest), 0o600); writeErr != nil {
+					return fmt.Errorf("initialize provider runtime: %w", writeErr)
+				}
 				continue
 			}
 			return fmt.Errorf("stage %s: %w", name, err)

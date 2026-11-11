@@ -13,6 +13,9 @@ import (
 func withAgentRuntimeLock(ctx context.Context, runtimeDir string, update func(string) error) error {
 	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		return fmt.Errorf("create provider runtime: %w", err)
+	}
 	canonical, err := filepath.EvalSymlinks(runtimeDir)
 	if err != nil {
 		return fmt.Errorf("resolve provider runtime: %w", err)

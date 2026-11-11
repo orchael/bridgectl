@@ -170,8 +170,9 @@ func TestUpdateSelfAptInstallsLatestCandidate(t *testing.T) {
 	logPath := filepath.Join(dir, "apt.log")
 	scripts := map[string]string{
 		"dpkg-query": "#!/bin/sh\necho 'bridgectl: /usr/bin/bridgectl'\n",
-		"apt-cache":  "#!/bin/sh\n[ \"$LC_ALL\" = C ] || exit 8\necho 'bridgectl:'\necho '  Candidate: 1.6.0'\n",
+		"apt-cache":  "#!/bin/sh\n[ \"$LC_ALL\" = C ] || exit 8\necho 'bridgectl:'\necho '  Installed: 1.5.0'\necho '  Candidate: 1.6.0'\n",
 		"apt-get":    "#!/bin/sh\necho \"$*\" >> '" + logPath + "'\n",
+		"dpkg":       "#!/bin/sh\nexit 1\n",
 		"sudo":       "#!/bin/sh\nexec \"$@\"\n",
 	}
 	for name, script := range scripts {
@@ -192,6 +193,103 @@ func TestUpdateSelfAptInstallsLatestCandidate(t *testing.T) {
 	}
 	if got := string(log); got != "update\ninstall -y bridgectl=1.6.0\n" {
 		t.Fatalf("apt calls = %q", got)
+	}
+}
+
+func TestUpdateSelfAptSkipsAlreadyInstalledVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell command fixture")
+	}
+	for _, requested := range []string{"", "v1.5.0"} {
+		t.Run(requested, func(t *testing.T) {
+			dir := t.TempDir()
+			logPath := filepath.Join(dir, "apt.log")
+			scripts := map[string]string{
+				"dpkg-query": "#!/bin/sh\necho 'bridgectl: /usr/bin/bridgectl'\n",
+				"apt-cache":  "#!/bin/sh\necho 'bridgectl:'\necho '  Installed: 1.5.0'\necho '  Candidate: 1.5.0'\n",
+				"apt-get":    "#!/bin/sh\necho \"$*\" >> '" + logPath + "'\n",
+				"sudo":       "#!/bin/sh\nexec \"$@\"\n",
+			}
+			for name, script := range scripts {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PATH", dir)
+			cmd := &cobra.Command{}
+			cmd.SetContext(context.Background())
+			if err := updateSelf(cmd, requested); err != nil {
+				t.Fatal(err)
+			}
+			log, err := os.ReadFile(logPath)
+			if err != nil || string(log) != "update\n" {
+				t.Fatalf("apt calls = %q, %v", log, err)
+			}
+		})
+	}
+}
+
+func TestUpdateSelfBrewComparesInstalledAndTapVersions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell command fixture")
+	}
+	for _, tc := range []struct {
+		name, requested, installed, available, outdated, wantCalls string
+	}{
+		{"latest already installed", "", "1.5.0", "1.5.0", "", "update\ninfo --json=v2 --cask orchael/bridgectl/bridgectl\n"},
+		{"requested already installed", "v1.5.0", "1.5.0", "1.6.0", "", "update\ninfo --json=v2 --cask orchael/bridgectl/bridgectl\n"},
+		{"newer in tap", "", "1.5.0", "1.6.0", "bridgectl", "update\ninfo --json=v2 --cask orchael/bridgectl/bridgectl\noutdated --cask --quiet bridgectl\nupgrade --cask orchael/bridgectl/bridgectl\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			logPath := filepath.Join(root, "brew.log")
+			info := fmt.Sprintf(`{"casks":[{"version":%q,"installed":%q}]}`, tc.available, tc.installed)
+			script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + logPath + "'\ncase \"$1\" in\n  info) printf '%s\\n' '" + info + "' ;;\n  outdated) printf '%s\\n' '" + tc.outdated + "' ;;\nesac\n"
+			if err := os.WriteFile(filepath.Join(root, "brew"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", root)
+			t.Setenv("HOME", root)
+			cmd := &cobra.Command{}
+			cmd.SetContext(context.Background())
+			if err := updateSelfWithManager(cmd, "brew", tc.requested); err != nil {
+				t.Fatal(err)
+			}
+			calls, err := os.ReadFile(logPath)
+			if err != nil || string(calls) != tc.wantCalls {
+				t.Fatalf("brew calls = %q, %v; want %q", calls, err, tc.wantCalls)
+			}
+		})
+	}
+}
+
+func TestUpdateSelfAptDoesNotDowngradeLatestCandidate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell command fixture")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "apt.log")
+	scripts := map[string]string{
+		"dpkg-query": "#!/bin/sh\necho 'bridgectl: /usr/bin/bridgectl'\n",
+		"apt-cache":  "#!/bin/sh\necho 'bridgectl:'\necho '  Installed: 1.6.0'\necho '  Candidate: 1.5.0'\n",
+		"apt-get":    "#!/bin/sh\necho \"$*\" >> '" + logPath + "'\n",
+		"dpkg":       "#!/bin/sh\n[ \"$1\" = --compare-versions ] && [ \"$2\" = 1.6.0 ] && [ \"$3\" = gt ] && [ \"$4\" = 1.5.0 ]\n",
+		"sudo":       "#!/bin/sh\nexec \"$@\"\n",
+	}
+	for name, script := range scripts {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := updateSelf(cmd, ""); err != nil {
+		t.Fatal(err)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil || string(log) != "update\n" {
+		t.Fatalf("apt calls = %q, %v", log, err)
 	}
 }
 
