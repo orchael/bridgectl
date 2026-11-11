@@ -64,6 +64,7 @@ Running bridgectl with no subcommand is shorthand for
 		newBridgeLogoutCmd(),
 		newBridgeWhoamiCmd(),
 		newDoctorCmd(),
+		newUpdateCmd(),
 	)
 
 	root.AddGroup(&cobra.Group{ID: providerShortcutGroupID, Title: "Provider shortcuts:"})

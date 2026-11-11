@@ -23,6 +23,19 @@ func TestPrepareNoConfigReturnsBaseEnv(t *testing.T) {
 	}
 }
 
+func TestRepoSetupAcceptsUpdateSettings(t *testing.T) {
+	repo := t.TempDir()
+	writeSetup(t, repo, "version: 1\nsetup:\n  - export FROM_SETUP=ready\nupdate:\n  login: true\n  doctor: true\n  bridge: https://bridge.orchael.com\n")
+	c := NewCoordinator(Options{Enabled: true})
+	env, err := c.Prepare(context.Background(), repo, []string{"PATH=" + os.Getenv("PATH")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := envValue(env, "FROM_SETUP"); got != "ready" {
+		t.Fatalf("FROM_SETUP = %q, want ready", got)
+	}
+}
+
 func TestPrepareDisabledReturnsProvidedEnv(t *testing.T) {
 	c := NewCoordinator(Options{
 		Enabled: false,

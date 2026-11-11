@@ -4,6 +4,76 @@ title: CLI Reference
 
 The main CLI is `bridgectl`. Build it with `make build-cli`.
 
+## Updates
+
+Update an apt or Homebrew installation with its package manager:
+
+```bash
+bridgectl update
+bridgectl update --version 1.5.0
+```
+
+The command verifies that the running binary belongs to the `bridgectl` apt
+package or Homebrew cask before changing anything. Apt refreshes package lists
+and installs the latest available package, or the exact requested version if
+it exists in a configured repository; an explicit version may downgrade the
+package. Homebrew refreshes its tap and upgrades the cask. For an exact
+Homebrew version, bridgectl creates a temporary cask
+from that release's archive and checksum, then installs it through Homebrew.
+Manual and source builds are not self-updated. Finish active sessions before
+updating: the package manager may unload an installed service. Restart the
+service afterward. On macOS, an existing launch agent plist is updated to the
+new Caskroom binary path while keeping its environment; the command prints
+the `launchctl` commands to reload it after sessions finish.
+
+To run Bridge login and doctor after updating, add an `update` section to the
+same repository `.bridgectl.yaml` file used for pre-agent `setup` scripts:
+
+```yaml
+version: 1
+setup:
+  - echo "repository ready"
+update:
+  login: true
+  doctor: true
+  bridge: https://bridge.orchael.com
+```
+
+Both checks default to `false`, and the Bridge origin defaults to
+`https://bridge.orchael.com`. Use `--config <path>` for another repository setup file,
+or override individual settings with `--login`, `--doctor`, and `--bridge`.
+Login uses the existing enrollment unless you explicitly re-enroll with
+`bridgectl login --force`. Doctor checks the installed CLI and current local
+enrollment. A failing login or doctor check makes `update` exit with an error.
+
+Update the npm agent CLIs in the user provider runtime:
+
+```bash
+bridgectl update agents                   # Claude, Codex, OpenCode
+bridgectl update agents codex             # latest published Codex
+bridgectl update agents claude --version 2.1.296
+bridgectl update agents all --claude-version 2.1.296 --codex-version 0.162.1
+bridgectl update agents all --runtime-dir /opt/bridgectl
+```
+
+The command queries npm for exact package versions and installs them in a
+sibling staging directory with `corepack pnpm add --save-exact --prod`. It
+verifies selected binaries before replacing the live runtime files and restores
+the previous files if the replacement fails. Concurrent updates to the same
+runtime wait on a lock so neither update discards the other. The runtime must
+already contain
+`package.json`, and the user running the command must be able to write there.
+The default directory is `runtime.provider_root` from the discovered server
+config when set, otherwise `$XDG_DATA_HOME/bridgectl/providers` or
+`~/.local/share/bridgectl/providers`. Configure `runtime.provider_root` if
+you use a custom directory so the daemon launches the updated CLIs.
+`--version` requires one agent; an all-agent update can pin individual agents
+with `--claude-version`, `--codex-version`, or `--opencode-version` while the
+others use npm's latest version. Gemini uses the native `agy` binary and is
+outside this npm update command. Re-running the packaged
+`install-provider-runtime` script restores the versions pinned in that
+package's manifest.
+
 ## Run
 
 The quickest way to start working. Auto-starts a local server if needed, creates a session, and attaches your terminal:
