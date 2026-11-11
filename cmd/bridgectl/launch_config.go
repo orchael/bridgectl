@@ -49,7 +49,7 @@ func loadLaunchConfig(dir string) (*launchConfig, error) {
     data, err := os.ReadFile(candidate)
     if err == nil {
       var cfg launchConfig
-      if err := yaml.UnmarshalStrict(data, &cfg); err != nil {
+      if err := yaml.Unmarshal(data, &cfg); err != nil {
         return nil, fmt.Errorf("parse %s: %w", candidate, err)
       }
       return &cfg, nil
