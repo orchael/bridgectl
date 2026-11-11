@@ -250,7 +250,12 @@ func updateSelf(cmd *cobra.Command, requested string) error {
 				return fmt.Errorf("bridgectl version %s is unavailable in configured apt repositories", candidate)
 			}
 		}
-		if err := run("apt-get", "install", "-y", "bridgectl="+candidate); err != nil {
+		installArgs := []string{"install", "-y"}
+		if requested != "" {
+			installArgs = append(installArgs, "--allow-downgrades")
+		}
+		installArgs = append(installArgs, "bridgectl="+candidate)
+		if err := run("apt-get", installArgs...); err != nil {
 			return err
 		}
 	case "brew":
@@ -425,6 +430,8 @@ var agentPackages = map[string]string{"claude": "@anthropic-ai/claude-code", "co
 
 var agentBinaries = map[string]string{"@anthropic-ai/claude-code": "claude", "@openai/codex": "codex", "opencode-ai": "opencode"}
 
+var npmRegistryURL = "https://registry.npmjs.org"
+
 func copyRuntimeFile(src, dst string) error {
 	info, err := os.Lstat(src)
 	if err != nil {
@@ -450,6 +457,12 @@ func copyRuntimeFile(src, dst string) error {
 }
 
 func installAgentPackages(cmd *cobra.Command, runtimeDir string, selected []string, packages []string) error {
+	return withAgentRuntimeLock(cmd.Context(), runtimeDir, func(lockedDir string) error {
+		return installAgentPackagesLocked(cmd, lockedDir, selected, packages)
+	})
+}
+
+func installAgentPackagesLocked(cmd *cobra.Command, runtimeDir string, selected []string, packages []string) error {
 	parent := filepath.Dir(runtimeDir)
 	stage, err := os.MkdirTemp(parent, ".bridgectl-agents-stage-")
 	if err != nil {
@@ -644,7 +657,7 @@ func newUpdateAgentsCmd() *cobra.Command {
 			if versionFlag != "" {
 				requested = versionFlag
 			}
-			ver, err := npmVersion(cmd.Context(), client, "https://registry.npmjs.org", pkg, requested)
+			ver, err := npmVersion(cmd.Context(), client, npmRegistryURL, pkg, requested)
 			if err != nil {
 				return err
 			}

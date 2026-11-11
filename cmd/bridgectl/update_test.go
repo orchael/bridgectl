@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -111,8 +112,51 @@ func TestUpdateSelfAptInstallsRequestedVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := string(log); got != "update\ninstall -y bridgectl=1.5.0\n" {
+	if got := string(log); got != "update\ninstall -y --allow-downgrades bridgectl=1.5.0\n" {
 		t.Fatalf("apt calls = %q", got)
+	}
+}
+
+func TestAgentRuntimeLockSerializesConcurrentUpdates(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	firstEntered, releaseFirst := make(chan struct{}), make(chan struct{})
+	firstDone, secondEntered, secondDone := make(chan error, 1), make(chan struct{}), make(chan error, 1)
+	go func() {
+		firstDone <- withAgentRuntimeLock(ctx, dir, func(string) error {
+			close(firstEntered)
+			<-releaseFirst
+			return nil
+		})
+	}()
+	select {
+	case <-firstEntered:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	go func() {
+		secondDone <- withAgentRuntimeLock(ctx, dir, func(string) error {
+			close(secondEntered)
+			return nil
+		})
+	}()
+	select {
+	case <-secondEntered:
+		t.Fatal("second update entered before first released the runtime")
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-secondEntered:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -293,5 +337,45 @@ func TestInstallAgentPackagesStagesBeforeReplacing(t *testing.T) {
 				t.Fatalf("binary = %q, %v", got, readErr)
 			}
 		})
+	}
+}
+
+func TestUpdateAgentsCommandResolvesAndInstallsExactVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell command fixture")
+	}
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/@openai%2Fcodex/0.2.0" {
+			t.Errorf("registry path = %q", r.URL.EscapedPath())
+		}
+		_, _ = w.Write([]byte(`{"version":"0.2.0"}`))
+	}))
+	defer registry.Close()
+	previousRegistry := npmRegistryURL
+	npmRegistryURL = registry.URL
+	t.Cleanup(func() { npmRegistryURL = previousRegistry })
+	root := t.TempDir()
+	live, bin := filepath.Join(root, "runtime"), filepath.Join(root, "bin")
+	for _, dir := range []string{live, bin} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(live, "package.json"), []byte("old manifest"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n/bin/mkdir -p node_modules/.bin\nprintf 'new manifest' > package.json\nprintf 'new lock' > pnpm-lock.yaml\nprintf 'new binary' > node_modules/.bin/codex\n"
+	if err := os.WriteFile(filepath.Join(bin, "corepack"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	cmd := newUpdateAgentsCmd()
+	cmd.SetArgs([]string{"codex", "--version", "0.2.0", "--runtime-dir", live})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(live, "node_modules", ".bin", "codex"))
+	if err != nil || string(got) != "new binary" {
+		t.Fatalf("installed binary = %q, %v", got, err)
 	}
 }

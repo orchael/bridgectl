@@ -16,8 +16,9 @@ bridgectl update --version 1.5.0
 The command verifies that the running binary belongs to the `bridgectl` apt
 package or Homebrew cask before changing anything. Apt refreshes package lists
 and installs the latest available package, or the exact requested version if
-it exists in a configured repository. Homebrew refreshes its tap and upgrades
-the cask. For an exact Homebrew version, bridgectl creates a temporary cask
+it exists in a configured repository; an explicit version may downgrade the
+package. Homebrew refreshes its tap and upgrades the cask. For an exact
+Homebrew version, bridgectl creates a temporary cask
 from that release's archive and checksum, then installs it through Homebrew.
 Manual and source builds are not self-updated. Finish active sessions before
 updating: the package manager may unload an installed service. Restart the
@@ -58,7 +59,9 @@ bridgectl update agents all --runtime-dir /opt/bridgectl
 The command queries npm for exact package versions and installs them in a
 sibling staging directory with `corepack pnpm add --save-exact --prod`. It
 verifies selected binaries before replacing the live runtime files and restores
-the previous files if the replacement fails. The runtime must already contain
+the previous files if the replacement fails. Concurrent updates to the same
+runtime wait on a lock so neither update discards the other. The runtime must
+already contain
 `package.json`, and the user running the command must be able to write there.
 The default directory is `runtime.provider_root` from the discovered server
 config when set, otherwise `$XDG_DATA_HOME/bridgectl/providers` or
