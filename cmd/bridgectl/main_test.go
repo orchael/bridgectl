@@ -9,13 +9,14 @@ import (
 )
 
 // TestCommandNameReservedBuiltins covers the Copilot review finding on PR
-// #279: a custom provider named "doctor", "help", or "completion" must not
+// #279: a custom provider named "doctor", "update", "help", or "completion" must not
 // be allowed to register a shortcut that collides with those commands.
 func TestCommandNameReservedBuiltins(t *testing.T) {
 	root := &cobra.Command{Use: "bridgectl"}
 	root.AddCommand(newDoctorCmd())
+	root.AddCommand(newUpdateCmd())
 
-	for _, name := range []string{"doctor", "help", "completion"} {
+	for _, name := range []string{"doctor", "update", "help", "completion"} {
 		if !commandNameReserved(root, name) {
 			t.Errorf("commandNameReserved(%q) = false, want true", name)
 		}

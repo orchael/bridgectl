@@ -438,6 +438,11 @@ make smoke
 This validates the repo Dockerfile and Compose stack by starting the bridge in Docker and running an authenticated gRPC health check.
 It also verifies config-driven provider fallback by requesting a deliberately unavailable smoke provider and asserting the configured fallback provider is selected.
 
+After installing, run `bridgectl update` to upgrade an apt or Homebrew package,
+or `bridgectl update agents` to refresh the npm agent CLIs. Exact versions and
+the optional login/doctor settings in the repository `.bridgectl.yaml` are documented in the
+[CLI update reference](docs/docs/reference/cli.md#updates).
+
 ### macOS Install (Homebrew)
 
 Supported on Apple Silicon and Intel Macs.
