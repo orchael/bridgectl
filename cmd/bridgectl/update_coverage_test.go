@@ -162,6 +162,65 @@ func TestUpdateAgentsRecoversInterruptedRuntimeBeforeRegistryFailure(t *testing.
 	}
 }
 
+func TestUpdateAgentsInitializesMissingRuntime(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell command fixture")
+	}
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/@openai%2Fcodex/latest" {
+			t.Errorf("unexpected registry path %s", r.URL.EscapedPath())
+		}
+		_, _ = w.Write([]byte(`{"version":"1.4.0"}`))
+	}))
+	defer registry.Close()
+	previousRegistry := npmRegistryURL
+	npmRegistryURL = registry.URL
+	t.Cleanup(func() { npmRegistryURL = previousRegistry })
+
+	root := t.TempDir()
+	live, bin := filepath.Join(root, "missing", "bridgectl", "providers"), filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n[ -f package.json ] || exit 9\n/bin/mkdir -p node_modules/.bin\nprintf ready > node_modules/.bin/codex\nprintf lock > pnpm-lock.yaml\n"
+	if err := os.WriteFile(filepath.Join(bin, "corepack"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	cmd := newUpdateAgentsCmd()
+	cmd.SetArgs([]string{"codex", "--runtime-dir", live})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := os.ReadFile(filepath.Join(live, "package.json"))
+	if err != nil || !strings.Contains(string(manifest), `"name": "bridgectl-provider-runtime"`) {
+		t.Fatalf("initialized manifest = %q, %v", manifest, err)
+	}
+	if _, err := os.Stat(filepath.Join(live, "node_modules", ".bin", "codex")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpdateAgentsDoesNotOverwriteIncompleteRuntime(t *testing.T) {
+	root := t.TempDir()
+	live := filepath.Join(root, "providers")
+	if err := os.Mkdir(live, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	modules := filepath.Join(live, "node_modules")
+	if err := os.Mkdir(modules, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := installAgentPackages(cmd, live, []string{"codex"}, []string{"@openai/codex@1.4.0"}); err == nil || !strings.Contains(err.Error(), "has files but no package.json") {
+		t.Fatalf("expected incomplete-runtime error, got %v", err)
+	}
+	if _, err := os.Stat(modules); err != nil {
+		t.Fatalf("existing modules were removed: %v", err)
+	}
+}
+
 func TestRecoverAgentRuntimeRejectsInvalidMarkerWithoutDeletingData(t *testing.T) {
 	for _, scenario := range []struct {
 		name   string
