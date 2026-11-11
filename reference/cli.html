@@ -4,8 +4,8 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.2">
 <title data-rh="true">CLI Reference | Bridgectl</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orchael.github.io/bridgectl/reference/cli"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="CLI Reference | Bridgectl"><meta data-rh="true" name="description" content="The main CLI is bridgectl. Build it with make build-cli."><meta data-rh="true" property="og:description" content="The main CLI is bridgectl. Build it with make build-cli."><link data-rh="true" rel="canonical" href="https://orchael.github.io/bridgectl/reference/cli"><link data-rh="true" rel="alternate" href="https://orchael.github.io/bridgectl/reference/cli" hreflang="en"><link data-rh="true" rel="alternate" href="https://orchael.github.io/bridgectl/reference/cli" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"CLI Reference","item":"https://orchael.github.io/bridgectl/reference/cli"}]}</script><link rel="stylesheet" href="/bridgectl/assets/css/styles.4c9ca108.css">
-<script src="/bridgectl/assets/js/runtime~main.a93a50de.js" defer="defer"></script>
-<script src="/bridgectl/assets/js/main.c17cf592.js" defer="defer"></script>
+<script src="/bridgectl/assets/js/runtime~main.05203dee.js" defer="defer"></script>
+<script src="/bridgectl/assets/js/main.aa597c7e.js" defer="defer"></script>
 </head>
 <body>
 <svg style="display: none;"><defs>
@@ -19,7 +19,11 @@
 package or Homebrew cask before changing anything. Apt refreshes package lists
 and installs the latest available package, or the exact requested version if
 it exists in a configured repository; an explicit version may downgrade the
-package. Homebrew refreshes its tap and upgrades the cask. For an exact
+package. After refreshing apt metadata, it compares the installed version with
+the selected repository version and skips installation when they match or the
+installed version is newer.
+Homebrew refreshes its tap, compares the installed cask with the tap version,
+and skips installation when the selected version is already installed. For an exact
 Homebrew version, bridgectl creates a temporary cask
 from that release&#x27;s archive and checksum, then installs it through Homebrew.
 Manual and source builds are not self-updated. Finish active sessions before
@@ -42,9 +46,12 @@ enrollment. A failing login or doctor check makes <code>update</code> exit with 
 sibling staging directory with <code>corepack pnpm add --save-exact --prod</code>. It
 verifies selected binaries before replacing the live runtime files and restores
 the previous files if the replacement fails. Concurrent updates to the same
-runtime wait on a lock so neither update discards the other. The runtime must
-already contain
-<code>package.json</code>, and the user running the command must be able to write there.
+runtime wait on a lock so neither update discards the other. When the runtime
+directory is missing or empty, the command creates a minimal <code>package.json</code>
+and installs the selected agents. An existing directory with other files but
+no <code>package.json</code> is rejected to avoid overwriting a partial runtime. The user
+running the command must be able to write there. Pause new session launches
+while the runtime files are replaced.
 The default directory is <code>runtime.provider_root</code> from the discovered server
 config when set, otherwise <code>$XDG_DATA_HOME/bridgectl/providers</code> or
 <code>~/.local/share/bridgectl/providers</code>. Configure <code>runtime.provider_root</code> if
