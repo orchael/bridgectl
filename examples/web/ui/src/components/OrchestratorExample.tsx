@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 import { listSessions, startSession, stopSession, streamSession, writeInput } from '../api'
 
 type Phase = 'draft' | 'starting' | 'running' | 'awaiting-approval' | 'stopping' | 'stopped' | 'failed'
-type Decision = 'continue' | 'stop'
 const policy = `You are operating under a supervised autonomy policy.
 You may inspect files, reason, and run non-destructive tests.
 Do not deploy, push, delete data, install software, modify credentials, or perform irreversible operations without explicit human approval.
