@@ -4,7 +4,6 @@ import { request } from "node:https";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { summarizeCluster } from "./snapshot.mjs";
-import { createAlerts } from "./alerts.mjs";
 
 const required = (name) => {
   if (!process.env[name]) throw new Error(`Missing ${name}`);
@@ -96,15 +95,41 @@ if (timedOut || exceeded || exit !== 0) {
   throw new Error(`Agent failed (exit=${exit}, timeout=${timedOut}, outputLimit=${exceeded}): ${stderr.slice(-500)}`);
 }
 const report = JSON.parse((await readFile(reportPath, "utf8")).trim());
+if (!Array.isArray(report.issues) || report.issues.length > 20) throw new Error("Invalid issues array");
 const now = new Date();
-const { alerts, issueCount, endsAt } = createAlerts(
-  report, required("MONITOR_SERVICE"), monitorNamespace, now, ttlMinutes,
-);
-const response = await fetch(`${alertmanager}/api/v2/alerts`, {
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify(alerts),
-  signal: AbortSignal.timeout(15000),
+const endsAt = new Date(now.getTime() + ttlMinutes * 60000).toISOString();
+const clean = (s, max) => {
+  if (typeof s !== "string" || !s.trim() || s.length > max) throw new Error("Invalid finding field");
+  return s.trim();
+};
+const alerts = report.issues.map((issue) => {
+  const id = clean(issue.id, 100).toLowerCase()
+    .replace(/[^a-z0-9_.:-]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!id) throw new Error("Invalid issue id");
+  if (!["warning", "critical"].includes(issue.severity)) throw new Error("Invalid severity");
+  return {
+    labels: {
+      alertname: "OrchaelScheduledFinding",
+      service: clean(required("MONITOR_SERVICE"), 80),
+      issue_id: id,
+      severity: issue.severity,
+      source: "bridgectl-cron",
+    },
+    annotations: {
+      summary: clean(issue.summary, 200),
+      description: clean(issue.evidence, 1200),
+    },
+    startsAt: now.toISOString(),
+    endsAt,
+  };
 });
-if (!response.ok) throw new Error(`Alertmanager returned HTTP ${response.status}`);
-console.log(JSON.stringify({ issueCount, alertCount: alerts.length, completedAt: now.toISOString(), endsAt }));
+if (alerts.length) {
+  const response = await fetch(`${alertmanager}/api/v2/alerts`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(alerts),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!response.ok) throw new Error(`Alertmanager returned HTTP ${response.status}`);
+}
+console.log(JSON.stringify({ issueCount: alerts.length, endsAt }));
