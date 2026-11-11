@@ -38,11 +38,11 @@ func recoverAgentRuntime(runtimeDir string) error {
 	}
 	parent := filepath.Dir(runtimeDir)
 	if filepath.Dir(txn.Backup) != parent || !strings.HasPrefix(filepath.Base(txn.Backup), ".bridgectl-agents-backup-") ||
-		(txn.State != "in_progress" && txn.State != "committed") || txn.Had == nil {
+		(txn.State != "in_progress" && txn.State != "committed" && txn.State != "rolled_back") || txn.Had == nil {
 		return fmt.Errorf("invalid agent update transaction at %s", marker)
 	}
 	info, err := os.Lstat(txn.Backup)
-	if errors.Is(err, os.ErrNotExist) && txn.State == "committed" {
+	if errors.Is(err, os.ErrNotExist) && (txn.State == "committed" || txn.State == "rolled_back") {
 		return os.Remove(marker)
 	}
 	if err != nil {
@@ -77,6 +77,10 @@ func recoverAgentRuntime(runtimeDir string) error {
 					}
 				}
 			}
+		}
+		txn.State = "rolled_back"
+		if err := atomicJSON(marker, txn); err != nil {
+			return fmt.Errorf("mark agent update rolled back: %w", err)
 		}
 	}
 	if err := os.RemoveAll(txn.Backup); err != nil {

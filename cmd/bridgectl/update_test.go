@@ -369,6 +369,43 @@ func TestRecoverCommittedAgentRuntimeKeepsNewFiles(t *testing.T) {
 	}
 }
 
+func TestRecoverRolledBackAgentRuntimeAfterBackupCleanup(t *testing.T) {
+	for _, backupExists := range []bool{false, true} {
+		t.Run(fmt.Sprintf("backup_exists_%t", backupExists), func(t *testing.T) {
+			root := t.TempDir()
+			live, backup := filepath.Join(root, "runtime"), filepath.Join(root, ".bridgectl-agents-backup-test")
+			if err := os.Mkdir(live, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if backupExists {
+				if err := os.Mkdir(backup, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			manifest := filepath.Join(live, "package.json")
+			if err := os.WriteFile(manifest, []byte("restored"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			marker := agentUpdateMarker(live)
+			if err := atomicJSON(marker, agentUpdateTransaction{Backup: backup, State: "rolled_back", Had: map[string]bool{"package.json": true}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := recoverAgentRuntime(live); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := os.ReadFile(manifest); err != nil || string(got) != "restored" {
+				t.Fatalf("restored manifest = %q, %v", got, err)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("transaction marker remains: %v", err)
+			}
+			if _, err := os.Stat(backup); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("backup remains: %v", err)
+			}
+		})
+	}
+}
+
 func TestInstallAgentPackagesStagesBeforeReplacing(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell command fixture")
