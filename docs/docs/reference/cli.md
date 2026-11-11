@@ -19,8 +19,11 @@ and installs the latest available package, or the exact requested version if
 it exists in a configured repository. Homebrew refreshes its tap and upgrades
 the cask. For an exact Homebrew version, bridgectl creates a temporary cask
 from that release's archive and checksum, then installs it through Homebrew.
-Manual and source builds are not self-updated. Finish active sessions and
-restart the service after updating; the command does not interrupt sessions.
+Manual and source builds are not self-updated. Finish active sessions before
+updating: the package manager may unload an installed service. Restart the
+service afterward. On macOS, an existing launch agent plist is updated to the
+new Caskroom binary path while keeping its environment; the command prints
+the `launchctl` commands to reload it after sessions finish.
 
 To run Bridge login and doctor after updating, add an `update` section to the
 same repository `.bridgectl.yaml` file used for pre-agent `setup` scripts:
@@ -52,8 +55,10 @@ bridgectl update agents all --claude-version 2.1.296 --codex-version 0.162.1
 bridgectl update agents all --runtime-dir /opt/bridgectl
 ```
 
-The command queries npm for exact package versions and installs them with
-`corepack pnpm add --save-exact --prod`. The runtime must already contain
+The command queries npm for exact package versions and installs them in a
+sibling staging directory with `corepack pnpm add --save-exact --prod`. It
+verifies selected binaries before replacing the live runtime files and restores
+the previous files if the replacement fails. The runtime must already contain
 `package.json`, and the user running the command must be able to write there.
 The default directory is `runtime.provider_root` from the discovered server
 config when set, otherwise `$XDG_DATA_HOME/bridgectl/providers` or

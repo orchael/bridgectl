@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -112,5 +113,185 @@ func TestUpdateSelfAptInstallsRequestedVersion(t *testing.T) {
 	}
 	if got := string(log); got != "update\ninstall -y bridgectl=1.5.0\n" {
 		t.Fatalf("apt calls = %q", got)
+	}
+}
+
+func TestUpdateSelfAptInstallsLatestCandidate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell command fixture")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "apt.log")
+	scripts := map[string]string{
+		"dpkg-query": "#!/bin/sh\necho 'bridgectl: /usr/bin/bridgectl'\n",
+		"apt-cache":  "#!/bin/sh\necho 'bridgectl:'\necho '  Candidate: 1.6.0'\n",
+		"apt-get":    "#!/bin/sh\necho \"$*\" >> '" + logPath + "'\n",
+		"sudo":       "#!/bin/sh\nexec \"$@\"\n",
+	}
+	for name, script := range scripts {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := updateSelf(cmd, ""); err != nil {
+		t.Fatal(err)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(log); got != "update\ninstall -y bridgectl=1.6.0\n" {
+		t.Fatalf("apt calls = %q", got)
+	}
+}
+
+func TestReplaceLaunchAgentProgramPreservesOtherSettings(t *testing.T) {
+	original := []byte("<plist><dict><key>ProgramArguments</key><array><string>/old/bridgectl</string><string>server</string></array><key>EnvironmentVariables</key><dict><key>PATH</key><string>/custom/bin</string></dict></dict></plist>")
+	updated, err := replaceLaunchAgentProgram(original, "/new/with&space/bridgectl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(updated, []byte("/new/with&amp;space/bridgectl")) || !bytes.Contains(updated, []byte("<string>/custom/bin</string>")) || bytes.Contains(updated, []byte("/old/bridgectl")) {
+		t.Fatalf("updated plist = %s", updated)
+	}
+}
+
+func TestRefreshLaunchAgentAfterBrewUsesNewCaskPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink and shell fixture")
+	}
+	root := t.TempDir()
+	home, prefix, bin := filepath.Join(root, "home"), filepath.Join(root, "homebrew"), filepath.Join(root, "bin")
+	newBinary := filepath.Join(prefix, "Caskroom", "bridgectl", "2.0.0", "bridgectl")
+	for _, dir := range []string{home, bin, filepath.Dir(newBinary)} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(newBinary, []byte("new binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(newBinary, filepath.Join(bin, "bridgectl")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "brew"), []byte("#!/bin/sh\necho '"+prefix+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plistPath := launchAgentPlistPath(home)
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte("<plist><dict><key>ProgramArguments</key><array><string>/old/Caskroom/bridgectl</string><string>server</string></array><key>EnvironmentVariables</key><dict><key>PATH</key><string>/custom/bin</string></dict></dict></plist>")
+	if err := os.WriteFile(plistPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", bin)
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := refreshLaunchAgentAfterBrew(cmd); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := os.ReadFile(plistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(updated, []byte(newBinary)) || bytes.Contains(updated, []byte("/old/Caskroom")) || !bytes.Contains(updated, []byte("/custom/bin")) {
+		t.Fatalf("updated plist = %s", updated)
+	}
+}
+
+func TestSwapAgentRuntimeRollsBackOnMissingStagedModules(t *testing.T) {
+	root := t.TempDir()
+	live, stage := filepath.Join(root, "live"), filepath.Join(root, "stage")
+	for _, dir := range []string{live, stage} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(live, "node_modules"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "node_modules", "old"), []byte("working"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct{ dir, name, contents string }{
+		{live, "package.json", "old manifest"}, {live, "pnpm-lock.yaml", "old lock"},
+		{stage, "package.json", "new manifest"}, {stage, "pnpm-lock.yaml", "new lock"},
+	} {
+		if err := os.WriteFile(filepath.Join(item.dir, item.name), []byte(item.contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := swapAgentRuntime(live, stage); err == nil {
+		t.Fatal("expected missing staged modules to fail")
+	}
+	for name, want := range map[string]string{"package.json": "old manifest", "pnpm-lock.yaml": "old lock"} {
+		got, err := os.ReadFile(filepath.Join(live, name))
+		if err != nil || string(got) != want {
+			t.Fatalf("%s = %q, %v", name, got, err)
+		}
+	}
+	if got, err := os.ReadFile(filepath.Join(live, "node_modules", "old")); err != nil || string(got) != "working" {
+		t.Fatalf("old modules = %q, %v", got, err)
+	}
+}
+
+func TestInstallAgentPackagesStagesBeforeReplacing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell command fixture")
+	}
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "success", true: "failure"}[fail], func(t *testing.T) {
+			root := t.TempDir()
+			live, bin := filepath.Join(root, "runtime"), filepath.Join(root, "bin")
+			if err := os.MkdirAll(filepath.Join(live, "node_modules", ".bin"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(bin, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for name, contents := range map[string]string{"package.json": "old manifest", "pnpm-lock.yaml": "old lock", "node_modules/.bin/codex": "old binary"} {
+				if err := os.WriteFile(filepath.Join(live, name), []byte(contents), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			script := "#!/bin/sh\n/bin/mkdir -p node_modules/.bin\nprintf 'new manifest' > package.json\nprintf 'new lock' > pnpm-lock.yaml\nprintf 'new binary' > node_modules/.bin/codex\n"
+			if fail {
+				script += "exit 7\n"
+			}
+			if err := os.WriteFile(filepath.Join(bin, "corepack"), []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin)
+			cmd := &cobra.Command{}
+			cmd.SetContext(context.Background())
+			err := installAgentPackages(cmd, live, []string{"codex"}, []string{"@openai/codex@0.2.0"})
+			if fail && err == nil {
+				t.Fatal("expected staged install failure")
+			}
+			if !fail && err != nil {
+				t.Fatal(err)
+			}
+			want := "new manifest"
+			if fail {
+				want = "old manifest"
+			}
+			got, readErr := os.ReadFile(filepath.Join(live, "package.json"))
+			if readErr != nil || string(got) != want {
+				t.Fatalf("manifest = %q, %v", got, readErr)
+			}
+			want = "new binary"
+			if fail {
+				want = "old binary"
+			}
+			got, readErr = os.ReadFile(filepath.Join(live, "node_modules", ".bin", "codex"))
+			if readErr != nil || string(got) != want {
+				t.Fatalf("binary = %q, %v", got, readErr)
+			}
+		})
 	}
 }

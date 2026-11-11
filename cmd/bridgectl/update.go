@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -259,6 +261,9 @@ func updateSelf(cmd *cobra.Command, requested string) error {
 			if err := installVersionedBrewCask(cmd, strings.TrimPrefix(requested, "v")); err != nil {
 				return err
 			}
+			if err := refreshLaunchAgentAfterBrew(cmd); err != nil {
+				return err
+			}
 			break
 		}
 		out, err := updateOutput(ctx, "brew", "outdated", "--cask", "--quiet", "bridgectl")
@@ -266,14 +271,104 @@ func updateSelf(cmd *cobra.Command, requested string) error {
 			return err
 		}
 		if out == "" {
+			if err := refreshLaunchAgentAfterBrew(cmd); err != nil {
+				return err
+			}
 			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "bridgectl is already at the latest Homebrew cask version.")
 			return nil
 		}
 		if _, err := runUpdateCommand(ctx, cmd, "brew", "upgrade", "--cask", "orchael/bridgectl/bridgectl"); err != nil {
 			return err
 		}
+		if err := refreshLaunchAgentAfterBrew(cmd); err != nil {
+			return err
+		}
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "bridgectl package updated with %s; restart the server after active sessions finish.\n", manager)
+	return nil
+}
+
+var launchAgentProgramPattern = regexp.MustCompile(`(?s)(<key>ProgramArguments</key>\s*<array>\s*<string>)([^<]*)(</string>)`)
+
+func replaceLaunchAgentProgram(plist []byte, binary string) ([]byte, error) {
+	match := launchAgentProgramPattern.FindSubmatchIndex(plist)
+	if match == nil {
+		return nil, errors.New("launch agent plist has no ProgramArguments binary")
+	}
+	var escaped bytes.Buffer
+	if err := xml.EscapeText(&escaped, []byte(binary)); err != nil {
+		return nil, err
+	}
+	updated := make([]byte, 0, len(plist)+escaped.Len())
+	updated = append(updated, plist[:match[4]]...)
+	updated = append(updated, escaped.Bytes()...)
+	updated = append(updated, plist[match[5]:]...)
+	return updated, nil
+}
+
+func refreshLaunchAgentAfterBrew(cmd *cobra.Command) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	plistPath := launchAgentPlistPath(home)
+	info, err := os.Lstat(plistPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("launch agent plist is not a regular file: %s", plistPath)
+	}
+	binary, err := exec.LookPath("bridgectl")
+	if err != nil {
+		return err
+	}
+	binary, err = filepath.EvalSymlinks(binary)
+	if err != nil {
+		return err
+	}
+	prefix, err := updateOutput(cmd.Context(), "brew", "--prefix")
+	if err != nil {
+		return err
+	}
+	if !brewOwnsBinary(prefix, binary) {
+		return fmt.Errorf("updated bridgectl is not in the Homebrew Caskroom: %s", binary)
+	}
+	plist, err := os.ReadFile(plistPath)
+	if err != nil {
+		return err
+	}
+	updated, err := replaceLaunchAgentProgram(plist, binary)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(plistPath), ".bridgectl-plist-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.Write(updated); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(info.Mode().Perm()); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp.Name(), plistPath); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Updated launch agent binary to %s. After active sessions finish, reload it with:\n  launchctl bootout gui/$(id -u)/%s\n  launchctl bootstrap gui/$(id -u) %s\n", binary, launchAgentLabel, plistPath)
 	return nil
 }
 
@@ -327,6 +422,130 @@ func installVersionedBrewCask(cmd *cobra.Command, v string) error {
 }
 
 var agentPackages = map[string]string{"claude": "@anthropic-ai/claude-code", "codex": "@openai/codex", "opencode": "opencode-ai"}
+
+var agentBinaries = map[string]string{"@anthropic-ai/claude-code": "claude", "@openai/codex": "codex", "opencode-ai": "opencode"}
+
+func copyRuntimeFile(src, dst string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("runtime file is not regular: %s", src)
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+func installAgentPackages(cmd *cobra.Command, runtimeDir string, selected []string, packages []string) error {
+	parent := filepath.Dir(runtimeDir)
+	stage, err := os.MkdirTemp(parent, ".bridgectl-agents-stage-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(stage) }()
+	for _, name := range []string{"package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".nvmrc", ".npmrc", ".pnpmfile.cjs"} {
+		src := filepath.Join(runtimeDir, name)
+		if err := copyRuntimeFile(src, filepath.Join(stage, name)); err != nil {
+			if errors.Is(err, os.ErrNotExist) && name != "package.json" {
+				continue
+			}
+			return fmt.Errorf("stage %s: %w", name, err)
+		}
+	}
+	installArgs := append([]string{"pnpm", "add", "--save-exact", "--prod"}, packages...)
+	c := exec.CommandContext(cmd.Context(), "corepack", installArgs...)
+	c.Dir = stage
+	c.Stdin, c.Stdout, c.Stderr = cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()
+	if err := c.Run(); err != nil {
+		return fmt.Errorf("stage agents: %w", err)
+	}
+	for _, name := range selected {
+		binary := agentBinaries[agentPackages[name]]
+		path := filepath.Join(stage, "node_modules", ".bin", binary)
+		if _, err := os.Stat(path); err != nil {
+			if runtime.GOOS != "windows" {
+				return fmt.Errorf("staged %s binary: %w", name, err)
+			}
+			if _, cmdErr := os.Stat(path + ".cmd"); cmdErr != nil {
+				return fmt.Errorf("staged %s binary: %w", name, cmdErr)
+			}
+		}
+	}
+	return swapAgentRuntime(runtimeDir, stage)
+}
+
+func swapAgentRuntime(runtimeDir, stage string) error {
+	backup, err := os.MkdirTemp(filepath.Dir(runtimeDir), ".bridgectl-agents-backup-")
+	if err != nil {
+		return err
+	}
+	type movedItem struct {
+		name      string
+		old, next bool
+	}
+	var moved []movedItem
+	var swapErr error
+	for _, name := range []string{"package.json", "pnpm-lock.yaml", "node_modules"} {
+		item := movedItem{name: name}
+		livePath, backupPath, stagePath := filepath.Join(runtimeDir, name), filepath.Join(backup, name), filepath.Join(stage, name)
+		if _, err := os.Lstat(livePath); err == nil {
+			if err := os.Rename(livePath, backupPath); err != nil {
+				swapErr = err
+				break
+			}
+			item.old = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			swapErr = err
+			break
+		}
+		moved = append(moved, item)
+		if err := os.Rename(stagePath, livePath); err != nil {
+			swapErr = err
+			break
+		}
+		moved[len(moved)-1].next = true
+	}
+	if swapErr != nil {
+		var rollbackErr error
+		for i := len(moved) - 1; i >= 0; i-- {
+			item := moved[i]
+			newMovedBack := true
+			if item.next {
+				if err := os.Rename(filepath.Join(runtimeDir, item.name), filepath.Join(stage, item.name)); err != nil {
+					rollbackErr = errors.Join(rollbackErr, fmt.Errorf("rollback %s: %w", item.name, err))
+					newMovedBack = false
+				}
+			}
+			if item.old && newMovedBack {
+				if err := os.Rename(filepath.Join(backup, item.name), filepath.Join(runtimeDir, item.name)); err != nil {
+					rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore %s: %w", item.name, err))
+				}
+			}
+		}
+		if rollbackErr != nil {
+			return errors.Join(fmt.Errorf("replace provider runtime: %w", swapErr), rollbackErr, fmt.Errorf("backup preserved at %s", backup))
+		}
+		_ = os.RemoveAll(backup)
+		return fmt.Errorf("replace provider runtime: %w", swapErr)
+	}
+	if err := os.RemoveAll(backup); err != nil {
+		return fmt.Errorf("provider runtime updated, but cleanup of %s failed: %w", backup, err)
+	}
+	return nil
+}
 
 func npmVersion(ctx context.Context, client *http.Client, registry, pkg, version string) (string, error) {
 	path := strings.ReplaceAll(pkg, "/", "%2F")
@@ -432,14 +651,7 @@ func newUpdateAgentsCmd() *cobra.Command {
 			packages = append(packages, pkg+"@"+ver)
 		}
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Installing %s in %s\n", strings.Join(packages, ", "), runtimeDir)
-		installArgs := append([]string{"pnpm", "add", "--save-exact", "--prod"}, packages...)
-		c := exec.CommandContext(cmd.Context(), "corepack", installArgs...)
-		c.Dir = runtimeDir
-		c.Stdin, c.Stdout, c.Stderr = cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()
-		if err := c.Run(); err != nil {
-			return fmt.Errorf("install agents: %w", err)
-		}
-		return nil
+		return installAgentPackages(cmd, runtimeDir, selected, packages)
 	}}
 	cmd.Flags().StringVar(&versionFlag, "version", "", "exact npm version for one agent (default: latest)")
 	cmd.Flags().StringVar(&claudeVersion, "claude-version", "", "exact Claude version for an all-agent update")
