@@ -99,7 +99,9 @@ func startSession(args []string, providerName, project string, timeout time.Dura
 	if len(args) > 0 {
 		dir = args[0]
 	}
-	absDir, err := filepath.Abs(dir)
+	resolvedDir, err := resolveLaunchDirectory(project, dir)
+  if err != nil { return err }
+  absDir, err := filepath.Abs(resolvedDir)
 	if err != nil {
 		return fmt.Errorf("resolve directory: %w", err)
 	}
@@ -110,6 +112,13 @@ func startSession(args []string, providerName, project string, timeout time.Dura
 	if !info.IsDir() {
 		return fmt.Errorf("%q is not a directory", absDir)
 	}
+
+  launch, err := loadLaunchConfig(absDir)
+  if err != nil { return err }
+  if launch != nil {
+    if project == "local" && launch.Project.ID != "" { project = launch.Project.ID }
+    if providerName == "claude" && launch.Agent.Provider != "" { providerName = launch.Agent.Provider }
+  }
 
 	if remote != "" {
 		if noTTY {
