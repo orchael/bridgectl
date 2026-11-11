@@ -295,6 +295,8 @@ func updateSelf(cmd *cobra.Command, requested string) error {
 
 var launchAgentProgramPattern = regexp.MustCompile(`(?s)(<key>ProgramArguments</key>\s*<array>\s*<string>)([^<]*)(</string>)`)
 
+var brewReleaseBaseURL = "https://github.com/orchael/bridgectl/releases/download"
+
 func replaceLaunchAgentProgram(plist []byte, binary string) ([]byte, error) {
 	match := launchAgentProgramPattern.FindSubmatchIndex(plist)
 	if match == nil {
@@ -383,7 +385,7 @@ func installVersionedBrewCask(cmd *cobra.Command, v string) error {
 		return fmt.Errorf("no Homebrew release archive for %s", arch)
 	}
 	archive := fmt.Sprintf("bridgectl_%s_darwin_%s.tar.gz", v, arch)
-	base := "https://github.com/orchael/bridgectl/releases/download/v" + v + "/"
+	base := strings.TrimRight(brewReleaseBaseURL, "/") + "/v" + v + "/"
 	client := &http.Client{Timeout: 20 * time.Second}
 	req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, base+"checksums.txt", nil)
 	if err != nil {
