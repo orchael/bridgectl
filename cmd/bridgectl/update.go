@@ -458,6 +458,9 @@ func copyRuntimeFile(src, dst string) error {
 
 func installAgentPackages(cmd *cobra.Command, runtimeDir string, selected []string, packages []string) error {
 	return withAgentRuntimeLock(cmd.Context(), runtimeDir, func(lockedDir string) error {
+		if err := recoverAgentRuntime(lockedDir); err != nil {
+			return err
+		}
 		return installAgentPackagesLocked(cmd, lockedDir, selected, packages)
 	})
 }
@@ -478,7 +481,13 @@ func installAgentPackagesLocked(cmd *cobra.Command, runtimeDir string, selected 
 			return fmt.Errorf("stage %s: %w", name, err)
 		}
 	}
-	installArgs := append([]string{"pnpm", "add", "--save-exact", "--prod"}, packages...)
+	installArgs := []string{"pnpm", "add", "--save-exact", "--prod"}
+	if _, err := os.Stat(filepath.Join(stage, "pnpm-workspace.yaml")); err == nil {
+		installArgs = append(installArgs, "--workspace-root")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	installArgs = append(installArgs, packages...)
 	c := exec.CommandContext(cmd.Context(), "corepack", installArgs...)
 	c.Dir = stage
 	c.Stdin, c.Stdout, c.Stderr = cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()
@@ -505,59 +514,39 @@ func swapAgentRuntime(runtimeDir, stage string) error {
 	if err != nil {
 		return err
 	}
-	type movedItem struct {
-		name      string
-		old, next bool
+	txn := agentUpdateTransaction{Backup: backup, State: "in_progress", Had: map[string]bool{}}
+	for _, name := range agentRuntimeItems {
+		_, err := os.Lstat(filepath.Join(runtimeDir, name))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			_ = os.RemoveAll(backup)
+			return err
+		}
+		txn.Had[name] = err == nil
 	}
-	var moved []movedItem
-	var swapErr error
-	for _, name := range []string{"package.json", "pnpm-lock.yaml", "node_modules"} {
-		item := movedItem{name: name}
-		livePath, backupPath, stagePath := filepath.Join(runtimeDir, name), filepath.Join(backup, name), filepath.Join(stage, name)
-		if _, err := os.Lstat(livePath); err == nil {
-			if err := os.Rename(livePath, backupPath); err != nil {
-				swapErr = err
-				break
-			}
-			item.old = true
-		} else if !errors.Is(err, os.ErrNotExist) {
-			swapErr = err
-			break
-		}
-		moved = append(moved, item)
-		if err := os.Rename(stagePath, livePath); err != nil {
-			swapErr = err
-			break
-		}
-		moved[len(moved)-1].next = true
-	}
-	if swapErr != nil {
-		var rollbackErr error
-		for i := len(moved) - 1; i >= 0; i-- {
-			item := moved[i]
-			newMovedBack := true
-			if item.next {
-				if err := os.Rename(filepath.Join(runtimeDir, item.name), filepath.Join(stage, item.name)); err != nil {
-					rollbackErr = errors.Join(rollbackErr, fmt.Errorf("rollback %s: %w", item.name, err))
-					newMovedBack = false
-				}
-			}
-			if item.old && newMovedBack {
-				if err := os.Rename(filepath.Join(backup, item.name), filepath.Join(runtimeDir, item.name)); err != nil {
-					rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore %s: %w", item.name, err))
-				}
-			}
-		}
-		if rollbackErr != nil {
-			return errors.Join(fmt.Errorf("replace provider runtime: %w", swapErr), rollbackErr, fmt.Errorf("backup preserved at %s", backup))
-		}
+	marker := agentUpdateMarker(runtimeDir)
+	if err := atomicJSON(marker, txn); err != nil {
 		_ = os.RemoveAll(backup)
-		return fmt.Errorf("replace provider runtime: %w", swapErr)
+		return err
 	}
-	if err := os.RemoveAll(backup); err != nil {
-		return fmt.Errorf("provider runtime updated, but cleanup of %s failed: %w", backup, err)
+	rollback := func(cause error) error {
+		return errors.Join(cause, recoverAgentRuntime(runtimeDir))
 	}
-	return nil
+	for _, name := range agentRuntimeItems {
+		livePath, backupPath, stagePath := filepath.Join(runtimeDir, name), filepath.Join(backup, name), filepath.Join(stage, name)
+		if txn.Had[name] {
+			if err := os.Rename(livePath, backupPath); err != nil {
+				return rollback(fmt.Errorf("replace provider runtime: %w", err))
+			}
+		}
+		if err := os.Rename(stagePath, livePath); err != nil {
+			return rollback(fmt.Errorf("replace provider runtime: %w", err))
+		}
+	}
+	txn.State = "committed"
+	if err := atomicJSON(marker, txn); err != nil {
+		return rollback(fmt.Errorf("mark provider runtime updated: %w", err))
+	}
+	return recoverAgentRuntime(runtimeDir)
 }
 
 func npmVersion(ctx context.Context, client *http.Client, registry, pkg, version string) (string, error) {
@@ -638,9 +627,6 @@ func newUpdateAgentsCmd() *cobra.Command {
 		}
 		if !filepath.IsAbs(runtimeDir) {
 			return errors.New("--runtime-dir must be absolute")
-		}
-		if _, err := os.Stat(filepath.Join(runtimeDir, "package.json")); err != nil {
-			return fmt.Errorf("provider runtime is not initialized at %s: %w", runtimeDir, err)
 		}
 		if _, err := exec.LookPath("corepack"); err != nil {
 			return errors.New("corepack is required; install Node.js 24")

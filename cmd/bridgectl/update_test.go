@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -284,6 +286,89 @@ func TestSwapAgentRuntimeRollsBackOnMissingStagedModules(t *testing.T) {
 	}
 }
 
+func TestRecoverAgentRuntimeAtSwapBoundaries(t *testing.T) {
+	for _, moved := range []int{0, 1, 2, 3, 4, 5, 6} {
+		t.Run(fmt.Sprint(moved), func(t *testing.T) {
+			root := t.TempDir()
+			live, backup := filepath.Join(root, "live"), filepath.Join(root, ".bridgectl-agents-backup-test")
+			for _, dir := range []string{live, backup} {
+				if err := os.Mkdir(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, name := range agentRuntimeItems {
+				if name == "node_modules" {
+					if err := os.Mkdir(filepath.Join(live, name), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(live, name, "old"), []byte("old"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(filepath.Join(live, name), []byte("old"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			txn := agentUpdateTransaction{Backup: backup, State: "in_progress", Had: map[string]bool{"package.json": true, "pnpm-lock.yaml": true, "node_modules": true}}
+			if err := atomicJSON(agentUpdateMarker(live), txn); err != nil {
+				t.Fatal(err)
+			}
+			for step := 0; step < moved; step++ {
+				name := agentRuntimeItems[step/2]
+				path := filepath.Join(live, name)
+				if step%2 == 0 {
+					if err := os.Rename(path, filepath.Join(backup, name)); err != nil {
+						t.Fatal(err)
+					}
+				} else if name == "node_modules" {
+					if err := os.Mkdir(path, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(path, []byte("new"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := recoverAgentRuntime(live); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range agentRuntimeItems[:2] {
+				got, err := os.ReadFile(filepath.Join(live, name))
+				if err != nil || string(got) != "old" {
+					t.Fatalf("%s = %q, %v", name, got, err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(live, "node_modules", "old")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(agentUpdateMarker(live)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("marker remains: %v", err)
+			}
+		})
+	}
+}
+
+func TestRecoverCommittedAgentRuntimeKeepsNewFiles(t *testing.T) {
+	root := t.TempDir()
+	live, backup := filepath.Join(root, "live"), filepath.Join(root, ".bridgectl-agents-backup-test")
+	for _, dir := range []string{live, backup} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(live, "package.json"), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicJSON(agentUpdateMarker(live), agentUpdateTransaction{Backup: backup, State: "committed", Had: map[string]bool{"package.json": true}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverAgentRuntime(live); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(live, "package.json"))
+	if err != nil || string(got) != "new" {
+		t.Fatalf("manifest = %q, %v", got, err)
+	}
+}
+
 func TestInstallAgentPackagesStagesBeforeReplacing(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell command fixture")
@@ -298,12 +383,12 @@ func TestInstallAgentPackagesStagesBeforeReplacing(t *testing.T) {
 			if err := os.MkdirAll(bin, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			for name, contents := range map[string]string{"package.json": "old manifest", "pnpm-lock.yaml": "old lock", "node_modules/.bin/codex": "old binary"} {
+			for name, contents := range map[string]string{"package.json": "old manifest", "pnpm-lock.yaml": "old lock", "pnpm-workspace.yaml": "packages: []", "node_modules/.bin/codex": "old binary"} {
 				if err := os.WriteFile(filepath.Join(live, name), []byte(contents), 0o700); err != nil {
 					t.Fatal(err)
 				}
 			}
-			script := "#!/bin/sh\n/bin/mkdir -p node_modules/.bin\nprintf 'new manifest' > package.json\nprintf 'new lock' > pnpm-lock.yaml\nprintf 'new binary' > node_modules/.bin/codex\n"
+			script := "#!/bin/sh\ncase \" $* \" in *\" --workspace-root \"*) ;; *) exit 8;; esac\n/bin/mkdir -p node_modules/.bin\nprintf 'new manifest' > package.json\nprintf 'new lock' > pnpm-lock.yaml\nprintf 'new binary' > node_modules/.bin/codex\n"
 			if fail {
 				script += "exit 7\n"
 			}
