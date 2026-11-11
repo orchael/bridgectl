@@ -1,9 +1,10 @@
 # Scheduled Kubernetes health check to Alertmanager
 
-This example runs a read-only cluster health check every 30 minutes with
+This example runs a read-only cluster health check once an hour with
 `codex exec` in a pinned bridgectl runtime image. The runner lists nodes, pods, and deployments
 through the Kubernetes API, sends a bounded snapshot to the agent, validates
-its JSON findings, and posts alerts to Alertmanager v2. It never reads Secrets,
+its JSON findings, and posts confirmed issues to Alertmanager v2. A healthy
+run with zero issues does not send an alert. It never reads Secrets,
 ConfigMaps, or event contents.
 
 ## Installation
