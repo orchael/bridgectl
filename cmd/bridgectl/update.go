@@ -92,7 +92,11 @@ func runUpdateCommand(ctx context.Context, cmd *cobra.Command, name string, args
 func updateOutput(ctx context.Context, name string, args ...string) (string, error) {
 	probe, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(probe, name, args...).Output()
+	command := exec.CommandContext(probe, name, args...)
+	if name == "apt-cache" {
+		command.Env = append(os.Environ(), "LC_ALL=C")
+	}
+	out, err := command.Output()
 	return strings.TrimSpace(string(out)), err
 }
 
@@ -629,6 +633,9 @@ func newUpdateAgentsCmd() *cobra.Command {
 		}
 		if !filepath.IsAbs(runtimeDir) {
 			return errors.New("--runtime-dir must be absolute")
+		}
+		if err := withAgentRuntimeLock(cmd.Context(), runtimeDir, recoverAgentRuntime); err != nil {
+			return err
 		}
 		if _, err := exec.LookPath("corepack"); err != nil {
 			return errors.New("corepack is required; install Node.js 24")

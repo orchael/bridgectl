@@ -170,7 +170,7 @@ func TestUpdateSelfAptInstallsLatestCandidate(t *testing.T) {
 	logPath := filepath.Join(dir, "apt.log")
 	scripts := map[string]string{
 		"dpkg-query": "#!/bin/sh\necho 'bridgectl: /usr/bin/bridgectl'\n",
-		"apt-cache":  "#!/bin/sh\necho 'bridgectl:'\necho '  Candidate: 1.6.0'\n",
+		"apt-cache":  "#!/bin/sh\n[ \"$LC_ALL\" = C ] || exit 8\necho 'bridgectl:'\necho '  Candidate: 1.6.0'\n",
 		"apt-get":    "#!/bin/sh\necho \"$*\" >> '" + logPath + "'\n",
 		"sudo":       "#!/bin/sh\nexec \"$@\"\n",
 	}
@@ -180,6 +180,7 @@ func TestUpdateSelfAptInstallsLatestCandidate(t *testing.T) {
 		}
 	}
 	t.Setenv("PATH", dir)
+	t.Setenv("LC_ALL", "fr_FR.UTF-8")
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	if err := updateSelf(cmd, ""); err != nil {

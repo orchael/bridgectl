@@ -109,6 +109,59 @@ func TestUpdateAgentsRejectsInvalidOptionsBeforeInstall(t *testing.T) {
 	}
 }
 
+func TestUpdateAgentsRecoversInterruptedRuntimeBeforeRegistryFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executable fixture")
+	}
+	root := t.TempDir()
+	live, backup, bin := filepath.Join(root, "runtime"), filepath.Join(root, ".bridgectl-agents-backup-test"), filepath.Join(root, "bin")
+	for _, dir := range []string{live, backup, bin} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(backup, "package.json"), []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(backup, "node_modules"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backup, "node_modules", "original"), []byte("ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	marker := agentUpdateMarker(live)
+	if err := atomicJSON(marker, agentUpdateTransaction{Backup: backup, State: "in_progress", Had: map[string]bool{"package.json": true, "node_modules": true}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "corepack"), []byte(""), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer registry.Close()
+	previousRegistry := npmRegistryURL
+	npmRegistryURL = registry.URL
+	t.Cleanup(func() { npmRegistryURL = previousRegistry })
+	cmd := newUpdateAgentsCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{"codex", "--runtime-dir", live})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("expected registry failure, got %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(live, "package.json")); err != nil || string(got) != "original" {
+		t.Fatalf("manifest was not restored: %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(live, "node_modules", "original")); err != nil || string(got) != "ready" {
+		t.Fatalf("modules were not restored: %q, %v", got, err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("transaction marker remains: %v", err)
+	}
+}
+
 func TestRecoverAgentRuntimeRejectsInvalidMarkerWithoutDeletingData(t *testing.T) {
 	for _, scenario := range []struct {
 		name   string
