@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from 'react'
 import SessionList from './components/SessionList'
 import StartSessionForm from './components/StartSessionForm'
 import Terminal from './components/Terminal'
+import OrchestratorExample from './components/OrchestratorExample'
 import { listRemotes, type RemoteEntry } from './api'
 
 type ConnectionMode = 'local' | 'remote'
@@ -109,6 +110,7 @@ const styles: Record<string, React.CSSProperties> = {
 
 export default function App() {
   const [mode, setMode] = useState<ConnectionMode>('local')
+  const [view, setView] = useState<'sessions' | 'orchestrator'>('sessions')
   const [remoteHost, setRemoteHost] = useState('')
   const [customRemote, setCustomRemote] = useState(false)
   const [activeSession, setActiveSession] = useState<ActiveSession | null>(null)
@@ -259,7 +261,9 @@ export default function App() {
         </div>
       </header>
 
-      <main style={styles.main}>
+      <nav style={{ padding: '10px 24px', display: 'flex', gap: 12 }}><button onClick={() => setView('sessions')}>Sessions</button><button onClick={() => setView('orchestrator')}>Orchestrator example</button></nav>
+      <main style={{ ...styles.main, overflow: 'auto' }}>
+        {view === 'orchestrator' ? <OrchestratorExample remote={remote} /> : <>
         <SessionList
           key={refreshKey}
           remote={remote}
@@ -281,6 +285,7 @@ export default function App() {
             />
           </div>
         )}
+        </>}
       </main>
 
       {showNewSession && (
