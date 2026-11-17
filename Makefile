@@ -115,18 +115,22 @@ LOGIN_ARGS ?= --no-browser
 # explicit opt-in so `make dev-login` can never quietly register a throwaway
 # dev installation against the real org. Precedence matches bridgeURL in
 # cmd/bridgectl/bridge.go: an explicit URL or --bridge in LOGIN_ARGS wins,
-# then an exported BRIDGECTL_BRIDGE_URL, then this default.
+# then a BRIDGECTL_BRIDGE_URL from the environment or DEV_ENV_FILE (the file is
+# sourced first, so it wins over the environment), then this default. An
+# explicit DEV_BRIDGE_URL overrides all of them.
 # DEV_ENV_FILE, if set, is a shell file of BRIDGECTL_* variables (for example the
 # enrollment key written by Bridge's machine-enrollment-key e2e spec) sourced for
 # the login only.
-DEV_BRIDGE_URL ?= $(or $(BRIDGECTL_BRIDGE_URL),https://bridge.orchael.dev)
+DEV_BRIDGE_URL_DEFAULT := https://bridge.orchael.dev
+# Resolved by the shell after DEV_ENV_FILE is sourced, unless DEV_BRIDGE_URL is set.
+DEV_BRIDGE_URL_EXPR = $(if $(DEV_BRIDGE_URL),$(DEV_BRIDGE_URL),$${BRIDGECTL_BRIDGE_URL:-$(DEV_BRIDGE_URL_DEFAULT)})
 dev-login: build
 	@mkdir -p "$(DEV_STATE_DIR)"
 	@if [ ! -f "$(DEV_STATE_DIR)/bridge.yaml" ]; then \
 		cp "$(DEV_CONFIG)" "$(DEV_STATE_DIR)/bridge.yaml"; \
 		echo "Seeded $(DEV_STATE_DIR)/bridge.yaml so login can never touch the installed service's config."; \
 	fi
-	$(if $(DEV_ENV_FILE),set -a; . "$(if $(filter /%,$(DEV_ENV_FILE)),,./)$(DEV_ENV_FILE)"; set +a; )BRIDGECTL_BRIDGE_URL="$(DEV_BRIDGE_URL)" $(DEV_BRIDGECTL) login $(LOGIN_ARGS)
+	$(if $(DEV_ENV_FILE),set -a; . "$(if $(filter /%,$(DEV_ENV_FILE)),,./)$(DEV_ENV_FILE)"; set +a; )BRIDGECTL_BRIDGE_URL="$(DEV_BRIDGE_URL_EXPR)" $(DEV_BRIDGECTL) login $(LOGIN_ARGS)
 
 # Run provider CLIs directly, with a per-launch local Bridge MCP adapter.
 # DEV_MCP=0 preserves the standalone escape hatch without Docker/enrollment.
