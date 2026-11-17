@@ -385,6 +385,9 @@ func FilterEnv(env []string) []string {
 		"SLACK_SIGNING_SECRET":  true,
 		"DISCORD_TOKEN":         true,
 		"CLAUDECODE":            true,
+		// Machine-enrollment credentials are scoped to `bridgectl login`.
+		"BRIDGECTL_CLIENT_SECRET": true,
+		"BRIDGECTL_ENROLL_KEY":    true,
 	}
 	filtered := make([]string, 0, len(env))
 	for _, e := range env {

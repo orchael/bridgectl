@@ -126,7 +126,7 @@ dev-login: build
 		cp "$(DEV_CONFIG)" "$(DEV_STATE_DIR)/bridge.yaml"; \
 		echo "Seeded $(DEV_STATE_DIR)/bridge.yaml so login can never touch the installed service's config."; \
 	fi
-	$(if $(DEV_ENV_FILE),set -a; . "$(DEV_ENV_FILE)"; set +a; )BRIDGECTL_BRIDGE_URL="$(DEV_BRIDGE_URL)" $(DEV_BRIDGECTL) login $(LOGIN_ARGS)
+	$(if $(DEV_ENV_FILE),set -a; . "$(if $(filter /%,$(DEV_ENV_FILE)),,./)$(DEV_ENV_FILE)"; set +a; )BRIDGECTL_BRIDGE_URL="$(DEV_BRIDGE_URL)" $(DEV_BRIDGECTL) login $(LOGIN_ARGS)
 
 # Run provider CLIs directly, with a per-launch local Bridge MCP adapter.
 # DEV_MCP=0 preserves the standalone escape hatch without Docker/enrollment.

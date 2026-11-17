@@ -102,10 +102,12 @@ func TestResolveBinaryPathAndFilterEnv(t *testing.T) {
 
 	env := filterEnv([]string{
 		"AWS_SECRET_ACCESS_KEY=secret",
+		"BRIDGECTL_CLIENT_SECRET=secret",
+		"BRIDGECTL_ENROLL_KEY=key",
 		"KEEP=value",
 	})
 	for _, item := range env {
-		if strings.HasPrefix(item, "AWS_SECRET_ACCESS_KEY=") {
+		if strings.HasPrefix(item, "AWS_SECRET_ACCESS_KEY=") || strings.HasPrefix(item, "BRIDGECTL_CLIENT_SECRET=") || strings.HasPrefix(item, "BRIDGECTL_ENROLL_KEY=") {
 			t.Fatalf("blocked secret env leaked: %v", env)
 		}
 	}
