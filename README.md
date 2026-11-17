@@ -181,6 +181,15 @@ make dev-mcp-check
 make dev-codex                 # or make dev-claude
 ```
 
+To enroll without a browser, put a Bridge enrollment key in a private shell file
+(`export BRIDGECTL_ENROLL_KEY=bek_...`, mode 0600) and pass it with
+`DEV_ENV_FILE`. The file is sourced for the login only. Use a scratch
+`DEV_STATE_DIR` so an existing enrollment is not reactivated:
+
+```bash
+make dev-login DEV_STATE_DIR="$(mktemp -d)" DEV_ENV_FILE=~/.bridge-dev/machine-enroll.env LOGIN_ARGS=--non-interactive
+```
+
 The adapter reads `DEV_STATE_DIR/bridge-enrollment.json`, looks up that
 installation's enrollment approver in the local database, and sends requests as
 that user and organization. Bridge still checks current membership. Signing uses
