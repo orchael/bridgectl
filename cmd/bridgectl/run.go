@@ -261,6 +261,7 @@ func ensureServer() error {
 	}
 
 	cmd := exec.Command(self, "server", "start")
+	cmd.Env = withoutMachineCredentials(os.Environ())
 	setDetachedProcess(cmd)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
@@ -280,6 +281,20 @@ func ensureServer() error {
 		}
 	}
 	return fmt.Errorf("server did not start within 5s")
+}
+
+// withoutMachineCredentials drops enrollment secrets so a daemon spawned during
+// `bridgectl login` does not hold them or pass them to sessions.
+func withoutMachineCredentials(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		key, _, _ := strings.Cut(e, "=")
+		if key == envClientPass || key == envEnrollKey {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 func secureServerDiscoveryError() error {

@@ -406,8 +406,14 @@ func newBridgeLoginCmd() *cobra.Command {
 	var force bool
 	var name string
 	var noBrowser bool
+	var nonInteractive bool
 	cmd := &cobra.Command{
 		Use: "login [bridge-url]", Short: "Log into Bridge and enroll this installation",
+		Long: "Log into Bridge and enroll this installation.\n\n" +
+			"By default this opens a browser for approval. With --non-interactive it enrolls using a\n" +
+			"machine credential from the environment and never opens a browser or prompts: either\n" +
+			"BRIDGECTL_ENROLL_KEY, or BRIDGECTL_CLIENT_ID and BRIDGECTL_CLIENT_SECRET with\n" +
+			"BRIDGECTL_OIDC_ISSUER and BRIDGECTL_OIDC_PROJECT_ID. The organization is set by the credential.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			origin := bridge
@@ -417,6 +423,12 @@ func newBridgeLoginCmd() *cobra.Command {
 				}
 				origin = args[0]
 			}
+			if nonInteractive {
+				if cmd.Flags().Changed("organization") {
+					return errors.New("--non-interactive cannot select an organization: it is set by the machine credential")
+				}
+				return runBridgeMachineLogin(cmd, origin, name, force)
+			}
 			return runBridgeLogin(cmd, origin, organization, name, force, noBrowser)
 		},
 	}
@@ -425,6 +437,7 @@ func newBridgeLoginCmd() *cobra.Command {
 	cmd.Flags().StringVar(&name, "name", "", "server name shown in Bridge (defaults to config name, then hostname)")
 	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "print the authorization URL without opening a browser")
 	cmd.Flags().BoolVar(&force, "force", false, "replace an existing enrollment")
+	cmd.Flags().BoolVar(&nonInteractive, "non-interactive", false, "enroll with a machine credential from the environment; never open a browser or prompt")
 	return cmd
 }
 func defaultOrganization(flag string) string {
