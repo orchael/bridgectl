@@ -2,11 +2,11 @@ import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
-  title: 'Bridgectl',
+  title: 'bridgectl Documentation',
   tagline: 'Run, attach to, and replay local or remote AI agent sessions.',
 
-  url: 'https://orchael.github.io',
-  baseUrl: '/bridgectl/',
+  url: 'https://bridgectl.orchael.com',
+  baseUrl: '/',
   organizationName: 'orchael',
   projectName: 'bridgectl',
   trailingSlash: false,

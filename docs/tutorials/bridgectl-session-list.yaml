@@ -1,0 +1,12 @@
+id: bridgectl-session-list
+title: List agent sessions
+product: bridgectl
+steps:
+  - type: narration
+    text: Check which AI agent sessions are available.
+  - type: terminal
+    command: bridgectl --help
+    narration: Bridgectl provides commands for managing agent sessions.
+    assertions:
+      - type: exit_code
+        equals: 0
