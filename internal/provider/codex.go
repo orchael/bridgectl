@@ -66,6 +66,13 @@ func (p *CodexProvider) BuildCommand(ctx context.Context, cfg bridge.SessionConf
 	if err := applyCodexHomeAuth(cmd); err != nil {
 		return nil, err
 	}
+	// Bridgectl starts Codex inside a PTY even when the long-lived server was
+	// launched without an interactive terminal. Inheriting TERM=dumb makes
+	// Codex stop at a confirmation prompt instead of opening its TUI.
+	term := strings.TrimSpace(envValue(cmd.Env, "TERM"))
+	if term == "" || strings.EqualFold(term, "dumb") {
+		cmd.Env = setEnvValue(cmd.Env, "TERM", "xterm-256color")
+	}
 	return cmd, nil
 }
 
