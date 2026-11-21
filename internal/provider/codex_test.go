@@ -130,6 +130,34 @@ func TestCodexHealth_WithCodexAuth(t *testing.T) {
 	}
 }
 
+func TestCodexBuildCommandTerminal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		term string
+		want string
+	}{
+		{name: "missing", want: "xterm-256color"},
+		{name: "dumb", term: "dumb", want: "xterm-256color"},
+		{name: "empty", term: " ", want: "xterm-256color"},
+		{name: "interactive", term: "tmux-256color", want: "tmux-256color"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := []string{"CODEX_HOME=" + t.TempDir(), "OPENAI_API_KEY=test-only"}
+			if tc.name != "missing" {
+				env = append(env, "TERM="+tc.term)
+			}
+			p := NewCodexProvider(StdioConfig{ProviderID: "codex", Binary: "/bin/true"})
+			cmd, err := p.BuildCommand(context.Background(), bridge.SessionConfig{Env: env, RepoPath: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := envValue(cmd.Env, "TERM"); got != tc.want {
+				t.Fatalf("TERM=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCodexBuildCommand_WithCodexAuth(t *testing.T) {
 	clearCodexEnv(t)
 	authJSON := lifecycleSeed

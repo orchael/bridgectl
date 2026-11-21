@@ -12,7 +12,7 @@ import (
 func TestCodexObserverPreservesLaunchArguments(t *testing.T) {
 	root := t.TempDir()
 	p := NewCodexAppServerProvider(StdioConfig{ProviderID: "codex", Binary: "/usr/bin/node", ProviderRoot: root, DefaultArgs: []string{"./codex.js", "--model", "test-model", "-c", "features.example=true", "--no-alt-screen"}})
-	app, tui, err := p.launchCommands(context.Background(), bridge.SessionConfig{Env: []string{"HOME=" + root, "OPENAI_API_KEY=test-only"}}, "ws://127.0.0.1:12345")
+	app, tui, err := p.launchCommands(context.Background(), bridge.SessionConfig{Env: []string{"HOME=" + root, "OPENAI_API_KEY=test-only", "TERM=dumb"}}, "ws://127.0.0.1:12345")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,5 +21,11 @@ func TestCodexObserverPreservesLaunchArguments(t *testing.T) {
 	}
 	if want := []string{"/usr/bin/node", filepath.Join(root, "codex.js"), "app-server", "--listen", "ws://127.0.0.1:12345", "-c", "features.example=true"}; !reflect.DeepEqual(app.Args, want) {
 		t.Fatalf("app args=%v, want %v", app.Args, want)
+	}
+	if got := envValue(tui.Env, "TERM"); got != "xterm-256color" {
+		t.Fatalf("TUI TERM=%q, want xterm-256color", got)
+	}
+	if got := envValue(app.Env, "TERM"); got != "xterm-256color" {
+		t.Fatalf("app-server TERM=%q, want xterm-256color", got)
 	}
 }
