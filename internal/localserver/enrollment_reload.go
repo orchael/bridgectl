@@ -164,7 +164,7 @@ func (s *Server) reloadEnrollment(ctx context.Context, reporting *reportingObser
 	if err != nil {
 		return err
 	}
-	control, err := newControlClient(fileCfg.Control, s.stateDir, version, s.logger, s.supervisor, s.rateLimits, s.providerFallbacks)
+	control, err := newControlClient(fileCfg.Control, s.stateDir, version, s.logger, s.supervisor, s.rateLimits, s.providerFallbacks, s.sharedRateLimits)
 	if err != nil {
 		if collector != nil {
 			_ = collector.Close(ctx)

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	bridgev1 "github.com/orchael/bridgectl/gen/bridge/v1"
 	"github.com/orchael/bridgectl/internal/bridgecontrol"
 	"github.com/orchael/bridgectl/internal/server"
 	"google.golang.org/grpc/codes"
@@ -30,7 +31,7 @@ func TestRemoteStartUsesSessionRPCOnIsolatedServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer srv.Stop()
-	start := newRemoteStartFunc(srv.supervisor, testLogger(), "test", server.RateLimitConfig{}, nil)
+	start := newRemoteStartFunc(srv.supervisor, testLogger(), "test", server.RateLimitConfig{}, nil, nil)
 	id := uuid.NewString()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -45,7 +46,7 @@ func TestRemoteStartUsesSessionRPCOnIsolatedServer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	limited := newRemoteStartFunc(srv.supervisor, testLogger(), "test", server.RateLimitConfig{StartSessionPerClientRPS: 0.0001, StartSessionPerClientBurst: 1}, nil)
+	limited := newRemoteStartFunc(srv.supervisor, testLogger(), "test", server.RateLimitConfig{StartSessionPerClientRPS: 0.0001, StartSessionPerClientBurst: 1}, nil, nil)
 	firstUser, secondUser := uuid.NewString(), uuid.NewString()
 	request := bridgecontrol.StartRequest{UserID: firstUser, SessionID: uuid.NewString(), Directory: filepath.Join(home, "missing"), Provider: "testprovider", ProjectID: "project-a"}
 	if code := status.Code(limited(ctx, request)); code != codes.PermissionDenied {
@@ -58,5 +59,15 @@ func TestRemoteStartUsesSessionRPCOnIsolatedServer(t *testing.T) {
 	request.UserID, request.ProjectID = secondUser, "project-a"
 	if code := status.Code(limited(ctx, request)); code != codes.PermissionDenied {
 		t.Fatalf("second user in same project: %s", code)
+	}
+
+	global := server.RateLimitConfig{GlobalRPS: 0.0001, GlobalBurst: 1}
+	shared := server.NewRateLimiters(global)
+	localRPC := server.New(srv.supervisor, nil, testLogger(), global, "", nil, nil, "", "test")
+	localRPC.SetRateLimiters(shared)
+	_, _ = localRPC.StartSession(context.Background(), &bridgev1.StartSessionRequest{})
+	remote := newRemoteStartFunc(srv.supervisor, testLogger(), "test", global, nil, shared)
+	if code := status.Code(remote(ctx, request)); code != codes.ResourceExhausted {
+		t.Fatalf("shared global budget: %s", code)
 	}
 }

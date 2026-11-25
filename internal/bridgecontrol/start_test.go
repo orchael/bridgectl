@@ -145,3 +145,45 @@ func TestStartWorkerDrainsOnCloseWithoutBlockingCommands(t *testing.T) {
 		t.Fatal("worker accepted after close")
 	}
 }
+
+func TestConcurrentStartAndReplayDoNotWaitForSlowStart(t *testing.T) {
+	org, inst := uuid.NewString(), uuid.NewString()
+	entered, release := make(chan struct{}), make(chan struct{})
+	c := New(Config{Credential: "test", CommandPath: t.TempDir(), StartFunc: func(_ context.Context, p StartRequest) error {
+		if p.ProjectID == "slow" {
+			close(entered)
+			<-release
+		}
+		return nil
+	}})
+	c.organizationID, c.installationID = org, inst
+	p := StartRequest{ID: uuid.NewString(), OrganizationID: org, InstallationID: inst, UserID: uuid.NewString(), SessionID: uuid.NewString(), Directory: "/tmp", ProjectID: "slow", Provider: "codex", ExpiresAt: time.Now().Add(15 * time.Second)}
+	done := make(chan CommandResult, 1)
+	go func() { done <- c.executeStart(context.Background(), p) }()
+	<-entered
+	other := p
+	other.ID, other.SessionID, other.ProjectID = uuid.NewString(), uuid.NewString(), "other"
+	otherDone, replayDone := make(chan CommandResult, 1), make(chan CommandResult, 1)
+	go func() { otherDone <- c.executeStart(context.Background(), other) }()
+	go func() { replayDone <- c.executeStart(context.Background(), p) }()
+	select {
+	case result := <-otherDone:
+		if result.Status != "accepted" {
+			t.Fatalf("other: %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unrelated start blocked")
+	}
+	select {
+	case result := <-replayDone:
+		if result.Status != "unknown" {
+			t.Fatalf("replay: %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replay blocked")
+	}
+	close(release)
+	if result := <-done; result.Status != "accepted" {
+		t.Fatalf("slow: %+v", result)
+	}
+}

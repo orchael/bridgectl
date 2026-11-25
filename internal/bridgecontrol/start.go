@@ -32,7 +32,12 @@ type StartRequest struct {
 // start is never replayed automatically, including after a daemon restart.
 func (c *Client) executeStart(ctx context.Context, p StartRequest) CommandResult {
 	c.startMu.Lock()
-	defer c.startMu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			c.startMu.Unlock()
+		}
+	}()
 	result := CommandResult{ID: p.ID, Status: "rejected", Code: "invalid_request"}
 	for _, value := range []string{p.ID, p.OrganizationID, p.InstallationID, p.UserID, p.SessionID} {
 		if _, err := uuid.Parse(value); err != nil {
@@ -94,6 +99,8 @@ func (c *Client) executeStart(ctx context.Context, p StartRequest) CommandResult
 		result.Code = "ledger_unavailable"
 		return result
 	}
+	c.startMu.Unlock()
+	locked = false
 	deadline, cancel := context.WithDeadline(ctx, p.ExpiresAt)
 	if deadline.Err() != nil {
 		err = deadline.Err()
@@ -124,6 +131,8 @@ func (c *Client) executeStart(ctx context.Context, p StartRequest) CommandResult
 		}
 	}
 	record.Result = result
+	c.startMu.Lock()
+	defer c.startMu.Unlock()
 	_ = writeCommandRecord(path, record, false)
 	return result
 }

@@ -61,6 +61,18 @@ type RateLimitConfig struct {
 	SendInputPerSessionBurst   int
 }
 
+// RateLimiters can be shared by multiple transports on the same daemon.
+type RateLimiters struct{ global, start, write *keyedLimiter }
+
+func NewRateLimiters(rl RateLimitConfig) *RateLimiters {
+	return &RateLimiters{newKeyedLimiter(rl.GlobalRPS, rl.GlobalBurst), newKeyedLimiter(rl.StartSessionPerClientRPS, rl.StartSessionPerClientBurst), newKeyedLimiter(rl.SendInputPerSessionRPS, rl.SendInputPerSessionBurst)}
+}
+
+// SetRateLimiters must be called before serving requests.
+func (s *BridgeServer) SetRateLimiters(l *RateLimiters) {
+	s.globalRL, s.startRL, s.writeRL = l.global, l.start, l.write
+}
+
 func New(supervisor *bridge.Supervisor, registry *bridge.Registry, logger *slog.Logger, rl RateLimitConfig, serverInstanceID string, providerFallbacks map[string][]string, jwtVerifier *auth.JWTVerifier, certsDir string, version string) *BridgeServer {
 	if logger == nil {
 		logger = slog.Default()

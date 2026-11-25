@@ -102,6 +102,7 @@ type Supervisor struct {
 
 	mu                 sync.RWMutex
 	sessions           map[string]*managedSession
+	starting           map[string]string
 	done               chan struct{}
 	closeOnce          sync.Once
 	telemetryCloseOnce sync.Once
@@ -160,6 +161,7 @@ func NewSupervisor(registry *Registry, policy Policy, outputBufSize int, idleTim
 		idleTimeout:     idleTimeout,
 		cleanupInterval: 30 * time.Second,
 		sessions:        make(map[string]*managedSession),
+		starting:        make(map[string]string),
 		done:            make(chan struct{}),
 		history:         make(map[string]SessionInfo),
 	}
@@ -456,6 +458,10 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 		s.mu.Unlock()
 		return nil, fmt.Errorf("%w: %q", ErrSessionAlreadyExists, cfg.SessionID)
 	}
+	if _, exists := s.starting[cfg.SessionID]; exists {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("%w: %q", ErrSessionAlreadyExists, cfg.SessionID)
+	}
 	projectCount := 0
 	globalCount := 0
 	for _, ms := range s.sessions {
@@ -466,11 +472,22 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 			}
 		}
 	}
+	for id, project := range s.starting {
+		if _, exists := s.sessions[id]; exists {
+			continue
+		}
+		globalCount++
+		if project == cfg.ProjectID {
+			projectCount++
+		}
+	}
 	if err := s.policy.CheckSessionLimits(projectCount, globalCount); err != nil {
 		s.mu.Unlock()
 		return nil, err
 	}
+	s.starting[cfg.SessionID] = cfg.ProjectID
 	s.mu.Unlock()
+	defer func() { s.mu.Lock(); delete(s.starting, cfg.SessionID); s.mu.Unlock() }()
 
 	if s.repoSetup != nil {
 		env, err := s.repoSetup.Prepare(ctx, cfg.RepoPath, cfg.Env)
