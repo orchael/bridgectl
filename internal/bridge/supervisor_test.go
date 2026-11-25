@@ -361,6 +361,32 @@ func TestSupervisorRepoSetupRunnerFailure(t *testing.T) {
 	}
 }
 
+func TestSupervisorReservesCapacityDuringConcurrentStart(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	policy := DefaultPolicy()
+	policy.MaxGlobal = 1
+	sup := NewSupervisor(NewRegistry(), policy, 1024, time.Minute, WithRepoSetupRunner(setupRunnerFunc(func(context.Context, string, []string) ([]string, error) {
+		close(entered)
+		<-release
+		return nil, errors.New("setup failed")
+	})))
+	defer sup.Close()
+	cfg := SessionConfig{ProjectID: "p", SessionID: "one", RepoPath: t.TempDir()}
+	done := make(chan error, 1)
+	go func() { _, err := sup.Start(context.Background(), cfg); done <- err }()
+	<-entered
+	other := cfg
+	other.SessionID = "two"
+	if _, err := sup.Start(context.Background(), other); !errors.Is(err, ErrSessionLimitReached) {
+		t.Fatalf("concurrent start: %v", err)
+	}
+	if _, err := sup.Start(context.Background(), cfg); !errors.Is(err, ErrSessionAlreadyExists) {
+		t.Fatalf("duplicate start: %v", err)
+	}
+	close(release)
+	<-done
+}
+
 func TestSupervisorStartValidationAndLimits(t *testing.T) {
 	registry := NewRegistry()
 	if err := registry.Register(&testProvider{id: "fake"}); err != nil {

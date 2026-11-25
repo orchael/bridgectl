@@ -102,6 +102,7 @@ type Supervisor struct {
 
 	mu                 sync.RWMutex
 	sessions           map[string]*managedSession
+	starting           map[string]string
 	done               chan struct{}
 	closeOnce          sync.Once
 	telemetryCloseOnce sync.Once
@@ -160,6 +161,7 @@ func NewSupervisor(registry *Registry, policy Policy, outputBufSize int, idleTim
 		idleTimeout:     idleTimeout,
 		cleanupInterval: 30 * time.Second,
 		sessions:        make(map[string]*managedSession),
+		starting:        make(map[string]string),
 		done:            make(chan struct{}),
 		history:         make(map[string]SessionInfo),
 	}
@@ -431,6 +433,9 @@ func trimSetupError(err error) string {
 }
 
 func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if cfg.SessionID == "" {
 		return nil, fmt.Errorf("%w: session_id is required", ErrInvalidArgument)
 	}
@@ -453,6 +458,10 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 		s.mu.Unlock()
 		return nil, fmt.Errorf("%w: %q", ErrSessionAlreadyExists, cfg.SessionID)
 	}
+	if _, exists := s.starting[cfg.SessionID]; exists {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("%w: %q", ErrSessionAlreadyExists, cfg.SessionID)
+	}
 	projectCount := 0
 	globalCount := 0
 	for _, ms := range s.sessions {
@@ -463,11 +472,22 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 			}
 		}
 	}
+	for id, project := range s.starting {
+		if _, exists := s.sessions[id]; exists {
+			continue
+		}
+		globalCount++
+		if project == cfg.ProjectID {
+			projectCount++
+		}
+	}
 	if err := s.policy.CheckSessionLimits(projectCount, globalCount); err != nil {
 		s.mu.Unlock()
 		return nil, err
 	}
+	s.starting[cfg.SessionID] = cfg.ProjectID
 	s.mu.Unlock()
+	defer func() { s.mu.Lock(); delete(s.starting, cfg.SessionID); s.mu.Unlock() }()
 
 	if s.repoSetup != nil {
 		env, err := s.repoSetup.Prepare(ctx, cfg.RepoPath, cfg.Env)
@@ -479,6 +499,9 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 
 	provider, err := s.resolveProvider(ctx, cfg.Options["provider"], cfg.Fallbacks, cfg.Env)
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
@@ -545,6 +568,10 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 		readerDone:   make(chan struct{}),
 	}
 
+	if err := ctx.Err(); err != nil {
+		cancel()
+		return nil, err
+	}
 	if useStreamJSON {
 		setNewProcessGroup(cmd)
 		stdinPipe, err := cmd.StdinPipe()
