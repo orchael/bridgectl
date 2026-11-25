@@ -31,8 +31,8 @@ type StartRequest struct {
 // Persist the claim before starting a process. An interrupted or ambiguous
 // start is never replayed automatically, including after a daemon restart.
 func (c *Client) executeStart(ctx context.Context, p StartRequest) CommandResult {
-	c.commandMu.Lock()
-	defer c.commandMu.Unlock()
+	c.startMu.Lock()
+	defer c.startMu.Unlock()
 	result := CommandResult{ID: p.ID, Status: "rejected", Code: "invalid_request"}
 	for _, value := range []string{p.ID, p.OrganizationID, p.InstallationID, p.UserID, p.SessionID} {
 		if _, err := uuid.Parse(value); err != nil {
@@ -87,12 +87,19 @@ func (c *Client) executeStart(ctx context.Context, p StartRequest) CommandResult
 		return result
 	}
 	record := commandRecord{Fingerprint: fingerprint, Result: CommandResult{ID: p.ID, Status: "unknown", Code: "delivery_unknown"}}
+	if ctx.Err() != nil {
+		return CommandResult{ID: p.ID, Status: "rejected", Code: "server_or_provider_unavailable"}
+	}
 	if writeCommandRecord(path, record, true) != nil {
 		result.Code = "ledger_unavailable"
 		return result
 	}
 	deadline, cancel := context.WithDeadline(ctx, p.ExpiresAt)
-	err = c.cfg.StartFunc(deadline, p)
+	if deadline.Err() != nil {
+		err = deadline.Err()
+	} else {
+		err = c.cfg.StartFunc(deadline, p)
+	}
 	cancel()
 	if err == nil {
 		result.Status = "accepted"
@@ -119,4 +126,27 @@ func (c *Client) executeStart(ctx context.Context, p StartRequest) CommandResult
 	record.Result = result
 	_ = writeCommandRecord(path, record, false)
 	return result
+}
+
+func (c *Client) stopStartWorkers() {
+	c.workerMu.Lock()
+	defer c.workerMu.Unlock()
+	c.workerStopping = true
+	c.workerCancel()
+}
+
+func (c *Client) launchStartWorker(work func(context.Context)) bool {
+	c.workerMu.Lock()
+	defer c.workerMu.Unlock()
+	if c.workerStopping {
+		return false
+	}
+	select {
+	case c.workerSlots <- struct{}{}:
+	default:
+		return false
+	}
+	c.workerWG.Add(1)
+	go func() { defer c.workerWG.Done(); defer func() { <-c.workerSlots }(); work(c.workerCtx) }()
+	return true
 }

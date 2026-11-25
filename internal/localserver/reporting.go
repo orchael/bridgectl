@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
+	jwt "github.com/golang-jwt/jwt/v5"
 	bridgev1 "github.com/orchael/bridgectl/gen/bridge/v1"
 	"github.com/orchael/bridgectl/internal/auth"
 	"github.com/orchael/bridgectl/internal/bridge"
@@ -208,7 +209,7 @@ func newRemoteStartFunc(sup *bridge.Supervisor, logger *slog.Logger, version str
 		if sup == nil {
 			return bridge.ErrSessionNotFound
 		}
-		ctx = auth.ContextWithClaims(ctx, &auth.BridgeClaims{ProjectID: req.ProjectID})
+		ctx = auth.ContextWithClaims(ctx, &auth.BridgeClaims{ProjectID: req.ProjectID, RegisteredClaims: jwt.RegisteredClaims{Subject: req.UserID}})
 		_, err := rpc.StartSession(ctx, &bridgev1.StartSessionRequest{SessionId: req.SessionID, ProjectId: req.ProjectID, RepoPath: req.Directory, Provider: req.Provider})
 		return err
 	}

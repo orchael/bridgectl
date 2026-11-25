@@ -431,6 +431,9 @@ func trimSetupError(err error) string {
 }
 
 func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if cfg.SessionID == "" {
 		return nil, fmt.Errorf("%w: session_id is required", ErrInvalidArgument)
 	}
@@ -479,6 +482,9 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 
 	provider, err := s.resolveProvider(ctx, cfg.Options["provider"], cfg.Fallbacks, cfg.Env)
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
@@ -545,6 +551,10 @@ func (s *Supervisor) Start(ctx context.Context, cfg SessionConfig) (*SessionInfo
 		readerDone:   make(chan struct{}),
 	}
 
+	if err := ctx.Err(); err != nil {
+		cancel()
+		return nil, err
+	}
 	if useStreamJSON {
 		setNewProcessGroup(cmd)
 		stdinPipe, err := cmd.StdinPipe()

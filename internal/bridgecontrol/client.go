@@ -104,7 +104,14 @@ type queuedNotification struct {
 // hot path; the actual network I/O happens on a single background
 // goroutine started by Start.
 type Client struct {
-	commandMu sync.Mutex
+	commandMu      sync.Mutex
+	startMu        sync.Mutex
+	workerMu       sync.Mutex
+	workerWG       sync.WaitGroup
+	workerStopping bool
+	workerCtx      context.Context
+	workerCancel   context.CancelFunc
+	workerSlots    chan struct{}
 	// identityMu guards organizationID/installationID independently of
 	// commandMu: executeCommand holds commandMu for the lifetime of a
 	// dispatched remote action, up to 30s (see command.go). setStatus reads
@@ -172,7 +179,11 @@ func New(cfg Config) *Client {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	workerCtx, workerCancel := context.WithCancel(context.Background())
 	return &Client{
+		workerCtx:        workerCtx,
+		workerCancel:     workerCancel,
+		workerSlots:      make(chan struct{}, 16),
 		cfg:              cfg,
 		revisions:        NewRevisionStore(cfg.RevisionPath),
 		interactions:     NewRevisionStore(interactionRevisionPath(cfg.RevisionPath)),
@@ -266,7 +277,7 @@ func (c *Client) scheduleReconcile() {
 // Close stops the client and waits for its background goroutine to exit, or
 // for ctx to expire. It is safe to call multiple times.
 func (c *Client) Close(ctx context.Context) error {
-	c.closeOnce.Do(func() { close(c.closeCh) })
+	c.closeOnce.Do(func() { c.stopStartWorkers(); close(c.closeCh) })
 	select {
 	case <-c.doneCh:
 		return nil
@@ -277,6 +288,7 @@ func (c *Client) Close(ctx context.Context) error {
 
 func (c *Client) run(ctx context.Context) {
 	defer close(c.doneCh)
+	defer func() { c.stopStartWorkers(); c.workerWG.Wait() }()
 	defer c.setStatus(StateDisconnected, "")
 
 	attempt := 0
@@ -502,7 +514,13 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idleTimeout
 			if json.Unmarshal(env.Payload, &request) != nil {
 				continue
 			}
-			go func() { _ = c.writeEnvelope(ctx, conn, "start_session_result", c.executeStart(ctx, request)) }()
+			if !c.launchStartWorker(func(workerCtx context.Context) {
+				_ = c.writeEnvelope(workerCtx, conn, "start_session_result", c.executeStart(workerCtx, request))
+			}) {
+				// A duplicate of an already-running request may reach this limit;
+				// do not claim a definitive rejection while its outcome is unknown.
+				_ = c.writeEnvelope(ctx, conn, "start_session_result", CommandResult{ID: request.ID, Status: "unknown", Code: "delivery_unknown"})
+			}
 		case "terminal_cancel":
 			var request struct {
 				ID string `json:"request_id"`

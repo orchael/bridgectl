@@ -88,3 +88,60 @@ func TestStartRejectsWrongInstallation(t *testing.T) {
 		t.Fatalf("unexpected result: %+v", got)
 	}
 }
+
+func TestStartWorkerDrainsOnCloseWithoutBlockingCommands(t *testing.T) {
+	org, inst := uuid.NewString(), uuid.NewString()
+	started, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	c := New(Config{Endpoint: "ws://127.0.0.1:1", Credential: "test", CommandPath: t.TempDir(),
+		StartFunc: func(ctx context.Context, _ StartRequest) error {
+			close(started)
+			<-ctx.Done()
+			close(canceled)
+			<-release
+			return ctx.Err()
+		},
+		RespondFunc: func(context.Context, string, string, string) error { return nil },
+	})
+	c.organizationID, c.installationID = org, inst
+	p := StartRequest{ID: uuid.NewString(), OrganizationID: org, InstallationID: inst, UserID: uuid.NewString(), SessionID: uuid.NewString(), Directory: "/tmp", ProjectID: "p", Provider: "codex", ExpiresAt: time.Now().Add(15 * time.Second)}
+	c.Start(context.Background())
+	if !c.launchStartWorker(func(ctx context.Context) { c.executeStart(ctx, p) }) {
+		t.Fatal("worker not launched")
+	}
+	<-started
+	cmd := Command{ID: uuid.NewString(), OrganizationID: org, InstallationID: inst, SessionID: "s", UserID: "u", Action: "respond", PendingRequestID: "p", Text: "answer", ExpiresAt: time.Now().Add(time.Second)}
+	commandDone := make(chan CommandResult, 1)
+	go func() { commandDone <- c.executeCommand(context.Background(), cmd) }()
+	select {
+	case result := <-commandDone:
+		if result.Status != "accepted" {
+			t.Fatalf("command: %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("start blocked unrelated command")
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.Close(context.Background()) }()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("worker not canceled")
+	}
+	select {
+	case <-done:
+		t.Fatal("close returned before worker drained")
+	default:
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("close did not drain")
+	}
+	if c.launchStartWorker(func(context.Context) { t.Error("launched after close") }) {
+		t.Fatal("worker accepted after close")
+	}
+}

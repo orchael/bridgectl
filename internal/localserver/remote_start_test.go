@@ -10,6 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/orchael/bridgectl/internal/bridgecontrol"
 	"github.com/orchael/bridgectl/internal/server"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestRemoteStartUsesSessionRPCOnIsolatedServer(t *testing.T) {
@@ -41,5 +43,20 @@ func TestRemoteStartUsesSessionRPCOnIsolatedServer(t *testing.T) {
 	}
 	if err := srv.supervisor.Stop(id, true); err != nil {
 		t.Fatal(err)
+	}
+
+	limited := newRemoteStartFunc(srv.supervisor, testLogger(), "test", server.RateLimitConfig{StartSessionPerClientRPS: 0.0001, StartSessionPerClientBurst: 1}, nil)
+	firstUser, secondUser := uuid.NewString(), uuid.NewString()
+	request := bridgecontrol.StartRequest{UserID: firstUser, SessionID: uuid.NewString(), Directory: filepath.Join(home, "missing"), Provider: "testprovider", ProjectID: "project-a"}
+	if code := status.Code(limited(ctx, request)); code != codes.PermissionDenied {
+		t.Fatalf("first user: %s", code)
+	}
+	request.ProjectID = "project-b"
+	if code := status.Code(limited(ctx, request)); code != codes.ResourceExhausted {
+		t.Fatalf("same user across projects: %s", code)
+	}
+	request.UserID, request.ProjectID = secondUser, "project-a"
+	if code := status.Code(limited(ctx, request)); code != codes.PermissionDenied {
+		t.Fatalf("second user in same project: %s", code)
 	}
 }
