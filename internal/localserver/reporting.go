@@ -13,6 +13,7 @@ import (
 	"time"
 
 	bridgev1 "github.com/orchael/bridgectl/gen/bridge/v1"
+	"github.com/orchael/bridgectl/internal/auth"
 	"github.com/orchael/bridgectl/internal/bridge"
 	"github.com/orchael/bridgectl/internal/bridgecontrol"
 	"github.com/orchael/bridgectl/internal/config"
@@ -131,7 +132,7 @@ func newTelemetryObserver(telemetryCfg config.TelemetryConfig, stateDir, version
 	return nil, nil
 }
 
-func newControlClient(controlCfg config.ControlConfig, stateDir, version string, logger *slog.Logger, sup *bridge.Supervisor) (*bridgecontrol.Client, error) {
+func newControlClient(controlCfg config.ControlConfig, stateDir, version string, logger *slog.Logger, sup *bridge.Supervisor, limits server.RateLimitConfig, fallbacks map[string][]string) (*bridgecontrol.Client, error) {
 	if controlCfg.Endpoint == "" || controlCfg.CredentialFile == "" {
 		return nil, nil
 	}
@@ -149,6 +150,7 @@ func newControlClient(controlCfg config.ControlConfig, stateDir, version string,
 		return nil, fmt.Errorf("invalid or missing control credential")
 	}
 	return bridgecontrol.New(bridgecontrol.Config{
+		StartFunc:          newRemoteStartFunc(sup, logger, version, limits, fallbacks),
 		TerminalSupervisor: func() *bridge.Supervisor { return sup },
 		CommandPath:        filepath.Join(stateDir, "bridge-control-commands"),
 		ObserveFunc: func(id string, after uint64, events, bytes int) (bridge.ActivityWindow, error) {
@@ -198,4 +200,16 @@ func newControlClient(controlCfg config.ControlConfig, stateDir, version string,
 			return bridgecontrol.ActiveSnapshots(sup.List(""))
 		},
 	}), nil
+}
+
+func newRemoteStartFunc(sup *bridge.Supervisor, logger *slog.Logger, version string, limits server.RateLimitConfig, fallbacks map[string][]string) func(context.Context, bridgecontrol.StartRequest) error {
+	rpc := server.New(sup, nil, logger, limits, "", fallbacks, nil, "", version)
+	return func(ctx context.Context, req bridgecontrol.StartRequest) error {
+		if sup == nil {
+			return bridge.ErrSessionNotFound
+		}
+		ctx = auth.ContextWithClaims(ctx, &auth.BridgeClaims{ProjectID: req.ProjectID})
+		_, err := rpc.StartSession(ctx, &bridgev1.StartSessionRequest{SessionId: req.SessionID, ProjectId: req.ProjectID, RepoPath: req.Directory, Provider: req.Provider})
+		return err
+	}
 }

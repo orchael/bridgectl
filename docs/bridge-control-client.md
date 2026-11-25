@@ -7,7 +7,24 @@ Implements MAR-71 against the merged control-plane contract from Bridge PR #16
 
 Bridge control is optional. bridgectl remains authoritative for local execution and must continue working when Bridge or the network is unavailable. A local Supervisor operation never waits for Bridge acknowledgement.
 
-The control adapter does not send all agent data through Bridge. It synchronizes presence and session lifecycle only. Analytics continues through the durable telemetry collector, over a separate connection, with independent failure modes.
+The control adapter does not send all agent data through Bridge. It synchronizes presence and session lifecycle, and supports authorized, capability-gated session operations including terminal access and session creation. Analytics continues through the durable telemetry collector, over a separate connection, with independent failure modes.
+
+## Remote session creation
+
+An enrolled, running daemon advertises `start_session` over its outbound
+control connection. An authorized Bridge user can select that installation and
+request a provider, project ID, and directory on the daemon's machine. The
+daemon calls its existing StartSession implementation, including configured
+allowed paths, provider fallback and session limits. No incoming port is
+required. Bridge access does not replace the provider's own authentication.
+
+Each request has a unique command ID and session ID. Before starting, the
+daemon stores an HMAC fingerprint and an unknown claim in its private control
+command ledger. Replaying the same command returns the saved outcome without a
+second start, including after a restart. A crash or timeout can leave an unknown
+outcome; inspect the daemon or Bridge session list before starting another.
+The ledger does not contain the directory or provider arguments. A Bridge
+control outage does not stop existing local sessions.
 
 ## Package layout
 
@@ -92,7 +109,7 @@ A `superseded` close (Bridge's generation-fencing evicting an older connection f
 
 ## Deferred
 
-Remote start/stop/input (MAR-66), PTY output streaming, an Answer/Approve command path back to the session, and MCP control are later milestones. Commands must eventually route through existing Supervisor/session APIs rather than duplicate lifecycle logic. On the interaction-state side specifically: Codex `app-server` protocol integration (the real path to authoritative Codex waiting/approval signal), Claude's permission/control-request protocol (for `waiting_for_approval` on `claude-chat`), and OpenCode SSE event mapping (`TODO(#108)`) are all explicitly out of scope for this change — see the "Interaction state (MAR-85)" section above for exactly what's wired today versus what each of those would require.
+Remote start, terminal access and supported Answer/Approve operations use the existing daemon session and supervisor APIs. The control protocol does not expose every bridgectl SDK operation. Provider capabilities continue to determine which structured interaction states and controls are available; see the "Interaction state (MAR-85)" section above.
 
 ## Enrollment activation and Codex resume
 

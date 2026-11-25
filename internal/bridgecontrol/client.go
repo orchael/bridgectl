@@ -41,6 +41,7 @@ var minIdleReadTimeout = 30 * time.Second
 // enrollment has no control endpoint/credential, per the "no Bridge
 // configuration means no control connection is attempted" invariant.
 type Config struct {
+	StartFunc          func(context.Context, StartRequest) error
 	TerminalSupervisor func() *bridge.Supervisor
 	CommandPath        string
 	ObserveFunc        func(string, uint64, int, int) (bridge.ActivityWindow, error)
@@ -496,6 +497,12 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idleTimeout
 			return
 		}
 		switch env.Type {
+		case "start_session":
+			var request StartRequest
+			if json.Unmarshal(env.Payload, &request) != nil {
+				continue
+			}
+			go func() { _ = c.writeEnvelope(ctx, conn, "start_session_result", c.executeStart(ctx, request)) }()
 		case "terminal_cancel":
 			var request struct {
 				ID string `json:"request_id"`
@@ -684,7 +691,7 @@ func (c *Client) sendHello(ctx context.Context, conn *websocket.Conn) error {
 	if len(version) > maxBridgectlVersion {
 		version = version[:maxBridgectlVersion]
 	}
-	caps, _ := json.Marshal(map[string]bool{"terminal_session": c.cfg.TerminalSupervisor != nil, "terminal_stream": c.cfg.TerminalSupervisor != nil, "observe_session": c.cfg.ObserveFunc != nil, "send_instruction": c.cfg.InstructionFunc != nil, "diagnose_session": c.cfg.DiagnoseFunc != nil})
+	caps, _ := json.Marshal(map[string]bool{"terminal_session": c.cfg.TerminalSupervisor != nil, "terminal_stream": c.cfg.TerminalSupervisor != nil, "observe_session": c.cfg.ObserveFunc != nil, "send_instruction": c.cfg.InstructionFunc != nil, "diagnose_session": c.cfg.DiagnoseFunc != nil, "start_session": c.cfg.StartFunc != nil})
 	return c.writeEnvelope(ctx, conn, msgHello, helloPayload{BridgectlVersion: version, Capabilities: caps})
 }
 

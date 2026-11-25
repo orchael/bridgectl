@@ -150,6 +150,7 @@ type Server struct {
 	// providerFallbacks is the resolved fallback map passed to the bridge
 	// server. Nil when the feature flag is disabled.
 	providerFallbacks map[string][]string
+	rateLimits        server.RateLimitConfig
 
 	// Certificate renewal (secure mode only).
 	renewCancel              context.CancelFunc               // cancels the renewal goroutine
@@ -747,7 +748,7 @@ func Start(cfg Config) (*Server, error) {
 	}
 	// Never publish an authoritative snapshot of incomplete recovered state.
 	if historyLoaded {
-		controlClient, err := newControlClient(controlCfg, stateDir, cfg.Version, logger, sup)
+		controlClient, err := newControlClient(controlCfg, stateDir, cfg.Version, logger, sup, cfg.RateLimits, cfg.ProviderFallbacks)
 		if err != nil {
 			logger.Warn("bridge control disabled", "error", err)
 		} else if controlClient != nil {
@@ -965,6 +966,7 @@ func Start(cfg Config) (*Server, error) {
 		logger:            logger,
 		stateDir:          stateDir,
 		providerFallbacks: providerFallbacks,
+		rateLimits:        cfg.RateLimits,
 	}
 
 	// Construct a CertificateProvider from the security config when the
