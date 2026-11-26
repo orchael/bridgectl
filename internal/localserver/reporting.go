@@ -152,6 +152,7 @@ func newControlClient(controlCfg config.ControlConfig, stateDir, version string,
 	}
 	return bridgecontrol.New(bridgecontrol.Config{
 		StartFunc:          newRemoteStartFunc(sup, logger, version, limits, fallbacks, shared),
+		StopFunc:           newRemoteStopFunc(sup, logger, version, limits, fallbacks, shared),
 		TerminalSupervisor: func() *bridge.Supervisor { return sup },
 		CommandPath:        filepath.Join(stateDir, "bridge-control-commands"),
 		ObserveFunc: func(id string, after uint64, events, bytes int) (bridge.ActivityWindow, error) {
@@ -214,6 +215,27 @@ func newRemoteStartFunc(sup *bridge.Supervisor, logger *slog.Logger, version str
 		}
 		ctx = auth.ContextWithClaims(ctx, &auth.BridgeClaims{ProjectID: req.ProjectID, RegisteredClaims: jwt.RegisteredClaims{Subject: req.UserID}})
 		_, err := rpc.StartSession(ctx, &bridgev1.StartSessionRequest{SessionId: req.SessionID, ProjectId: req.ProjectID, RepoPath: req.Directory, Provider: req.Provider})
+		return err
+	}
+}
+
+// newRemoteStopFunc goes through the same local RPC authorization and rate
+// limits as CLI stops. Project scope is derived from the local session.
+func newRemoteStopFunc(sup *bridge.Supervisor, logger *slog.Logger, version string, limits server.RateLimitConfig, fallbacks map[string][]string, shared *server.RateLimiters) func(context.Context, bridgecontrol.StopRequest) error {
+	rpc := server.New(sup, nil, logger, limits, "", fallbacks, nil, "", version)
+	if shared != nil {
+		rpc.SetRateLimiters(shared)
+	}
+	return func(ctx context.Context, req bridgecontrol.StopRequest) error {
+		if sup == nil {
+			return bridge.ErrSessionNotFound
+		}
+		info, err := sup.Get(req.SessionID)
+		if err != nil {
+			return err
+		}
+		ctx = auth.ContextWithClaims(ctx, &auth.BridgeClaims{ProjectID: info.ProjectID, RegisteredClaims: jwt.RegisteredClaims{Subject: req.UserID}})
+		_, err = rpc.StopSession(ctx, &bridgev1.StopSessionRequest{SessionId: req.SessionID})
 		return err
 	}
 }

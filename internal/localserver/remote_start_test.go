@@ -42,8 +42,9 @@ func TestRemoteStartUsesSessionRPCOnIsolatedServer(t *testing.T) {
 	if err != nil || info.SessionID != id {
 		t.Fatalf("session missing: %+v %v", info, err)
 	}
-	if err := srv.supervisor.Stop(id, true); err != nil {
-		t.Fatal(err)
+	stop := newRemoteStopFunc(srv.supervisor, testLogger(), "test", server.RateLimitConfig{}, nil, nil)
+	if err := stop(ctx, bridgecontrol.StopRequest{SessionID: id, UserID: uuid.NewString()}); err != nil {
+		t.Fatalf("remote stop: %v", err)
 	}
 
 	limited := newRemoteStartFunc(srv.supervisor, testLogger(), "test", server.RateLimitConfig{StartSessionPerClientRPS: 0.0001, StartSessionPerClientBurst: 1}, nil, nil)
