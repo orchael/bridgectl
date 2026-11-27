@@ -14,6 +14,7 @@ func TestAttachDisplay(t *testing.T) {
 		name         string
 		tty          bool
 		wantOut      string
+		wantCleanup  string
 		wantImmed    string
 		wantDeferred string
 	}{
@@ -21,6 +22,7 @@ func TestAttachDisplay(t *testing.T) {
 			name:         "terminal resets and defers the notice",
 			tty:          true,
 			wantOut:      attachScreenReset + attachScreenReset,
+			wantCleanup:  disableMouseReporting,
 			wantDeferred: "\r\n" + replayGapNotice + "\r\n",
 		},
 		{
@@ -44,6 +46,11 @@ func TestAttachDisplay(t *testing.T) {
 			}
 			if errOut.String() != tc.wantImmed {
 				t.Fatalf("stderr during session=%q want %q", errOut.String(), tc.wantImmed)
+			}
+			out.Reset()
+			d.stopMouseReporting()
+			if out.String() != tc.wantCleanup {
+				t.Fatalf("stdout during cleanup=%q want %q", out.String(), tc.wantCleanup)
 			}
 			errOut.Reset()
 			d.printDeferredNotices()

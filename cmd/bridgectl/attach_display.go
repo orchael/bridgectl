@@ -13,6 +13,11 @@ import (
 // server's gap checkpoint switches to the session's screen buffer itself.
 const attachScreenReset = "\x1b[!p\x1b[0m\x1b[H\x1b[2J"
 
+// Mouse tracking and coordinate encodings are terminal emulator modes, so
+// restoring the TTY attributes alone leaves them enabled after a detach.
+const disableMouseReporting = "\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l" +
+	"\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l"
+
 const replayGapNotice = "[bridgectl] Earlier session output was no longer available, so the current screen was redrawn."
 
 // attachDisplay owns local terminal resets for the attach and run paths. Text
@@ -49,6 +54,14 @@ func (d *attachDisplay) replayGap(ev *bridgev1.AttachSessionEvent) error {
 		return err
 	}
 	return d.reset()
+}
+
+// stopMouseReporting runs after session output stops and before returning
+// input to the shell.
+func (d *attachDisplay) stopMouseReporting() {
+	if d.tty {
+		_, _ = io.WriteString(d.out, disableMouseReporting)
+	}
 }
 
 // printDeferredNotices reports what happened while the session owned the

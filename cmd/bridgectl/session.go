@@ -430,6 +430,7 @@ func attachSession(sessionID string, role bridgev1.AttachRole, takeOver bool, re
 			return nil
 		}
 	})
+	display.stopMouseReporting()
 	restore()
 	display.printDeferredNotices()
 	if claimErr != nil {

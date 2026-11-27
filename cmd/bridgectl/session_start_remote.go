@@ -160,6 +160,7 @@ func runRemoteSession(dir, providerName, project string, timeout time.Duration, 
 			return nil
 		}
 	})
+	display.stopMouseReporting()
 	restore()
 	display.printDeferredNotices()
 
