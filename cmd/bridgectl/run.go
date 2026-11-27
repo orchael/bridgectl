@@ -228,6 +228,7 @@ func runSession(dir, providerName, project string, timeout time.Duration) error 
 			return nil
 		}
 	})
+	display.stopMouseReporting()
 	restore()
 	display.printDeferredNotices()
 
