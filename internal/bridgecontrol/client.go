@@ -42,6 +42,7 @@ var minIdleReadTimeout = 30 * time.Second
 // configuration means no control connection is attempted" invariant.
 type Config struct {
 	StartFunc          func(context.Context, StartRequest) error
+	StopFunc           func(context.Context, StopRequest) error
 	TerminalSupervisor func() *bridge.Supervisor
 	CommandPath        string
 	ObserveFunc        func(string, uint64, int, int) (bridge.ActivityWindow, error)
@@ -521,6 +522,16 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, idleTimeout
 				// do not claim a definitive rejection while its outcome is unknown.
 				_ = c.writeEnvelope(ctx, conn, "start_session_result", CommandResult{ID: request.ID, Status: "unknown", Code: "delivery_unknown"})
 			}
+		case "stop_session":
+			var request StopRequest
+			if json.Unmarshal(env.Payload, &request) != nil {
+				continue
+			}
+			if !c.launchStartWorker(func(workerCtx context.Context) {
+				_ = c.writeEnvelope(workerCtx, conn, "stop_session_result", c.executeStop(workerCtx, request))
+			}) {
+				_ = c.writeEnvelope(ctx, conn, "stop_session_result", CommandResult{ID: request.ID, Status: "unknown", Code: "delivery_unknown"})
+			}
 		case "terminal_cancel":
 			var request struct {
 				ID string `json:"request_id"`
@@ -709,7 +720,7 @@ func (c *Client) sendHello(ctx context.Context, conn *websocket.Conn) error {
 	if len(version) > maxBridgectlVersion {
 		version = version[:maxBridgectlVersion]
 	}
-	caps, _ := json.Marshal(map[string]bool{"terminal_session": c.cfg.TerminalSupervisor != nil, "terminal_stream": c.cfg.TerminalSupervisor != nil, "observe_session": c.cfg.ObserveFunc != nil, "send_instruction": c.cfg.InstructionFunc != nil, "diagnose_session": c.cfg.DiagnoseFunc != nil, "start_session": c.cfg.StartFunc != nil})
+	caps, _ := json.Marshal(map[string]bool{"terminal_session": c.cfg.TerminalSupervisor != nil, "terminal_stream": c.cfg.TerminalSupervisor != nil, "observe_session": c.cfg.ObserveFunc != nil, "send_instruction": c.cfg.InstructionFunc != nil, "diagnose_session": c.cfg.DiagnoseFunc != nil, "start_session": c.cfg.StartFunc != nil, "stop_session": c.cfg.StopFunc != nil && c.cfg.CommandPath != ""})
 	return c.writeEnvelope(ctx, conn, msgHello, helloPayload{BridgectlVersion: version, Capabilities: caps})
 }
 
